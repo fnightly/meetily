@@ -12,6 +12,7 @@ import { SummaryModelSettings } from '@/components/SummaryModelSettings';
 import { BetaSettings } from '@/components/BetaSettings';
 import { useConfig } from '@/contexts/ConfigContext';
 import { DictionarySettings } from '@/components/DictionarySettings';
+import { SpeakerSeparationSettings } from '@/components/SpeakerSeparationSettings';
 import { useI18n } from '@/contexts/I18nContext';
 import { LOCALES, LOCALE_LABELS, type Locale } from '@/lib/i18n';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
@@ -155,6 +156,11 @@ export default function SettingsPage() {
                 transcriptModelConfig={transcriptModelConfig}
                 setTranscriptModelConfig={setTranscriptModelConfig}
               />
+              {/* Speaker separation belongs with transcription: it annotates the
+                  transcript rather than producing one. */}
+              <div className="mt-8 pt-6 border-t">
+                <SpeakerSeparationSettings />
+              </div>
             </TabsContent>
             <TabsContent value="summaryModels">
               <SummaryModelSettings />

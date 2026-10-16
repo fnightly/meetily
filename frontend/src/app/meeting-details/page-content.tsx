@@ -16,6 +16,8 @@ import {
   exportFileName,
   type ExportScope,
 } from '@/lib/meeting-export';
+import { useI18n } from '@/contexts/I18nContext';
+import { formatSpeakerLabel } from '@/lib/speaker-labels';
 
 /** Shape returned by the `api_get_meeting` command (complete, unpaginated). */
 interface MeetingDetailsResponse {
@@ -97,6 +99,7 @@ export default function PageContent({
   const { modelConfig, setModelConfig, isModelConfigLoading } = useConfig();
 
   // Custom hooks
+  const { t } = useI18n();
   const meetingData = useMeetingData({ meeting, summaryData, onMeetingUpdated });
   const templates = useTemplates();
 
@@ -189,6 +192,8 @@ export default function PageContent({
           },
           summary: meetingData.aiSummary,
           transcripts: details.transcripts,
+          // Written in the interface language, matching what the transcript list shows.
+          speakerLabel: (raw: string) => formatSpeakerLabel(raw, t),
         },
         scope,
       );

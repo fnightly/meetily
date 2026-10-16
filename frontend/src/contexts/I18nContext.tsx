@@ -69,14 +69,22 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
  * Falls back to English outside a provider rather than throwing, so a component
  * can be rendered in isolation (a test, a story) without wiring the provider up.
  */
+/**
+ * Access the interface language.
+ *
+ * Falls back to the default catalogue outside a provider rather than throwing, so a
+ * component can be rendered in isolation (a test, a story) without wiring the provider up.
+ *
+ * The fallback is a module constant so its identity is stable. Built inline it would be a
+ * new object — and a new `t` — on every render, so any component that lists `t` among its
+ * `useCallback` or `useEffect` dependencies would re-run that effect forever.
+ */
+const FALLBACK_I18N: I18nContextValue = {
+  locale: DEFAULT_LOCALE,
+  setLocale: () => undefined,
+  t: (key: string, params?: TranslateParams) => translate(DEFAULT_LOCALE, key, params),
+};
+
 export function useI18n(): I18nContextValue {
-  const context = useContext(I18nContext);
-
-  if (context) return context;
-
-  return {
-    locale: DEFAULT_LOCALE,
-    setLocale: () => undefined,
-    t: (key: string, params?: TranslateParams) => translate(DEFAULT_LOCALE, key, params),
-  };
+  return useContext(I18nContext) ?? FALLBACK_I18N;
 }

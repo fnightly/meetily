@@ -37,6 +37,10 @@ function convertTranscriptsToSegments(transcripts: Transcript[]): TranscriptSegm
         endTime: t.audio_end_time,
         text: t.text,
         confidence: t.confidence,
+        // Carried through so the list can group consecutive turns by speaker. This is the
+        // path the meeting view actually takes: it paginates, so the similar mapping in
+        // TranscriptPanel is bypassed.
+        speaker: t.speaker,
     }));
 }
 

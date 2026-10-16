@@ -158,11 +158,71 @@ pub async fn set_storage_config<R: Runtime>(
 
     save_storage_config(&app, &validated)?;
 
+    // Recording does not read this config: it reads the recording preferences, which hold
+    // their own `save_folder`. Persisting the folder here as well is what makes the panel
+    // true — without it the panel would display a location that recordings never use.
+    //
+    // Written only when the caller supplied a recordings folder, so saving the other three
+    // locations does not overwrite a choice made in the recording settings.
+    // Recording does not read this config: it reads the recording preferences, which hold
+    // their own `save_folder`. Persisting the folder here as well is what makes the panel
+    // true — without it the panel would display a location that recordings never use.
+    //
+    // Written only when the caller supplied a recordings folder, so saving the other three
+    // locations does not overwrite a choice made in the recording settings.
+    //
+    // A failure here is reported, not raised: the three other locations were persisted, and
+    // failing the whole save would leave the interface claiming nothing was saved.
+    if let Some(folder) = non_empty(&validated.recordings_folder) {
+        match sync_recordings_folder(&app, Path::new(folder)).await {
+            Ok(true) => log::info!("Recordings folder changed via storage settings to {folder}"),
+            Ok(false) => {}
+            Err(error) => {
+                log::warn!("Storage locations saved, but the recordings folder was not updated: {error}");
+                let note = format!("The recordings folder could not be updated: {error}.");
+                if outcome.detail.is_empty() {
+                    outcome.detail = note;
+                } else {
+                    outcome.detail.push(' ');
+                    outcome.detail.push_str(&note);
+                }
+            }
+        }
+    }
+
     if outcome.detail.is_empty() {
         outcome.detail = "Storage locations saved.".to_string();
     }
 
     Ok(outcome)
+}
+
+/// Point the recording preferences at `folder`, so recordings actually land there.
+///
+/// Returns whether anything changed. Recording reads its own preferences rather than this
+/// config, so a folder set only here would be displayed but never used.
+///
+/// Kept out of `set_storage_config` so both the outcome and the error can be handled by the
+/// caller, which needs to distinguish "unchanged" from "failed".
+async fn sync_recordings_folder<R: Runtime>(
+    app: &AppHandle<R>,
+    folder: &Path,
+) -> Result<bool, String> {
+    let mut prefs = crate::audio::recording_preferences::load_recording_preferences(app)
+        .await
+        .map_err(|e| format!("could not read the recording preferences: {e}"))?;
+
+    if prefs.save_folder == folder {
+        return Ok(false);
+    }
+
+    prefs.save_folder = folder.to_path_buf();
+
+    crate::audio::recording_preferences::save_recording_preferences(app, &prefs)
+        .await
+        .map_err(|e| format!("could not write the recording preferences: {e}"))?;
+
+    Ok(true)
 }
 
 /// Open a native folder picker and return the chosen path.

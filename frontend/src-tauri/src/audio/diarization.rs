@@ -497,7 +497,6 @@ pub fn weighted_speaker_scores(
         return Vec::new();
     }
 
-    let window_size = meta.window_size;
     let num_frames = num_samples / shift + 1;
 
     let mut totals = vec![0.0f32; num_frames * num_speakers];

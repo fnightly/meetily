@@ -137,6 +137,14 @@ pub struct MeetingTranscript {
     pub audio_end_time: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<f64>,
+    /// Which speaker said this, as `speaker_1`, `speaker_2`, …, or absent when speaker
+    /// separation has not been run.
+    ///
+    /// This DTO is what the paginated transcript list returns, and the meeting view
+    /// paginates — so a label that stops here never reaches the interface, however
+    /// correctly it was stored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
 }
 
 /// Meeting metadata without transcripts (for pagination)
@@ -878,6 +886,7 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
                     audio_start_time: t.audio_start_time,
                     audio_end_time: t.audio_end_time,
                     duration: t.duration,
+                    speaker: t.speaker,
                 })
                 .collect::<Vec<_>>();
 
@@ -1380,5 +1389,82 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
                 Err(format!("Connection failed: {}", e))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod transcript_dto_tests {
+    use super::MeetingTranscript;
+
+    fn dto(speaker: Option<&str>) -> MeetingTranscript {
+        MeetingTranscript {
+            id: "t1".to_string(),
+            text: "hello".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            audio_start_time: Some(1.0),
+            audio_end_time: Some(2.0),
+            duration: Some(1.0),
+            speaker: speaker.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_speaker_label_serialises_for_the_interface() {
+        // The interface reads `speaker` off this JSON. If serde does not emit it, the label
+        // is written to the database, read back correctly, and then dropped here — which is
+        // invisible everywhere except in the running interface.
+        let json = serde_json::to_string(&dto(Some("speaker_1"))).expect("serialise");
+
+        assert!(
+            json.contains("\"speaker\":\"speaker_1\""),
+            "the label must reach the interface, got: {json}"
+        );
+    }
+
+    #[test]
+    fn an_absent_label_is_omitted_rather_than_null() {
+        // The interface type declares `speaker?: string | null`, so either would work, but
+        // omitting keeps the payload free of fields that are absent for every meeting until
+        // separation has been run.
+        let json = serde_json::to_string(&dto(None)).expect("serialise");
+
+        assert!(!json.contains("speaker"), "an absent label must be omitted: {json}");
+    }
+
+    #[test]
+    fn json_without_a_speaker_still_deserialises() {
+        // Rows written before separation, and any cached payload, have no such field.
+        let json = r#"{
+            "id": "t1",
+            "text": "hello",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "audio_start_time": 1.0,
+            "audio_end_time": 2.0,
+            "duration": 1.0
+        }"#;
+
+        let parsed: MeetingTranscript = serde_json::from_str(json).expect("deserialise");
+        assert_eq!(parsed.speaker, None);
+        assert_eq!(parsed.text, "hello");
+    }
+
+    #[test]
+    fn a_speaker_label_survives_a_round_trip() {
+        let json = serde_json::to_string(&dto(Some("speaker_12"))).expect("serialise");
+        let parsed: MeetingTranscript = serde_json::from_str(&json).expect("deserialise");
+
+        assert_eq!(parsed.speaker.as_deref(), Some("speaker_12"));
+    }
+
+    #[test]
+    fn the_other_timing_fields_are_still_serialised() {
+        // Guard against a change to this struct silently dropping the timings that audio
+        // playback sync depends on.
+        let json = serde_json::to_string(&dto(Some("speaker_1"))).expect("serialise");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
+
+        assert_eq!(parsed["audio_start_time"], 1.0);
+        assert_eq!(parsed["audio_end_time"], 2.0);
+        assert_eq!(parsed["duration"], 1.0);
     }
 }

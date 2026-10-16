@@ -155,4 +155,46 @@ describe('paginated transcript request ownership', () => {
     await resolve(stale, metadata('A'));
     expect(requests).toHaveLength(1);
   });
+
+  test('a speaker label reaches the segments the list renders', async () => {
+    // The meeting view paginates, so it renders these segments rather than mapping the
+    // transcripts itself. A label that stops at this conversion is stored correctly and
+    // then never displayed.
+    await show('A');
+    await resolve(request('metadata', 'A'), metadata('A'));
+    await resolve(request('transcripts', 'A'), {
+      transcripts: [
+        { id: 'a', text: 'first', timestamp: '00:00', audio_start_time: 0, speaker: 'speaker_1' },
+        { id: 'b', text: 'second', timestamp: '00:05', audio_start_time: 5, speaker: 'speaker_2' },
+      ],
+      total_count: 2,
+      has_more: false,
+    });
+
+    expect(state.segments?.map(segment => segment.speaker)).toEqual(['speaker_1', 'speaker_2']);
+  });
+
+  test('transcripts without a speaker leave the field absent rather than guessed', async () => {
+    // Separation has not been run for most meetings, and a default would label everyone
+    // as the first speaker.
+    await show('A');
+    await resolve(request('metadata', 'A'), metadata('A'));
+    await resolve(request('transcripts', 'A'), page('unseparated'));
+
+    expect(state.segments?.[0].speaker).toBeUndefined();
+  });
+
+  test('a speaker label survives loading more segments', async () => {
+    // The second page is appended to the first, so a field dropped on the append path
+    // would make labels disappear as the user scrolls.
+    await load('A', true);
+    await act(async () => { void state.loadMore(); });
+    await resolve(request('transcripts', 'A', 1), {
+      transcripts: [{ id: 'more', text: 'more', timestamp: '00:10', audio_start_time: 10, speaker: 'speaker_3' }],
+      total_count: 2,
+      has_more: false,
+    });
+
+    expect(state.segments?.map(segment => segment.speaker)).toEqual([undefined, 'speaker_3']);
+  });
 });

@@ -906,6 +906,16 @@ pub fn run() {
             dictionary::set_dictionary,
             // Transcript cleanup. Local models only: it sends the whole transcript.
             summary::cleanup_commands::cleanup_transcript,
+            // Speaker separation models, fetched on demand rather than bundled.
+            audio::diarization_commands::get_diarization_preferences,
+            audio::diarization_commands::set_diarization_preferences,
+            audio::diarization_commands::reset_diarization_preferences,
+            audio::diarization_commands::get_diarization_model_status,
+            audio::diarization_commands::download_diarization_models,
+            audio::diarization_commands::get_diarization_models_folder,
+            // Runs separation over a finished recording and writes the speaker labels.
+            audio::diarization_commands::diarize_meeting,
+            audio::diarization_commands::open_diarization_models_folder,
             whisper_engine::commands::open_models_folder,
             // Onboarding commands
             onboarding::get_onboarding_status,

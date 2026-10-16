@@ -123,6 +123,55 @@ describe('transcriptToMarkdown', () => {
     expect(transcriptToMarkdown([])).toBe('');
     expect(transcriptToMarkdown(undefined)).toBe('');
   });
+
+  test('a speaker is written into the transcript', () => {
+    // Without this the exported file loses who said what, even though the interface showed
+    // it — the export is the artefact people keep and share.
+    const md = transcriptToMarkdown([
+      { text: 'hello', audio_start_time: 5, speaker: 'speaker_1' },
+    ]);
+
+    expect(md).toBe('**00:05 · speaker_1** hello');
+  });
+
+  test('a caller-supplied formatter turns the stored label into words', () => {
+    const md = transcriptToMarkdown(
+      [{ text: 'hello', audio_start_time: 5, speaker: 'speaker_2' }],
+      (raw) => raw.replace('speaker_', '说话人 '),
+    );
+
+    expect(md).toBe('**00:05 · 说话人 2** hello');
+  });
+
+  test('the speaker is repeated on every line rather than grouped', () => {
+    // A document gets quoted and reordered; a label that depended on the line above it
+    // would not survive that, unlike in the list where grouping is a reading aid.
+    const md = transcriptToMarkdown([
+      { text: 'first', audio_start_time: 1, speaker: 'speaker_1' },
+      { text: 'second', audio_start_time: 2, speaker: 'speaker_1' },
+    ]);
+
+    expect(md.split('speaker_1').length - 1).toBe(2);
+  });
+
+  test('a segment without a speaker keeps the original shape', () => {
+    // Meetings that were never separated must export exactly as before.
+    const md = transcriptToMarkdown([{ text: 'hello', audio_start_time: 5 }]);
+
+    expect(md).toBe('**00:05** hello');
+  });
+
+  test('a speaker on a segment with no timestamp still appears', () => {
+    const md = transcriptToMarkdown([{ text: 'hello', speaker: 'speaker_3' }]);
+
+    expect(md).toBe('**speaker_3** hello');
+  });
+
+  test('an unparseable speaker is written verbatim rather than dropped', () => {
+    const md = transcriptToMarkdown([{ text: 'hello', audio_start_time: 5, speaker: 'Unknown' }]);
+
+    expect(md).toContain('Unknown');
+  });
 });
 
 describe('buildMeetingMarkdown', () => {

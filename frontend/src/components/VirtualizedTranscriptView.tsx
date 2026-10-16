@@ -9,6 +9,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
+import { useI18n } from "@/contexts/I18nContext";
+import { formatSpeakerLabel } from "@/lib/speaker-labels";
 
 export interface VirtualizedTranscriptViewProps {
     /** Transcript segments to display */
@@ -69,6 +71,8 @@ const TranscriptSegment = memo(function TranscriptSegment({
     timestamp,
     text,
     confidence,
+    speaker,
+    showSpeaker,
     isStreaming,
     showConfidence,
 }: {
@@ -76,13 +80,35 @@ const TranscriptSegment = memo(function TranscriptSegment({
     timestamp: number;
     text: string;
     confidence?: number;
+    /** Speaker label, or null when the meeting has not been separated. */
+    speaker?: string | null;
+    /**
+     * Whether to render the speaker label on this row.
+     *
+     * Set only on the first row of a run so consecutive turns by one person read as a
+     * block rather than repeating the name on every line. Computed by the parent because
+     * a virtualized row must not depend on its neighbours to decide its own height.
+     */
+    showSpeaker: boolean;
     isStreaming: boolean;
     showConfidence: boolean;
 }) {
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
 
+    // Called here rather than passed down so the memo boundary still holds: only the
+    // props that affect this row's markup cause a re-render.
+    const { t } = useI18n();
+    const speakerLabelText = speaker ? formatSpeakerLabel(speaker, t) : null;
+
     return (
-        <div id={`segment-${id}`} className="mb-3">
+        <div id={`segment-${id}`} className={showSpeaker ? 'mb-3 mt-4' : 'mb-3'}>
+            {showSpeaker && speakerLabelText && (
+                <div className="mb-1 ml-[58px]">
+                    <span className="inline-block rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-700">
+                        {speakerLabelText}
+                    </span>
+                </div>
+            )}
             <div className="flex items-start gap-2">
                 <Tooltip>
                     <TooltipTrigger>
@@ -294,6 +320,13 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         timestamp={segment.timestamp}
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
+                                        speaker={segment.speaker}
+                                        // Show the label only when the speaker changes, so a run
+                                        // of one person's speech reads as a block.
+                                        showSpeaker={
+                                            !!segment.speaker &&
+                                            segment.speaker !== segments[virtualRow.index - 1]?.speaker
+                                        }
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
                                     />
@@ -335,7 +368,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                 // Simple rendering for small lists (better animations)
                 <>
                     <div className="space-y-1">
-                        {segments.map((segment) => {
+                        {segments.map((segment, index) => {
                             const isStreaming = streamingSegmentId === segment.id;
 
                             return (
@@ -350,6 +383,13 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         timestamp={segment.timestamp}
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
+                                        speaker={segment.speaker}
+                                        // Same rule as the virtualized path: label only when
+                                        // the speaker changes.
+                                        showSpeaker={
+                                            !!segment.speaker &&
+                                            segment.speaker !== segments[index - 1]?.speaker
+                                        }
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
                                     />

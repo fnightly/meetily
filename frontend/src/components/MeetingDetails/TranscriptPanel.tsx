@@ -67,6 +67,8 @@ export function TranscriptPanel({
       endTime: t.audio_end_time,
       text: t.text,
       confidence: t.confidence,
+      // Carried through so the list can group consecutive turns by speaker.
+      speaker: t.speaker,
     }));
   }, [transcripts, usePagination, segments]);
 

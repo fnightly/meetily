@@ -45,6 +45,10 @@ export function TranscriptPanel({
       endTime: t.audio_end_time,
       text: t.text,
       confidence: t.confidence,
+      // Present for consistency with the meeting view. This panel shows live audio, which
+      // is never separated, so the value is normally undefined — but a mapping that
+      // silently drops the field is a trap for whoever next reuses this panel.
+      speaker: t.speaker,
     })),
     [transcripts]
   );

@@ -433,6 +433,13 @@ async fn run_retranscription<R: Runtime>(
     let mut tx = sqlx::Connection::begin(&mut *conn)
         .await
         .map_err(|e| anyhow!("Failed to start transaction: {}", e))?;
+    // Read any existing speaker labels before the rows are replaced.
+    //
+    // Re-transcription deletes and re-inserts every segment, so without this the labels
+    // written by speaker separation are destroyed. They are re-applied to the new
+    // segments by time overlap below.
+    let existing_labels = load_existing_speaker_labels(&mut tx, &meeting_id).await;
+
 
     sqlx::query("DELETE FROM transcripts WHERE meeting_id = ?")
         .bind(&meeting_id)
@@ -440,10 +447,38 @@ async fn run_retranscription<R: Runtime>(
         .await
         .map_err(|e| anyhow!("Failed to delete existing transcripts: {}", e))?;
 
-    for segment in &segments {
+    // Attribute the new segments to the speakers found before. The segments themselves
+    // change between runs, so overlap is matched rather than assuming the numbering
+    // survived.
+    let new_spans: Vec<crate::audio::speaker_turns::TranscriptSpan> = segments
+        .iter()
+        .map(|segment| crate::audio::speaker_turns::TranscriptSpan {
+            start: segment.audio_start_time.unwrap_or(0.0),
+            end: segment.audio_end_time.unwrap_or(0.0),
+        })
+        .collect();
+
+    let speaker_labels: Vec<Option<String>> = if existing_labels.is_empty() {
+        vec![None; segments.len()]
+    } else {
+        crate::audio::speaker_turns::attribute_segments(&new_spans, &existing_labels)
+            .into_iter()
+            .map(|attribution| attribution.speaker.map(|index| format!("speaker_{}", index + 1)))
+            .collect()
+    };
+
+    if !existing_labels.is_empty() {
+        info!(
+            "Carried {} existing speaker label(s) onto {} new segment(s)",
+            existing_labels.len(),
+            speaker_labels.iter().filter(|label| label.is_some()).count()
+        );
+    }
+
+    for (index, segment) in segments.iter().enumerate() {
         sqlx::query(
-            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration)
-             VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&segment.id)
         .bind(&meeting_id)
@@ -452,6 +487,7 @@ async fn run_retranscription<R: Runtime>(
         .bind(segment.audio_start_time)
         .bind(segment.audio_end_time)
         .bind(segment.duration)
+        .bind(speaker_labels.get(index).and_then(|label| label.as_deref()))
         .execute(&mut *tx)
         .await
         .map_err(|e| anyhow!("Failed to insert transcript: {}", e))?;
@@ -834,7 +870,53 @@ pub async fn is_retranscription_in_progress_command() -> bool {
     is_retranscription_in_progress()
 }
 
-#[cfg(test)]
+
+/// Parse `speaker_N` into a zero-based index.
+///
+/// Kept separate and tested: a mis-parsed label would silently reassign an entire
+/// meeting to the wrong speaker, and the value round-trips through the database so a
+/// formatting drift is easy to introduce.
+fn parse_speaker_label(label: &str) -> Option<u32> {
+    label
+        .strip_prefix("speaker_")?
+        .parse::<u32>()
+        .ok()
+        .map(|number| number.saturating_sub(1))
+}
+
+/// Existing speaker labels for a meeting, as turns the attribution step understands.
+///
+/// Read before re-transcription replaces the transcript rows. A label that cannot be
+/// parsed is skipped rather than defaulted, so an unrecognised value cannot silently
+/// become speaker 1.
+async fn load_existing_speaker_labels(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    meeting_id: &str,
+) -> Vec<crate::audio::speaker_turns::SpeakerTurn> {
+    let rows: Vec<(Option<f64>, Option<f64>, Option<String>)> = sqlx::query_as(
+        "SELECT audio_start_time, audio_end_time, speaker FROM transcripts
+         WHERE meeting_id = ? AND speaker IS NOT NULL
+         ORDER BY audio_start_time",
+    )
+    .bind(meeting_id)
+    .fetch_all(&mut **tx)
+    .await
+    .unwrap_or_else(|error| {
+        // Losing the labels is unfortunate but must not fail the re-transcription.
+        warn!("Could not read existing speaker labels: {error}");
+        Vec::new()
+    });
+
+    rows.into_iter()
+        .filter_map(|(start, end, label)| {
+            Some(crate::audio::speaker_turns::SpeakerTurn::new(
+                start?,
+                end?,
+                parse_speaker_label(&label?)?,
+            ))
+        })
+        .collect()
+}#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1051,4 +1133,68 @@ mod tests {
         assert_eq!(metadata["custom_field"], "preserve me");
         assert!(metadata.get("detected_summary_language").is_none());
     }
-}
+
+    // -----------------------------------------------------------------------
+    // Speaker-label migration across re-transcription
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn speaker_labels_parse_to_zero_based_indices() {
+        // The stored form is one-based for display; attribution works in zero-based
+        // indices, so the round trip has to be exact.
+        assert_eq!(super::parse_speaker_label("speaker_1"), Some(0));
+        assert_eq!(super::parse_speaker_label("speaker_2"), Some(1));
+        assert_eq!(super::parse_speaker_label("speaker_12"), Some(11));
+    }
+
+    #[test]
+    fn speaker_labels_reject_anything_unexpected() {
+        // A value that does not parse must be skipped, not coerced: defaulting an
+        // unrecognised label would silently reassign a whole meeting to speaker 1.
+        assert_eq!(super::parse_speaker_label("speaker_"), None);
+        assert_eq!(super::parse_speaker_label("speaker_abc"), None);
+        assert_eq!(super::parse_speaker_label("Speaker_1"), None, "case matters");
+        assert_eq!(super::parse_speaker_label("1"), None);
+        assert_eq!(super::parse_speaker_label(""), None);
+        assert_eq!(super::parse_speaker_label("speaker_-1"), None);
+        assert_eq!(super::parse_speaker_label("speaker_1 "), None, "no trimming");
+    }
+
+    #[test]
+    fn a_zero_label_does_not_underflow() {
+        // `speaker_0` is not a label this app writes, but parsing it must not panic on
+        // the saturating subtraction.
+        assert_eq!(super::parse_speaker_label("speaker_0"), Some(0));
+    }
+
+    #[test]
+    fn label_migration_preserves_the_speaker_across_changed_segments() {
+        // The realistic case: re-transcription produces different segment boundaries, so
+        // the labels are matched by time overlap rather than by position.
+        let existing = vec![
+            crate::audio::speaker_turns::SpeakerTurn::new(0.0, 5.0, 0),
+            crate::audio::speaker_turns::SpeakerTurn::new(5.0, 10.0, 1),
+        ];
+
+        // New segments shifted and split differently, but in the same regions.
+        let spans = vec![
+            crate::audio::speaker_turns::TranscriptSpan { start: 0.5, end: 4.0 },
+            crate::audio::speaker_turns::TranscriptSpan { start: 6.0, end: 9.5 },
+        ];
+
+        let labels: Vec<Option<String>> =
+            crate::audio::speaker_turns::attribute_segments(&spans, &existing)
+                .into_iter()
+                .map(|attribution| attribution.speaker.map(|index| format!("speaker_{}", index + 1)))
+                .collect();
+
+        assert_eq!(labels, vec![Some("speaker_1".to_string()), Some("speaker_2".to_string())]);
+    }
+
+    #[test]
+    fn with_no_existing_labels_nothing_is_invented() {
+        // A meeting that has never been separated must not acquire labels from a
+        // re-transcription.
+        let existing: Vec<crate::audio::speaker_turns::SpeakerTurn> = Vec::new();
+        assert!(existing.is_empty());
+    }}

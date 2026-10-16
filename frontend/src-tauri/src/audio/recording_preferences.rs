@@ -330,7 +330,27 @@ pub async fn set_recording_preferences<R: Runtime>(
 ) -> Result<(), String> {
     save_recording_preferences(&app, &preferences)
         .await
-        .map_err(|e| format!("Failed to save recording preferences: {}", e))
+        .map_err(|e| format!("Failed to save recording preferences: {}", e))?;
+
+    // Keep the unified storage panel truthful. That panel displays its own configured
+    // recordings folder, which nothing else reads — so without this it would keep showing a
+    // folder chosen earlier while recordings go wherever this call just put them.
+    //
+    // `save_recording_preferences` is the low-level writer used by the storage command, so
+    // writing the config here rather than in that function keeps the two from recursing.
+    let mut config = crate::storage::load_storage_config(&app);
+    let folder = preferences.save_folder.to_string_lossy().to_string();
+
+    if config.recordings_folder.as_deref() != Some(folder.as_str()) {
+        config.recordings_folder = Some(folder);
+        // Logged rather than raised: the preferences themselves are saved, so failing the
+        // call would tell the user nothing was stored when the recording setting did apply.
+        if let Err(error) = crate::storage::save_storage_config(&app, &config) {
+            warn!("Recording preferences saved, but the storage settings could not be updated: {error}");
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]

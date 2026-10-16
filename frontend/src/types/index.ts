@@ -16,6 +16,11 @@ export interface Transcript {
   audio_start_time?: number; // Seconds from recording start (e.g., 125.3)
   audio_end_time?: number;   // Seconds from recording start (e.g., 128.6)
   duration?: number;          // Segment duration in seconds (e.g., 3.3)
+  /**
+   * Which speaker said this, as `speaker_1`, `speaker_2`, … — absent until speaker
+   * separation has been run for the meeting.
+   */
+  speaker?: string | null;
 }
 
 export interface TranscriptUpdate {
@@ -146,4 +151,9 @@ export interface TranscriptSegmentData {
   endTime?: number; // audio_end_time in seconds
   text: string;
   confidence?: number;
+  /**
+   * Which speaker said this, as `speaker_1`, `speaker_2`, … — absent until speaker
+   * separation has been run for the meeting.
+   */
+  speaker?: string | null;
 }

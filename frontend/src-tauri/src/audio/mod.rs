@@ -2,7 +2,11 @@
 pub mod audio_processing;
 pub mod decoder;
 pub mod diarization;
+pub mod diarization_catalog;
+pub mod diarization_commands;
 pub mod diarization_models;
+pub mod diarization_preferences;
+pub mod diarization_service;
 #[cfg(test)]
 pub mod diarization_e2e;
 #[cfg(test)]

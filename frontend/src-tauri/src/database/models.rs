@@ -35,6 +35,13 @@ pub struct Transcript {
     pub audio_start_time: Option<f64>,
     pub audio_end_time: Option<f64>,
     pub duration: Option<f64>,
+    /// Which speaker said this, as `speaker_1`, `speaker_2`, … or `None` when speaker
+    /// separation has not been run.
+    ///
+    /// The read path uses `SELECT *`, so a column that exists in the table reaches the
+    /// interface only if it also appears here. Without this field the labels written by
+    /// separation were stored and then silently dropped on the way out.
+    pub speaker: Option<String>,
 }
 
 /// One captured recording in the recording history.

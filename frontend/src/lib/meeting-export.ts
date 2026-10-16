@@ -22,6 +22,8 @@ export interface ExportSegment {
   sequence_id?: number;
   audio_start_time?: number;
   audio_end_time?: number;
+  /** Stored speaker label, as `speaker_1`; absent until separation has been run. */
+  speaker?: string | null;
 }
 
 export interface MeetingExportInput {
@@ -29,6 +31,13 @@ export interface MeetingExportInput {
     Partial<Pick<MeetingMetadata, 'updated_at' | 'folder_path'>>;
   summary?: MeetingSummary | null;
   transcripts?: ExportSegment[];
+  /**
+   * Turns a stored `speaker_N` into display text for the transcript.
+   *
+   * Passed in rather than imported so this module stays free of the interface language, and
+   * so the label in the file matches the one on screen. Omitted, the stored form is used.
+   */
+  speakerLabel?: (raw: string) => string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -209,7 +218,12 @@ export function summaryToMarkdown(summary: MeetingSummary | null | undefined): s
 }
 
 /** Group transcript segments into a readable markdown transcript. */
-export function transcriptToMarkdown(transcripts: ExportSegment[] | undefined): string {
+export function transcriptToMarkdown(
+  transcripts: ExportSegment[] | undefined,
+  // Turns a stored `speaker_N` into display text. Defaults to the stored form, which keeps
+  // this function free of the interface language.
+  speakerLabel?: (raw: string) => string,
+): string {
   if (!transcripts || transcripts.length === 0) return '';
 
   const ordered = [...transcripts].sort((a, b) => {
@@ -224,7 +238,17 @@ export function transcriptToMarkdown(transcripts: ExportSegment[] | undefined): 
       const text = (segment.text ?? '').trim();
       if (!text) return '';
       const stamp = segmentTimestamp(segment);
-      return stamp ? `**${stamp}** ${text}` : text;
+
+      // The speaker is written on every line rather than only where it changes. A document
+      // is quoted, searched and reordered, and a label that depended on the line above it
+      // would not survive that — unlike the list, where the grouping is a reading aid.
+      const who = segment.speaker
+        ? (speakerLabel ?? ((raw: string) => raw))(segment.speaker)
+        : '';
+
+      const heading = [stamp, who].filter(Boolean).join(' · ');
+
+      return heading ? `**${heading}** ${text}` : text;
     })
     .filter(Boolean)
     .join('\n\n');
@@ -239,7 +263,7 @@ export type ExportScope = 'summary' | 'transcript' | 'both';
  * entirely rather than left as empty headings.
  */
 export function buildMeetingMarkdown(
-  { meeting, summary, transcripts }: MeetingExportInput,
+  { meeting, summary, transcripts, speakerLabel }: MeetingExportInput,
   scope: ExportScope = 'both',
 ): string {
   const title = meeting.title?.trim() || 'Untitled Meeting';
@@ -267,7 +291,7 @@ export function buildMeetingMarkdown(
   }
 
   if (scope === 'transcript' || scope === 'both') {
-    const transcriptMd = transcriptToMarkdown(transcripts);
+    const transcriptMd = transcriptToMarkdown(transcripts, speakerLabel);
     parts.push('## Transcript\n');
     parts.push(
       transcriptMd ? transcriptMd + '\n' : '_No transcript is available for this meeting._\n',

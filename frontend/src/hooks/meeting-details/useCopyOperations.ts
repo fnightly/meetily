@@ -5,6 +5,8 @@ import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { hasVisibleSummaryContent } from '@/lib/summary-content';
+import { useI18n } from '@/contexts/I18nContext';
+import { formatSpeakerLabel } from '@/lib/speaker-labels';
 
 interface UseCopyOperationsProps {
   meeting: any;
@@ -21,6 +23,8 @@ export function useCopyOperations({
   aiSummary,
   blockNoteSummaryRef,
 }: UseCopyOperationsProps) {
+  // Named apart from the transcript variable `t` used in the mapping below.
+  const { t: t18n } = useI18n();
 
   // Helper function to fetch ALL transcripts for copying (not just paginated data)
   const fetchAllTranscripts = useCallback(async (meetingId: string): Promise<Transcript[]> => {
@@ -87,7 +91,13 @@ export function useCopyOperations({
     const header = `# Transcript of the Meeting: ${meeting.id} - ${meetingTitle ?? meeting.title}\n\n`;
     const date = `## Date: ${new Date(meeting.created_at).toLocaleDateString()}\n\n`;
     const fullTranscript = allTranscripts
-      .map(t => `${formatTime(t.audio_start_time, t.timestamp)} ${t.text}  `)
+      .map(t => {
+        // The speaker is written on every line, for the same reason as the exported
+        // document: pasted text is quoted and reordered, so a label that depended on the
+        // line above it would be lost.
+        const who = t.speaker ? `${formatSpeakerLabel(t.speaker, t18n)} ` : '';
+        return `${who}${formatTime(t.audio_start_time, t.timestamp)} ${t.text}  `;
+      })
       .join('\n');
 
     await navigator.clipboard.writeText(header + date + fullTranscript);
