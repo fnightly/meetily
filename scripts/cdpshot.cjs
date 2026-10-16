@@ -81,7 +81,8 @@ window.__TAURI_INTERNALS__ = {
     // Commands whose result is walked as a collection. Returning null for these makes the
     // application's own guards untested and its render tree collapse, which would say
     // nothing about the interface.
-    if (/^(get_ollama_models|api_get_dictionary|get_summary_templates|list_)/.test(cmd)) return [];
+    if (cmd.indexOf('list') !== -1 || cmd.indexOf('templates') !== -1) return [];
+    if (/^(get_ollama_models|api_get_dictionary)/.test(cmd)) return [];
 
     const table = {
       api_get_meeting_transcripts: function () {
@@ -89,7 +90,15 @@ window.__TAURI_INTERNALS__ = {
       },
       api_get_meeting: function () { return M; },
       api_get_meeting_metadata: function () {
-        return { id: M.id, title: M.title, created_at: M.created_at, updated_at: M.updated_at };
+        // folder_path matters: the meeting view reads it to decide whether the
+        // folder-bound actions (identify speakers, re-transcribe) can be offered.
+        return {
+          id: M.id,
+          title: M.title,
+          created_at: M.created_at,
+          updated_at: M.updated_at,
+          folder_path: M.folder_path,
+        };
       },
       api_get_meetings: function () { return [M]; },
       get_diarization_model_status: function () {
@@ -117,6 +126,25 @@ window.__TAURI_INTERNALS__ = {
       api_get_transcript_config: function () {
         return { provider: 'localWhisper', model: 'tiny', language: 'zh' };
       },
+      api_list_speech_providers: function () {
+        return [
+          {
+            id: 'localWhisper', display_name: 'Whisper (本地)', kind: 'local', status: 'available',
+            supported_languages: null, requires_api_key: false, has_api_key: false,
+            models: ['tiny', 'base', 'small'], notes: '', api_key_url: null, selectable: true,
+          },
+          {
+            id: 'parakeet', display_name: 'Parakeet', kind: 'local', status: 'available',
+            supported_languages: ['en'], requires_api_key: false, has_api_key: false,
+            models: ['parakeet-tdt-0.6b-v2'], notes: '', api_key_url: null, selectable: true,
+          },
+        ];
+      },
+      api_get_active_speech_settings: function () {
+        return { provider: 'localWhisper', model: 'tiny', language: 'zh', has_api_key: false };
+      },
+      api_get_provider_languages: function () { return null; },
+      api_validate_speech_selection: function () { return { valid: true, message: null }; },
       api_get_model_config: function () {
         return { provider: 'builtin-ai', model: 'qwen3.5:4b', whisperModel: 'tiny' };
       },
@@ -202,6 +230,15 @@ window.__TAURI_INTERNALS__ = {
 
   // Must run before the app's bundle, so the stub is in place when React mounts.
   await send('Page.addScriptToEvaluateOnNewDocument', { source: STUB });
+
+  // Several panels are taller than the default viewport; a full-height capture is the
+  // difference between seeing a section and seeing only its heading.
+  await send('Emulation.setDeviceMetricsOverride', {
+    width: 1280,
+    height: Number(process.argv[6] || 2600),
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
 
   await send('Page.navigate', { url });
   await new Promise((resolve) => setTimeout(resolve, Number(settleMs)));
