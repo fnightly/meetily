@@ -90,6 +90,17 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     try {
       const backendState = await recordingService.getRecordingState();
 
+      // Checked before it reaches the updater, not inside it. The updater runs during
+      // React's render phase, where a throw escapes this `try` and becomes an unhandled
+      // runtime error that takes the whole tree down — so the catch below only protects the
+      // await, not the field reads.
+      if (!backendState) {
+        console.warn(
+          '[RecordingStateContext] Backend returned no recording state; keeping the current one',
+        );
+        return;
+      }
+
       setState(prev => ({
         ...prev,
         isRecording: backendState.is_recording,
