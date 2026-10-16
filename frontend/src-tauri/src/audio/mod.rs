@@ -1,8 +1,24 @@
 // src/audio/mod.rs
 pub mod audio_processing;
 pub mod decoder;
+pub mod diarization;
+pub mod diarization_models;
+#[cfg(test)]
+pub mod diarization_e2e;
+#[cfg(test)]
+pub mod diarization_shapes;
 pub mod encode;
+pub mod fbank;
 pub mod ffmpeg;
+pub mod formats;
+pub mod onnx_model;
+pub mod recordings;
+pub mod recordings_commands;
+pub mod retention;
+pub mod retention_commands;
+pub mod speaker_cluster;
+pub mod speaker_turns;
+pub mod transcript_text;
 pub mod vad;
 
 // Modularized device management

@@ -37,6 +37,27 @@ pub struct Transcript {
     pub duration: Option<f64>,
 }
 
+/// One captured recording in the recording history.
+///
+/// A recording is independent of a meeting: the audio is captured before any
+/// transcription happens, and transcribing / summarizing are explicit user
+/// actions that may be repeated. `meeting_id` links back to the meeting row
+/// created by transcription, when one exists.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct RecordingModel {
+    pub id: String,
+    pub title: String,
+    pub file_path: Option<String>,
+    pub meeting_id: Option<String>,
+    pub duration: Option<f64>,
+    pub file_size: Option<i64>,
+    pub folder_path: Option<String>,
+    pub transcription_status: String,
+    pub summary_status: String,
+    pub created_at: DateTimeUtc,
+    pub updated_at: DateTimeUtc,
+}
+
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct SummaryProcess {
     pub meeting_id: String,

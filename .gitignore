@@ -77,3 +77,22 @@ experiments/
 target/
 
 frontend/src-tauri/binaries/
+# Downloaded ONNX models and reference audio.
+#
+# The `**/models` rule above is lowercase and does not match this folder. These are
+# large binaries fetched at runtime (the speaker-embedding model alone is ~38 MB), so
+# they must never be committed.
+/Model/
+*.onnx
+
+# Runtime database.
+#
+# `meeting_minutes.db` above covers the legacy filename; the Tauri app writes a SQLite
+# database under `data/` holding the user's actual meetings.
+/data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Local agent tooling state.
+.workbuddy-ai/

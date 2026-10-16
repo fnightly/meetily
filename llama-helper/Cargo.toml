@@ -16,7 +16,8 @@ metal = ["llama-cpp-2/metal"]
 cuda = ["llama-cpp-2/cuda"]
 vulkan = ["llama-cpp-2/vulkan"]
 
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = "s"  # Optimize for size for faster loading
+# NOTE: `[profile]` sections are ignored in member manifests -- Cargo only honours
+# the one in the workspace root, and warns about the rest. The intended
+# size-optimised release settings now live in the root manifest, and this
+# workspace does not add its own `[profile.release]`, so `cargo build --release`
+# stays the default for the app.

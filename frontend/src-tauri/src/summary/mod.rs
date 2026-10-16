@@ -31,6 +31,9 @@ pub struct CustomOpenAIConfig {
 }
 
 pub mod commands;
+pub(crate) mod chinese;
+pub(crate) mod cleanup;
+pub mod cleanup_commands;
 pub(crate) mod language_detection;
 pub mod llm_client;
 pub(crate) mod metadata;

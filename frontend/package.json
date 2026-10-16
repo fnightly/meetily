@@ -25,6 +25,9 @@
         "tauri:build:coreml": "tauri build -- --features coreml",
         "tauri:build:openblas": "tauri build -- --features openblas",
         "tauri:build:hipblas": "tauri build -- --features hipblas",
+        "test": "bun test tests",
+        "test:watch": "bun test --watch tests",
+        "typecheck": "tsc --noEmit",
         "lint": "next lint"
     },
     "dependencies": {

@@ -72,7 +72,12 @@ export interface BlockNoteBlock {
   id: string;
   type: string;
   props?: Record<string, any>;
-  content?: any[];
+  /**
+   * Inline content. BlockNote's own API returns an array of styled text nodes,
+   * but content persisted by this app (and by older summary formats) is often a
+   * plain string, so both are accepted.
+   */
+  content?: any[] | string;
   children?: BlockNoteBlock[];
 }
 

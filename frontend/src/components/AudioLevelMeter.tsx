@@ -29,11 +29,19 @@ export function AudioLevelMeter({
   const rmsPercent = Math.round(logRms * 100);
   const peakPercent = Math.round(logPeak * 100);
 
-  // Color coding based on level
+  // Colour bands follow the VU convention (green healthy, yellow approaching
+  // peak, red at the top — the same split OnlyR's VDU meter draws).
+  //
+  // The previous version coloured *low* levels green and high levels red, which
+  // read backwards: normal speech sits around 60% on this log scale, so it
+  // showed a warning colour while near-silence looked reassuringly green. Since
+  // the scale is a level indicator, the colour must describe the level's health,
+  // not its magnitude on the bar.
   const getLevelColor = (level: number) => {
-    if (level < 0.3) return 'bg-green-500';
-    if (level < 0.7) return 'bg-yellow-500';
-    return 'bg-red-500';
+    if (level >= 0.9) return 'bg-red-500';
+    if (level >= 0.7) return 'bg-yellow-500';
+    if (level < 0.1) return 'bg-gray-300'; // effectively no signal
+    return 'bg-green-500';
   };
 
   const rmsColor = getLevelColor(logRms);
@@ -124,9 +132,10 @@ export function CompactAudioLevelMeter({
   const rmsPercent = Math.round(logRms * 100);
 
   const getLevelColor = (level: number) => {
-    if (level < 0.3) return 'bg-green-400';
-    if (level < 0.7) return 'bg-yellow-400';
-    return 'bg-red-400';
+    if (level >= 0.9) return 'bg-red-400';
+    if (level >= 0.7) return 'bg-yellow-400';
+    if (level < 0.1) return 'bg-gray-300';
+    return 'bg-green-400';
   };
 
   return (

@@ -225,17 +225,42 @@ impl RecordingManager {
     /// * `microphone_device` - Optional microphone device to use
     /// * `system_device` - Optional system audio device to use
     /// * `auto_save` - Whether to save audio checkpoints (true) or just transcripts/metadata (false)
+    /// * `defer_transcription` - When true, capture audio only and skip realtime
+    ///   transcription; the recording is expected to be transcribed afterwards.
+    /// * `encoding` - Output format and quality for the saved recording.
     pub(crate) async fn start_recording(
         &mut self,
         microphone_device: Option<Arc<AudioDevice>>,
         system_device: Option<Arc<AudioDevice>>,
         auto_save: bool,
+        defer_transcription: bool,
+        encoding: super::formats::AudioEncodingSettings,
+        recordings_folder: Option<std::path::PathBuf>,
     ) -> std::result::Result<mpsc::UnboundedReceiver<AudioChunk>, RecordingStartError> {
-        info!("Starting recording manager (auto_save: {})", auto_save);
+        info!(
+            "Starting recording manager (auto_save: {}, defer_transcription: {}, format: {})",
+            auto_save,
+            defer_transcription,
+            encoding.format.id()
+        );
+
+        // Must be set before `start_accumulation`, which constructs the saver
+        // that performs the encoding.
+        self.recording_saver.set_encoding_settings(encoding);
+
+        // Where the audio lands. Set here for the same reason as the encoding: the
+        // saver reads it once, when it builds the meeting folder.
+        if let Some(folder) = recordings_folder {
+            self.recording_saver.set_recordings_folder(folder);
+        }
 
         // Set up transcription channel
         let (transcription_sender, transcription_receiver) = mpsc::unbounded_channel::<AudioChunk>();
         let (recording_sender, recording_receiver) = mpsc::unbounded_channel::<AudioChunk>();
+
+        // Publish the mode before the pipeline starts so the transcription task
+        // observes a stable value on its first check.
+        self.state.set_defer_transcription(defer_transcription);
 
         // Start recording state first
         self.state.start_recording()?;

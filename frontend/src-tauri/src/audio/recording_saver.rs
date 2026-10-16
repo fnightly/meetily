@@ -54,6 +54,10 @@ pub struct RecordingSaver {
     metadata: Option<MeetingMetadata>,
     transcript_segments: Arc<Mutex<Vec<TranscriptSegment>>>,
     is_saving: Arc<Mutex<bool>>,
+    /// Output format/quality for the finished recording.
+    encoding: super::formats::AudioEncodingSettings,
+    /// Base folder this session writes into, taken from the user's preference.
+    recordings_folder: Option<PathBuf>,
 }
 
 impl RecordingSaver {
@@ -65,7 +69,30 @@ impl RecordingSaver {
             metadata: None,
             transcript_segments: Arc::new(Mutex::new(Vec::new())),
             is_saving: Arc::new(Mutex::new(false)),
+            encoding: super::formats::AudioEncodingSettings::default(),
+            recordings_folder: None,
         }
+    }
+
+    /// Set the output format and quality for this recording session.
+    ///
+    /// Must be called before `start_accumulation`, which is where the
+    /// incremental saver is constructed.
+    pub fn set_encoding_settings(&mut self, encoding: super::formats::AudioEncodingSettings) {
+        self.encoding = encoding;
+    }
+
+    /// Set the folder recordings are written into for this session.
+    ///
+    /// Carried on the saver rather than read from preferences here because
+    /// `initialize_meeting_folder` is not async and so cannot read the store.
+    /// Passing it in also keeps the folder fixed for the whole session even if the
+    /// preference changes mid-recording.
+    ///
+    /// Without this the writer always used the platform default directory, so the
+    /// "recordings save location" setting had no effect on where audio landed.
+    pub fn set_recordings_folder(&mut self, folder: std::path::PathBuf) {
+        self.recordings_folder = Some(folder);
     }
 
     /// Set the meeting name for this recording session
@@ -222,15 +249,40 @@ impl RecordingSaver {
     /// * `meeting_name` - Name of the meeting
     /// * `create_checkpoints` - Whether to create .checkpoints/ directory and IncrementalAudioSaver
     fn initialize_meeting_folder(&mut self, meeting_name: &str, create_checkpoints: bool) -> Result<()> {
-        // Load preferences to get base recordings folder
-        let base_folder = super::recording_preferences::get_default_recordings_folder();
+        // Use the folder configured for this session. Falling back to the platform
+        // default keeps behaviour sane if a caller did not set one.
+        let base_folder = self
+            .recordings_folder
+            .clone()
+            .unwrap_or_else(super::recording_preferences::get_default_recordings_folder);
 
         // Create meeting folder structure (with or without .checkpoints/ subdirectory)
         let meeting_folder = create_meeting_folder(&base_folder, meeting_name, create_checkpoints)?;
 
         // Only initialize incremental saver if checkpoints are needed (auto_save is true)
         if create_checkpoints {
-            let incremental_saver = IncrementalAudioSaver::new(meeting_folder.clone(), 48000)?;
+            // Honour the configured format and quality. These used to be saved and
+            // displayed but never read, so every recording came out as AAC/MP4
+            // regardless of the setting.
+            //
+            // Tags are attached here because this is where the meeting name is
+            // known; the finished file carries its own title and date.
+            let encoding = self
+                .encoding
+                .clone()
+                .with_tags(super::formats::RecordingTags::for_meeting(
+                    meeting_name,
+                    &chrono::Utc::now().to_rfc3339(),
+                ));
+
+            info!(
+                "Incremental audio saver encoding: {} @ {} kbps",
+                encoding.format.id(),
+                encoding.quality.bitrate_kbps()
+            );
+
+            let incremental_saver =
+                IncrementalAudioSaver::with_encoding(meeting_folder.clone(), 48000, encoding)?;
             self.incremental_saver = Some(Arc::new(AsyncMutex::new(incremental_saver)));
             info!("✅ Incremental audio saver initialized for meeting: {}", meeting_name);
         } else {
@@ -249,7 +301,13 @@ impl RecordingSaver {
                 microphone: None,  // Could be enhanced to store actual device names
                 system_audio: None,
             },
-            audio_file: if create_checkpoints { "audio.mp4".to_string() } else { "".to_string() },
+            // Reflect the format this recording will actually be written as, so
+            // metadata does not point at an `audio.mp4` that no longer exists.
+            audio_file: if create_checkpoints {
+                self.encoding.output_file_name()
+            } else {
+                "".to_string()
+            },
             transcript_file: "transcripts.json".to_string(),
             sample_rate: 48000,
             status: "recording".to_string(),

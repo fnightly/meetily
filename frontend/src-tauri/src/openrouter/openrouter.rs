@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use tauri::command;
-use reqwest::blocking::Client;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OpenRouterModel {
@@ -40,7 +39,13 @@ struct OpenRouterResponse {
 
 #[command]
 pub fn get_openrouter_models() -> Result<Vec<OpenRouterModel>, String> {
-    let client = Client::new();
+    // Proxy-aware: a blocking client without one cannot reach the API at all on
+    // a machine that requires a proxy. The timeout also stops a stalled request
+    // from freezing this command for an unbounded time. (The timeout must be set
+    // on the builder — `reqwest::blocking::Client` has no `.timeout()` setter.)
+    let client = crate::http_client::blocking_client_with_proxy_and_timeout(Some(
+        std::time::Duration::from_secs(20),
+    ));
     let response = client
         .get("https://openrouter.ai/api/v1/models")
         .send()

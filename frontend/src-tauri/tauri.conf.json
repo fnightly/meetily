@@ -88,7 +88,7 @@
             "app",
             "dmg"
         ],
-        "createUpdaterArtifacts": true,
+        "createUpdaterArtifacts": false,
         "icon": [
             "icons/icon.png",
             "icons/app_icon.icns",
@@ -105,9 +105,6 @@
             "entitlements": "entitlements.plist",
             "signingIdentity": "-",
             "hardenedRuntime": true
-        },
-        "windows": {
-            "signCommand": "powershell -ExecutionPolicy Bypass -File scripts/sign-windows.ps1 -FilePath %1"
         }
     },
     "plugins": {

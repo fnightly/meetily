@@ -4,7 +4,8 @@ import { MeetingSummary, Summary, Transcript } from '@/types';
 import { BlockNoteSummaryView, BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
 import { EmptyStateSummary } from '@/components/EmptyStateSummary';
 import { ModelConfig } from '@/components/ModelSettingsModal';
-import { SummaryGeneratorButtonGroup } from './SummaryGeneratorButtonGroup';
+import { SummaryGeneratorButtonGroup, type SummaryGeneratorButtonGroupProps } from './SummaryGeneratorButtonGroup';
+import type { TemplateInfo } from '@/hooks/meeting-details/useTemplates';
 import { SummaryUpdaterButtonGroup } from './SummaryUpdaterButtonGroup';
 import Analytics from '@/lib/analytics';
 import { useEffect, useRef, useState, RefObject } from 'react';
@@ -49,11 +50,13 @@ interface SummaryPanelProps {
   summaryError: string | null;
   onRegenerateSummary: () => Promise<void>;
   getSummaryStatusMessage: (status: 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error') => string;
-  availableTemplates: Array<{ id: string, name: string, description: string }>;
+  availableTemplates: TemplateInfo[];
   selectedTemplate: string;
   onTemplateSelect: (templateId: string, templateName: string) => void;
   isModelConfigLoading?: boolean;
   onOpenModelSettings?: (openFn: () => void) => void;
+  /** Template management actions, forwarded to the selector. */
+  templateActions?: SummaryGeneratorButtonGroupProps['templateActions'];
 }
 
 export function SummaryPanel({
@@ -84,6 +87,7 @@ export function SummaryPanel({
   onTemplateSelect,
   isModelConfigLoading = false,
   onOpenModelSettings,
+  templateActions,
 }: SummaryPanelProps) {
   const [summaryLang, setSummaryLang] = useState<string | null>(null);
   const [summaryLangStorage, setSummaryLangStorage] = useState<SummaryLanguageStorage>('metadata');
@@ -262,6 +266,7 @@ export function SummaryPanel({
               hasSummary={hasSummary}
               isModelConfigLoading={isModelConfigLoading}
               onOpenModelSettings={onOpenModelSettings}
+              templateActions={templateActions}
               languageSlot={transcripts.length > 0 || hasSummary ? languageSlot : undefined}
             />
           </div>

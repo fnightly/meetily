@@ -469,14 +469,20 @@ impl ModelManager {
             0
         };
 
-        // Download the file with optimized client settings
-        let client = Client::builder()
-            .tcp_nodelay(true) // Disable Nagle's algorithm for faster streaming
-            .pool_max_idle_per_host(1) // Keep connection alive
-            .timeout(Duration::from_secs(3600)) // 1 hour timeout for large files
-            .connect_timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|e| anyhow!("Failed to create HTTP client: {}", e))?;
+        // Download the file with optimized client settings, plus proxy support:
+        // without it the download cannot start at all behind a proxy. Goes through
+        // the shared helper so loopback hosts stay direct.
+        let client = {
+            let builder = Client::builder()
+                .tcp_nodelay(true) // Disable Nagle's algorithm for faster streaming
+                .pool_max_idle_per_host(1) // Keep connection alive
+                .timeout(Duration::from_secs(3600)) // 1 hour timeout for large files
+                .connect_timeout(Duration::from_secs(30));
+
+            crate::http_client::apply_proxy(builder)
+                .build()
+                .map_err(|e| anyhow!("Failed to create HTTP client: {}", e))?
+        };
 
         // Build request with Range header if resuming
         let mut request = client.get(&model_def.download_url);

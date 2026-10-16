@@ -8,9 +8,28 @@ module.exports = {
   ],
   theme: {
   	extend: {
+  		// Source Sans 3 covers Latin/Greek/Cyrillic only. Without explicit CJK
+  		// fallbacks, Chinese/Japanese/Korean text fell back to whatever the OS
+  		// picked per-glyph, so mixed CJK+Latin lines rendered with inconsistent
+  		// weight and metrics. These platform UI fonts are the ones that match
+  		// each OS's Latin rendering most closely.
   		fontFamily: {
   			sans: [
-  				'var(--font-source-sans-3)'
+  				'var(--font-source-sans-3)',
+  				// macOS / iOS
+  				'-apple-system',
+  				'BlinkMacSystemFont',
+  				// Windows
+  				'Segoe UI',
+  				'Microsoft YaHei UI',
+  				'Microsoft YaHei',
+  				// Linux
+  				'Noto Sans CJK SC',
+  				'Source Han Sans SC',
+  				'WenQuanYi Micro Hei',
+  				// Final fallback
+  				'Hiragino Sans GB',
+  				'sans-serif'
   			]
   		},
   		colors: {

@@ -1,6 +1,7 @@
 pub mod whisper_engine;
 pub mod acceleration;
 pub mod commands;
+pub mod download;
 pub mod system_monitor;
 pub mod parallel_processor;
 pub mod parallel_commands;

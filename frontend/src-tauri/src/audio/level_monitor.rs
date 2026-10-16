@@ -202,37 +202,32 @@ impl AudioLevelMonitor {
         let device_name_clone = device_name.clone();
         let device_type_clone = device_type.to_string();
 
+        // Output devices are monitored by opening them as *input* streams. On
+        // WASAPI this transparently enables loopback mode, which is exactly how the
+        // recording path captures system audio (`audio/stream.rs` does the same).
+        // Refusing output devices here made the system-audio track permanently
+        // unmeterable, so the live meter could only ever show the microphone.
         match sample_format {
             SampleFormat::F32 => {
-                let stream = if is_input {
-                    device.build_input_stream(
-                        &stream_config,
-                        move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                            process_audio_levels(
-                                data,
-                                channels,
-                                &device_name_clone,
-                                &device_type_clone,
-                                level_data_clone.clone(),
-                            );
-                        },
-                        |err| error!("Audio stream error: {}", err),
-                        None,
-                    )?
-                } else {
-                    // For output devices, we can't easily monitor levels in real-time
-                    // This is a limitation of most audio systems - output monitoring requires loopback
-                    return Err(anyhow::anyhow!("Output device monitoring not supported yet: {}", device_name));
-                };
+                let stream = device.build_input_stream(
+                    &stream_config,
+                    move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                        process_audio_levels(
+                            data,
+                            channels,
+                            &device_name_clone,
+                            &device_type_clone,
+                            level_data_clone.clone(),
+                        );
+                    },
+                    |err| error!("Audio stream error: {}", err),
+                    None,
+                )?;
 
                 stream.play()?;
                 Ok(stream)
             }
             SampleFormat::I16 => {
-                if !is_input {
-                    return Err(anyhow::anyhow!("Output device monitoring not supported yet: {}", device_name));
-                }
-
                 let stream = device.build_input_stream(
                     &stream_config,
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
@@ -253,10 +248,6 @@ impl AudioLevelMonitor {
                 Ok(stream)
             }
             SampleFormat::U16 => {
-                if !is_input {
-                    return Err(anyhow::anyhow!("Output device monitoring not supported yet: {}", device_name));
-                }
-
                 let stream = device.build_input_stream(
                     &stream_config,
                     move |data: &[u16], _: &cpal::InputCallbackInfo| {

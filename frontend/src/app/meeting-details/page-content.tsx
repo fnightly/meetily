@@ -10,6 +10,28 @@ import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
 import { SummaryPanel } from '@/components/MeetingDetails/SummaryPanel';
 import { MeetingDetailsSplitView, type MeetingDetailsTab } from '@/components/MeetingDetails/MeetingDetailsSplitView';
 import { ModelConfig } from '@/components/ModelSettingsModal';
+import {
+  buildMeetingMarkdown,
+  downloadMarkdown,
+  exportFileName,
+  type ExportScope,
+} from '@/lib/meeting-export';
+
+/** Shape returned by the `api_get_meeting` command (complete, unpaginated). */
+interface MeetingDetailsResponse {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  transcripts: Array<{
+    id: string;
+    text: string;
+    timestamp: string;
+    audio_start_time?: number;
+    audio_end_time?: number;
+    duration?: number;
+  }>;
+}
 
 // Custom hooks
 import { useMeetingData } from '@/hooks/meeting-details/useMeetingData';
@@ -60,6 +82,7 @@ export default function PageContent({
   const [customPrompt, setCustomPrompt] = useState<string>('');
   const isRecording = false;
   const [activeTab, setActiveTab] = useState<MeetingDetailsTab>('transcript');
+  const [exporting, setExporting] = useState(false);
 
   // Ref to store the modal open function from SummaryGeneratorButtonGroup
   const openModelSettingsRef = useRef<(() => void) | null>(null);
@@ -141,6 +164,50 @@ export default function PageContent({
     meeting,
   });
 
+  /**
+   * Export the meeting as Markdown.
+   *
+   * The complete transcript is re-read from the backend rather than taken from
+   * `meetingData.transcripts`, because the meeting-details view loads transcripts
+   * with pagination — exporting the in-memory list would silently truncate long
+   * meetings to whatever pages the user had scrolled through.
+   */
+  const handleExportMarkdown = async (scope: ExportScope) => {
+    setExporting(true);
+    try {
+      const details = await invoke<MeetingDetailsResponse>('api_get_meeting', {
+        meetingId: meeting.id,
+      });
+
+      const markdown = buildMeetingMarkdown(
+        {
+          meeting: {
+            id: details.id,
+            title: details.title,
+            created_at: details.created_at,
+            updated_at: details.updated_at,
+          },
+          summary: meetingData.aiSummary,
+          transcripts: details.transcripts,
+        },
+        scope,
+      );
+
+      downloadMarkdown(markdown, exportFileName(details, scope));
+      toast.success('Exported Markdown', {
+        description: `${details.transcripts.length} transcript segment(s) included.`,
+      });
+      await Analytics.track('meeting_exported_markdown', { scope });
+    } catch (error) {
+      console.error('Failed to export Markdown:', error);
+      toast.error('Failed to export Markdown', {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setExporting(false);
+    }
+  };
+
   // Track page view
   useEffect(() => {
     Analytics.trackPageView('meeting_details');
@@ -218,6 +285,8 @@ export default function PageContent({
               meetingId={meeting.id}
               meetingFolderPath={meeting.folder_path}
               onRefetchTranscripts={onRefetchTranscripts}
+              onExportMarkdown={() => handleExportMarkdown('both')}
+              isExporting={exporting}
             />
           }
           summary={
@@ -247,6 +316,13 @@ export default function PageContent({
               availableTemplates={templates.availableTemplates}
               selectedTemplate={templates.selectedTemplate}
               onTemplateSelect={templates.handleTemplateSelection}
+              templateActions={{
+                loadTemplate: templates.loadTemplate,
+                saveTemplate: templates.saveTemplate,
+                duplicateTemplate: templates.duplicateTemplate,
+                deleteTemplate: templates.deleteTemplate,
+                getCustomTemplatesDir: templates.getCustomTemplatesDir,
+              }}
               isModelConfigLoading={isModelConfigLoading}
               onOpenModelSettings={handleRegisterModalOpen}
             />

@@ -252,22 +252,71 @@ fn build_final_report_system_prompt(
     )
 }
 
-/// Rough token count estimation using character count
-pub fn rough_token_count(s: &str) -> usize {
-    let char_count = s.chars().count();
-    (char_count as f64 * 0.35).ceil() as usize
+/// Approximate tokens per character for one character.
+///
+/// A single global ratio cannot serve both Latin and CJK text. English prose
+/// tokenizes at roughly 0.25 tokens/char, while a CJK ideograph is commonly its
+/// own token (≈1.0). Using the English ratio everywhere underestimated Chinese
+/// transcripts by 2–3×, so chunking under-sized the windows and long Chinese
+/// meetings overflowed the model context.
+fn token_weight(c: char) -> f64 {
+    let cp = c as u32;
+
+    // CJK ideographs (incl. extensions), kana, and Hangul syllable blocks:
+    // effectively one token each in BPE tokenizers.
+    let is_cjk = matches!(cp,
+        0x3040..=0x30FF      // Hiragana + Katakana
+        | 0x3400..=0x4DBF    // CJK Extension A
+        | 0x4E00..=0x9FFF    // CJK Unified Ideographs
+        | 0xAC00..=0xD7AF    // Hangul syllables
+        | 0xF900..=0xFAFF    // CJK Compatibility Ideographs
+        | 0x20000..=0x2FA1F  // CJK Extensions B–F (astral plane)
+    );
+    if is_cjk {
+        return 1.0;
+    }
+
+    // Emoji and other astral-plane pictographs are usually multiple tokens, but
+    // treating them as one keeps the estimate conservative rather than inflated.
+    let is_astral = cp > 0xFFFF;
+
+    if c.is_ascii_whitespace() {
+        return 0.0;
+    }
+    if c.is_ascii_alphanumeric() {
+        return 0.25;
+    }
+    if c.is_ascii_punctuation() {
+        return 0.5;
+    }
+    if is_astral {
+        return 1.0;
+    }
+
+    // Remaining non-ASCII (accented Latin, Cyrillic, Greek, Arabic, …): these
+    // usually split into one or two tokens.
+    0.5
 }
 
-/// Chunks text into overlapping segments based on token count
-/// Uses character-based chunking for proper Unicode support
+/// Estimate the token count of `s`, accounting for the script it is written in.
+pub fn rough_token_count(s: &str) -> usize {
+    let total: f64 = s.chars().map(token_weight).sum();
+    total.ceil() as usize
+}
+
+/// Chunks text into overlapping segments based on estimated token count.
+///
+/// Sizing is token-aware rather than character-based: a fixed "characters per
+/// token" factor silently over-packed CJK text, so a window that was supposed
+/// to be N tokens could hold 2–3× that for Chinese input.
 ///
 /// # Arguments
 /// * `text` - The text to chunk
-/// * `chunk_size_tokens` - Maximum tokens per chunk
+/// * `chunk_size_tokens` - Maximum estimated tokens per chunk
 /// * `overlap_tokens` - Number of overlapping tokens between chunks
 ///
 /// # Returns
-/// Vector of text chunks with smart word-boundary splitting
+/// Vector of text chunks with smart sentence/word-boundary splitting
 pub fn chunk_text(text: &str, chunk_size_tokens: usize, overlap_tokens: usize) -> Vec<String> {
     info!(
         "Chunking text with token-based chunk_size: {} and overlap: {}",
@@ -278,56 +327,78 @@ pub fn chunk_text(text: &str, chunk_size_tokens: usize, overlap_tokens: usize) -
         return vec![];
     }
 
-    // Convert token-based sizes to character-based sizes
-    // Using ~2.85 chars per token (inverse of 0.35 tokens per char from rough_token_count)
-    let chars_per_token = 1.0 / 0.35;
-    let chunk_size_chars = (chunk_size_tokens as f64 * chars_per_token).ceil() as usize;
-    let overlap_chars = (overlap_tokens as f64 * chars_per_token).ceil() as usize;
-
-    // Collect characters for indexing (needed for proper Unicode support)
-    let chars: Vec<char> = text.chars().collect();
+    // Collect chars once: we need character indices for accurate byte slicing
+    // (`char_indices` would report the byte offset *after* the current char,
+    // which is off by one for the window end).
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
     let total_chars = chars.len();
 
-    if total_chars <= chunk_size_chars {
-        info!("Text is shorter than chunk size, returning as a single chunk.");
+    let total_tokens = rough_token_count(text);
+    if total_tokens <= chunk_size_tokens {
+        info!("Text fits within the token budget, returning as a single chunk.");
         return vec![text.to_string()];
     }
 
     let mut chunks = Vec::new();
-    let mut start_char = 0;
+    let mut start_char = 0usize;
 
     while start_char < total_chars {
-        let end_char = (start_char + chunk_size_chars).min(total_chars);
-        let mut emitted_end_char = end_char;
+        // Extend the window until the token budget is exhausted.
+        let mut end_char = start_char;
+        let mut window_tokens = 0.0f64;
 
-        // Convert character indices to byte indices for string slicing
-        let start_byte: usize = chars[..start_char].iter().map(|c| c.len_utf8()).sum();
-        let mut end_byte: usize = chars[..end_char].iter().map(|c| c.len_utf8()).sum();
+        while end_char < total_chars {
+            let cost = token_weight(chars[end_char].1);
+            if window_tokens + cost > chunk_size_tokens as f64 && end_char > start_char {
+                break;
+            }
+            window_tokens += cost;
+            end_char += 1;
+        }
 
-        // Try to break at sentence or word boundary for cleaner chunks
+        if end_char <= start_char {
+            // A single character already exceeds the budget (e.g. a 1-token
+            // window on a CJK char): always make progress.
+            end_char = start_char + 1;
+        }
+
+        let start_byte = chars[start_char].0;
+        let mut end_byte = if end_char < total_chars {
+            chars[end_char].0
+        } else {
+            text.len()
+        };
+
+        // Prefer a sentence or word boundary so chunks stay readable. Only accept
+        // a boundary that leaves more than the overlap, otherwise the next window
+        // could fail to advance.
         if end_char < total_chars {
             let slice = &text[start_byte..end_byte];
+            let min_boundary_chars = overlap_chars_for(slice, overlap_tokens);
+
             let sentence_boundary = slice.rfind(". ").map(|index| index + 2);
             let word_boundary = slice.rfind(' ').map(|index| index + 1);
             let boundary = sentence_boundary
-                .filter(|end| slice[..*end].chars().count() > overlap_chars)
+                .filter(|end| slice[..*end].chars().count() > min_boundary_chars)
                 .or_else(|| {
-                    word_boundary.filter(|end| slice[..*end].chars().count() > overlap_chars)
+                    word_boundary.filter(|end| slice[..*end].chars().count() > min_boundary_chars)
                 });
 
             if let Some(boundary) = boundary {
                 end_byte = start_byte + boundary;
-                emitted_end_char = start_char + slice[..boundary].chars().count();
             }
         }
 
-        // Extract chunk
         chunks.push(text[start_byte..end_byte].to_string());
 
+        let emitted_end_char = text[start_byte..end_byte].chars().count() + start_char;
         if emitted_end_char >= total_chars {
             break;
         }
 
+        // Back up by the overlap, measured in this text's own characters.
+        let emitted_slice = &text[start_byte..end_byte];
+        let overlap_chars = overlap_chars_for(emitted_slice, overlap_tokens);
         start_char = emitted_end_char
             .saturating_sub(overlap_chars)
             .max(start_char + 1);
@@ -336,6 +407,31 @@ pub fn chunk_text(text: &str, chunk_size_tokens: usize, overlap_tokens: usize) -
     info!("Created {} chunks from text", chunks.len());
     chunks
 }
+
+/// How many characters of `slice` correspond to `tokens` of overlap.
+///
+/// Derived from the slice's own script mix, so an overlap budget of N tokens is
+/// the same amount of *content* whether the text is English or Chinese.
+fn overlap_chars_for(slice: &str, tokens: usize) -> usize {
+    if tokens == 0 {
+        return 0;
+    }
+
+    let chars = slice.chars().count();
+    if chars == 0 {
+        return 0;
+    }
+
+    let slice_tokens = rough_token_count(slice);
+    if slice_tokens == 0 {
+        return 0;
+    }
+
+    // Scale the slice's character count by the requested share of its tokens.
+    let ratio = (tokens as f64 / slice_tokens as f64).min(1.0);
+    ((chars as f64 * ratio).round() as usize).min(chars.saturating_sub(1))
+}
+
 
 /// Extracts meeting name from the first heading in markdown
 ///
@@ -381,6 +477,7 @@ pub(crate) async fn generate_meeting_summary(
     summary_language: Option<&str>,
     detected_transcript_language: Option<&str>,
     cached_english: Option<&str>,
+    dictionary: &crate::dictionary::UserDictionary,
 ) -> Result<GeneratedMeetingSummary, String> {
     if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
         return Err("Summary generation was cancelled".to_string());
@@ -388,6 +485,15 @@ pub(crate) async fn generate_meeting_summary(
     info!("Starting summary generation with provider: {:?}, model: {}", provider, model_name);
 
     let total_tokens = rough_token_count(text);
+
+    // A Simplified-Chinese request skips the English intermediate entirely:
+    // generating in English and translating back costs a second pass and loses
+    // terminology, names and nuance that a Chinese meeting note has to keep.
+    let native_chinese = super::chinese::wants_simplified_chinese(summary_language);
+    if native_chinese {
+        info!("Summarising natively in Chinese (skipping the English intermediate)");
+    }
+
     let (mut english_markdown, successful_chunk_count, mut reasoning_stripped) =
         if let Some(cached) = resolve_cached_english(cached_english, summary_language) {
             info!("✓ Using cached English summary ({} chars), skipping pass 1", cached.len());
@@ -407,12 +513,22 @@ pub(crate) async fn generate_meeting_summary(
                     if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
                         return Err("Summary generation was cancelled".to_string());
                     }
-                    let prompt = build_chunk_summary_user_prompt(chunk);
+                    let (chunk_system_prompt, chunk_user_prompt) = if native_chinese {
+                        (
+                            super::chinese::chinese_chunk_summary_system_prompt(),
+                            super::chinese::chinese_chunk_summary_user_prompt(chunk),
+                        )
+                    } else {
+                        (
+                            "You are an expert meeting summarizer.".to_string(),
+                            build_chunk_summary_user_prompt(chunk),
+                        )
+                    };
                     for attempt in 1..=MAX_CHUNK_ATTEMPTS {
                         let result = match generate_summary(
-                            client, provider, model_name, api_key, "You are an expert meeting summarizer.",
-                            &prompt, ollama_endpoint, custom_openai_endpoint, max_tokens, temperature,
-                            top_p, app_data_dir, cancellation_token,
+                            client, provider, model_name, api_key, &chunk_system_prompt,
+                            &chunk_user_prompt, ollama_endpoint, custom_openai_endpoint, max_tokens,
+                            temperature, top_p, app_data_dir, cancellation_token,
                         )
                         .await
                         {
@@ -430,7 +546,7 @@ pub(crate) async fn generate_meeting_summary(
                                 chunk_summaries.push(cleaned.markdown);
                                 break;
                             }
-                            Err(error)
+                            Err(_error)
                                 if cancellation_token.is_some_and(CancellationToken::is_cancelled) =>
                             {
                                 return Err("Summary generation was cancelled".to_string());
@@ -472,12 +588,24 @@ pub(crate) async fn generate_meeting_summary(
                 content_to_summarize = if chunk_summaries.len() == 1 {
                     chunk_summaries.remove(0)
                 } else {
-                    let prompt = build_combine_summary_user_prompt(&chunk_summaries.join("\n---\n"));
+                    let (combine_system_prompt, combine_user_prompt) = if native_chinese {
+                        (
+                            super::chinese::chinese_combine_summary_system_prompt(),
+                            super::chinese::chinese_combine_summary_user_prompt(
+                                &chunk_summaries.join("\n---\n"),
+                            ),
+                        )
+                    } else {
+                        (
+                            "You are an expert at synthesizing meeting summaries.".to_string(),
+                            build_combine_summary_user_prompt(&chunk_summaries.join("\n---\n")),
+                        )
+                    };
+
                     let completion = generate_summary(
-                        client, provider, model_name, api_key,
-                        "You are an expert at synthesizing meeting summaries.", &prompt,
-                        ollama_endpoint, custom_openai_endpoint, max_tokens, temperature, top_p,
-                        app_data_dir, cancellation_token,
+                        client, provider, model_name, api_key, &combine_system_prompt,
+                        &combine_user_prompt, ollama_endpoint, custom_openai_endpoint, max_tokens,
+                        temperature, top_p, app_data_dir, cancellation_token,
                     )
                     .await?;
                     let cleaned = clean_llm_markdown_detailed(&completion.content);
@@ -491,16 +619,29 @@ pub(crate) async fn generate_meeting_summary(
             }
 
             info!("Generating final markdown report with template: {}", template_id);
-            let final_system_prompt = build_final_report_system_prompt(
-                &template.to_section_instructions(),
-                &template.to_markdown_structure(),
-            );
+            let final_system_prompt = if native_chinese {
+                super::chinese::chinese_final_report_system_prompt(
+                    &template.to_section_instructions(),
+                    &template.to_markdown_structure(),
+                )
+            } else {
+                build_final_report_system_prompt(
+                    &template.to_section_instructions(),
+                    &template.to_markdown_structure(),
+                )
+            };
             let mut final_user_prompt =
                 format!("<transcript_chunks>\n{content_to_summarize}\n</transcript_chunks>\n");
             if !custom_prompt.is_empty() {
                 final_user_prompt.push_str("\n\nUser Provided Context:\n\n<user_context>\n");
                 final_user_prompt.push_str(custom_prompt);
                 final_user_prompt.push_str("\n</user_context>");
+            }
+            // The vocabulary goes into the user prompt rather than the system
+            // prompt so it survives templates that replace the system prompt, and
+            // so the model reads it alongside the text it is about.
+            if let Some(instruction) = dictionary.render_instruction() {
+                final_user_prompt.push_str(&instruction);
             }
             let completion = generate_summary(
                 client, provider, model_name, api_key, &final_system_prompt, &final_user_prompt,
@@ -514,7 +655,11 @@ pub(crate) async fn generate_meeting_summary(
             (cleaned.markdown, successful_chunk_count, stage_reasoning_stripped)
         };
 
-    let (final_markdown, normalization_fallback) =
+    let (final_markdown, normalization_fallback) = if native_chinese {
+        // The result is already Chinese, so the translate/normalise passes must be
+        // skipped; running them would send Chinese through an English round trip.
+        (english_markdown.clone(), false)
+    } else {
         match resolve_final_language_action(summary_language, detected_transcript_language) {
             FinalLanguageAction::Translate(language) => {
                 let translated = translate_markdown(
@@ -543,7 +688,8 @@ pub(crate) async fn generate_meeting_summary(
                 (normalized.markdown, fallback)
             }
             FinalLanguageAction::ReturnEnglish => (english_markdown.clone(), false),
-        };
+        }
+    };
 
     Ok(GeneratedMeetingSummary {
         final_markdown,
@@ -659,13 +805,106 @@ mod tests {
     }
 
     #[test]
-    fn chunk_text_keeps_unicode_boundaries() {
-        assert_eq!(chunk_text("é ab", 1, 0), vec!["é ", "ab"]);
+    fn chunk_text_splits_by_token_budget_and_keeps_all_content() {
+        // Latin text costs 0.25 tokens/char, so a 1-token budget is 4 characters.
+        let content = "ab cd ef gh ij kl";
+        let chunks = chunk_text(content, 1, 0);
+
+        assert!(chunks.len() > 1, "expected multiple chunks: {chunks:?}");
+
+        // With no overlap, concatenating the chunks must reproduce the input
+        // exactly — the old character-ratio sizing dropped text at boundaries.
+        assert_eq!(chunks.concat(), content);
+    }
+
+    #[test]
+    fn chunk_text_keeps_unicode_boundaries_without_overlap() {
+        // Multi-byte leading char: byte slicing must not split a code point.
+        let content = "é ab cd ef";
+        let chunks = chunk_text(content, 1, 0);
+
+        assert!(chunks.len() > 1, "expected multiple chunks: {chunks:?}");
+        assert_eq!(chunks.concat(), content);
+
+        // Every chunk must be a valid slice of the input (i.e. no broken UTF-8).
+        for chunk in &chunks {
+            assert!(content.contains(chunk.as_str()), "chunk not a slice: {chunk:?}");
+        }
     }
 
     #[test]
     fn chunk_text_progresses_when_overlap_matches_window() {
-        assert_eq!(chunk_text("abcd", 1, 1), vec!["abc", "bcd"]);
+        // A whole-window overlap must not stall the loop: each chunk still
+        // advances, and the text is fully covered.
+        let chunks = chunk_text("abcd", 1, 1);
+
+        assert_eq!(chunks, vec!["abcd"]);
+    }
+
+    #[test]
+    fn rough_token_count_treats_cjk_as_roughly_one_token_per_char() {
+        // The regression this guards: a Chinese transcript used to be estimated
+        // at 0.35 tokens/char, under-counting by ~3x and under-sizing chunks.
+        let chinese = "我们今天讨论了产品路线图";
+        let chars = chinese.chars().count();
+
+        let estimated = rough_token_count(chinese);
+        assert_eq!(estimated, chars, "CJK should be ~1 token per character");
+    }
+
+    #[test]
+    fn rough_token_count_treats_latin_as_far_cheaper_per_character() {
+        let english = "we discussed the product roadmap today";
+        let chars = english.chars().count();
+
+        let estimated = rough_token_count(english);
+        // English is roughly 0.25 tokens/char, well under one per character.
+        assert!(
+            estimated * 3 < chars,
+            "expected Latin to be much cheaper than CJK per char: {estimated} tokens for {chars} chars"
+        );
+    }
+
+    #[test]
+    fn rough_token_count_ignores_whitespace() {
+        assert_eq!(rough_token_count(""), 0);
+        assert_eq!(rough_token_count("   \n\t "), 0);
+        // Whitespace must not inflate the estimate.
+        assert_eq!(rough_token_count("ab"), rough_token_count("a b"));
+    }
+
+    #[test]
+    fn rough_token_count_is_monotonic_in_content() {
+        let short = rough_token_count("会议");
+        let long = rough_token_count("会议记录内容");
+        assert!(long > short, "more content must not estimate fewer tokens");
+    }
+
+    #[test]
+    fn mixed_script_estimate_lands_between_pure_latin_and_pure_cjk() {
+        let latin = rough_token_count("aaaaaaaaaa");
+        let cjk = rough_token_count("十个汉字字符内容");
+        let mixed = rough_token_count("abc会议def记录");
+
+        assert!(mixed > latin, "mixed text must exceed pure Latin of similar length");
+        assert!(mixed < cjk, "mixed text must stay below pure CJK of similar length");
+    }
+
+    #[test]
+    fn cjk_gets_smaller_chunks_than_latin_for_the_same_token_budget() {
+        // The practical consequence of the fix: a fixed token budget must cover
+        // fewer CJK characters than Latin ones, instead of pretending both cost
+        // the same per character.
+        let latin = "abcdefghijklmnopqrstuvwxyz";
+        let cjk = "一二三四五六七八九十甲乙丙丁戊己庚辛壬癸";
+
+        let latin_chunks = chunk_text(latin, 2, 0).len();
+        let cjk_chunks = chunk_text(cjk, 2, 0).len();
+
+        assert!(
+            cjk_chunks > latin_chunks,
+            "CJK should need more chunks for the same budget (latin={latin_chunks}, cjk={cjk_chunks})"
+        );
     }
 
     #[test]

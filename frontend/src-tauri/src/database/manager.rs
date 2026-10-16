@@ -1,11 +1,15 @@
 use sqlx::{migrate::MigrateDatabase, Result, Sqlite, SqlitePool, Transaction};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tauri::Manager;
 
 #[derive(Clone)]
 pub struct DatabaseManager {
     pool: SqlitePool,
+    /// The file this pool is actually open against. Recorded so the storage
+    /// settings UI can tell the user when a configured relocation has not taken
+    /// effect yet (it only applies on the next start).
+    db_path: PathBuf,
 }
 
 impl DatabaseManager {
@@ -34,7 +38,10 @@ impl DatabaseManager {
 
         sqlx::migrate!("./migrations").run(&pool).await?;
 
-        Ok(DatabaseManager { pool })
+        Ok(DatabaseManager {
+            pool,
+            db_path: PathBuf::from(tauri_db_path),
+        })
     }
 
     // NOTE: So for the first time users they needs to start the application
@@ -42,7 +49,8 @@ impl DatabaseManager {
     // the current app dir, So the system detects legacy db and copy it and starts with that data
     // (Newly created .sqlite with the copied content from .db)
     pub async fn new_from_app_handle(app_handle: &tauri::AppHandle) -> Result<Self> {
-        // Resolve the app's data directory
+        // Resolve the app's data directory (still used for the legacy-database
+        // auto-migration source and for creating the default layout).
         let app_data_dir = app_handle
             .path()
             .app_data_dir()
@@ -51,20 +59,29 @@ impl DatabaseManager {
             fs::create_dir_all(&app_data_dir).map_err(|e| sqlx::Error::Io(e))?;
         }
 
-        // Define database paths
-        let tauri_db_path = app_data_dir
-            .join("meeting_minutes.sqlite")
+        // The database location is user-configurable; an unset value resolves to
+        // the historical `app_data_dir()/meeting_minutes.sqlite`.
+        let storage = crate::storage::config::load_storage_config(app_handle);
+        let tauri_db_path = storage
+            .database_file(app_handle)
+            .map_err(|e| sqlx::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
             .to_string_lossy()
             .to_string();
-        // Legacy backend DB path (for auto-migration if exists)
+
+        // Legacy backend DB path (for auto-migration if exists). This one stays
+        // pinned to the app data dir: it is an import source, not a user choice.
         let backend_db_path = app_data_dir
             .join("meeting_minutes.db")
             .to_string_lossy()
             .to_string();
 
-        // WAL file paths for defensive cleanup
-        let wal_path = app_data_dir.join("meeting_minutes.sqlite-wal");
-        let shm_path = app_data_dir.join("meeting_minutes.sqlite-shm");
+        // WAL file paths for defensive cleanup, alongside the active database.
+        let active_dir = Path::new(&tauri_db_path)
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| app_data_dir.clone());
+        let wal_path = active_dir.join("meeting_minutes.sqlite-wal");
+        let shm_path = active_dir.join("meeting_minutes.sqlite-shm");
 
         log::info!("Tauri DB path: {}", tauri_db_path);
         log::info!("Legacy backend DB path: {}", backend_db_path);
@@ -159,6 +176,11 @@ impl DatabaseManager {
 
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    /// The database file this pool is currently open against.
+    pub fn path(&self) -> &Path {
+        &self.db_path
     }
 
     pub async fn with_transaction<T, F, Fut>(&self, f: F) -> Result<T>

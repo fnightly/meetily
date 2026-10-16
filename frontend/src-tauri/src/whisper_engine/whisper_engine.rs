@@ -9,7 +9,6 @@ use tokio_util::sync::CancellationToken;
 use whisper_rs::{WhisperContext, WhisperContextParameters, FullParams, SamplingStrategy};
 use serde::{Serialize, Deserialize};
 use anyhow::{Result, anyhow};
-use reqwest::Client;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use crate::config::WHISPER_MODEL_CATALOG;
@@ -344,8 +343,10 @@ impl WhisperEngine {
                 let ctx = {
                     // let _suppressor = crate::whisper_engine::StderrSuppressor::new();
 
-                    // Load whisper context with hardware-optimized parameters
-                    WhisperContext::new_with_params(&model_info.path.to_string_lossy(), context_param)
+                    // Load whisper context with hardware-optimized parameters.
+                    // `path` takes `AsRef<Path>`, so pass the path directly rather
+                    // than a `Cow<str>` (which is not `AsRef<Path>`).
+                    WhisperContext::new_with_params(&model_info.path, context_param)
                         .map_err(|e| anyhow!("Failed to load model {}: {}", model_name, e))?
                     // Suppressor dropped here, stderr restored
                 };
@@ -590,7 +591,7 @@ impl WhisperEngine {
 
         // Additional suppression to reduce C library verbosity
         params.set_suppress_blank(true);
-        params.set_suppress_non_speech_tokens(true);
+        params.set_suppress_nst(true);
         params.set_temperature(adaptive_config.temperature);
         params.set_max_initial_ts(1.0);
         params.set_entropy_thold(2.4);
@@ -627,11 +628,11 @@ impl WhisperEngine {
         let mut total_confidence = 0.0;
         let mut segment_count = 0;
 
-        let num_segments = num_segments?;
+        let num_segments = num_segments as usize;
         for i in 0..num_segments {
-            let segment_text = match state.full_get_segment_text_lossy(i) {
-                Ok(text) => text,
-                Err(_) => continue,
+            let segment_text = match state.get_segment(i as i32).map(|s| s.to_str_lossy()).transpose().ok().flatten() {
+                Some(text) => text,
+                None => continue,
             };
 
             // Calculate confidence based on segment length and duration (simplified approach)
@@ -705,7 +706,7 @@ impl WhisperEngine {
 
         // BALANCED settings - good quality with reasonable speed
         params.set_suppress_blank(true);
-        params.set_suppress_non_speech_tokens(true);
+        params.set_suppress_nst(true);
         params.set_temperature(0.3);             // Lower than 0.4 for consistency, higher than 0.0 for quality
         params.set_max_initial_ts(1.0);
         params.set_entropy_thold(2.4);
@@ -775,7 +776,8 @@ impl WhisperEngine {
         state.full(params, &audio_data)?;
 
         // Extract text with improved segment handling
-        let num_segments = state.full_n_segments()?;
+        // `full_n_segments` returns a plain c_int in whisper-rs 0.16.
+        let num_segments = state.full_n_segments();
 
         // Performance optimization: reduce segment completion logging
         // Only log for significant transcriptions to avoid I/O overhead
@@ -785,13 +787,13 @@ impl WhisperEngine {
         let mut result = String::new();
 
         for i in 0..num_segments {
-            let segment_text = match state.full_get_segment_text_lossy(i) {
-                Ok(text) => text,
-                Err(_) => continue,
+            let segment_text = match state.get_segment(i as i32).map(|s| s.to_str_lossy()).transpose().ok().flatten() {
+                Some(text) => text,
+                None => continue,
             };
 
-            let _start_time = state.full_get_segment_t0(i).unwrap_or(0);
-            let _end_time = state.full_get_segment_t1(i).unwrap_or(0);
+            let _start_time = state.get_segment(i as i32).map(|s| s.start_timestamp()).unwrap_or(0);
+            let _end_time = state.get_segment(i as i32).map(|s| s.end_timestamp()).unwrap_or(0);
 
             // Performance optimization: remove per-segment debug logging
             // This was causing significant I/O overhead during transcription
@@ -1071,25 +1073,34 @@ impl WhisperEngine {
     }
 
     pub async fn download_model(&self, model_name: &str, progress_callback: Option<Box<dyn Fn(u8) + Send>>) -> Result<()> {
-        log::info!("Starting download for model: {}", model_name);
+        let base_url = crate::config::whisper_model_base_url();
+        log::info!(
+            "Starting download for model: {} (base URL: {})",
+            model_name,
+            base_url
+        );
 
-        let model_url = match model_name {
-            "tiny" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
-            "base" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
-            "small" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
-            "medium" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
-            "large-v3-turbo" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
-            "large-v3" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin",
-            "tiny-q5_1" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin",
-            "base-q5_1" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin",
-            "small-q5_1" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin",
-            "medium-q5_0" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium-q5_0.bin",
-            "large-v3-turbo-q5_0" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
-            "large-v3-q5_0" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-q5_0.bin",
-            _ => return Err(anyhow!("Unsupported model: {}", model_name)),
-        };
+        // Filenames come from the catalog rather than a second hardcoded table, so
+        // the download URL and the on-disk name used by discovery cannot drift.
+        let file_name = crate::config::WHISPER_MODEL_CATALOG
+            .iter()
+            .find(|(name, ..)| *name == model_name)
+            .map(|(_, filename, ..)| *filename)
+            .ok_or_else(|| {
+                anyhow!(
+                    "Unsupported model: {}. Available: {}",
+                    model_name,
+                    crate::config::WHISPER_MODEL_CATALOG
+                        .iter()
+                        .map(|(name, ..)| *name)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
 
-        self.download_model_from_url(model_name, model_url, progress_callback).await
+        let model_url = crate::config::whisper_model_url(file_name);
+
+        self.download_model_from_url(model_name, &model_url, progress_callback).await
     }
 
     async fn download_model_from_url(
@@ -1133,6 +1144,13 @@ impl WhisperEngine {
                 .map_err(|e| anyhow!("Failed to create models directory: {}", e))?;
         }
 
+        // Refuse before writing anything when the target volume cannot hold the
+        // file. Without this the download streams into a nearly-full disk and
+        // fails partway through, leaving a truncated `ggml-*.bin` that later
+        // reads as a corrupt model — a much harder failure to diagnose than
+        // "not enough space".
+        crate::whisper_engine::download::ensure_space_for_model(&self.models_dir, model_name)?;
+
         {
             let mut models = self.available_models.write().await;
             if let Some(model_info) = models.get_mut(model_name) {
@@ -1140,10 +1158,9 @@ impl WhisperEngine {
             }
         }
 
-        let client = Client::builder()
-            .user_agent(concat!("Meetily/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|e| anyhow!("Failed to create download client: {}", e))?;
+        // Proxy-aware client: `Client::new()` ignores the OS proxy, which makes
+        // downloads fail outright on machines that need one.
+        let client = crate::http_client::client_with_proxy();
         let response = tokio::select! {
             biased;
             _ = active_download.cancellation.cancelled() => return Err(DownloadCancelled.into()),

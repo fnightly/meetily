@@ -1,7 +1,8 @@
 'use client';
 
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
-import { ChevronDown, ChevronRight, File, Settings, ChevronLeftCircle, ChevronRightCircle, Calendar, StickyNote, Home, Trash2, Mic, Square, Plus, Search, Pencil, NotebookPen, SearchIcon, X, Upload } from 'lucide-react';
+import { ChevronDown, ChevronRight, File, Settings, ChevronLeftCircle, ChevronRightCircle, Calendar, StickyNote, Home, Trash2, Mic, Square, Plus, Search, Pencil, NotebookPen, SearchIcon, X, Upload, AudioLines } from 'lucide-react';
+import { useI18n } from '@/contexts/I18nContext';
 import { useRouter, usePathname } from 'next/navigation';
 import { useSidebar } from './SidebarProvider';
 import type { CurrentMeeting } from '@/components/Sidebar/SidebarProvider';
@@ -32,6 +33,7 @@ import { ComplianceNotification } from '../ComplianceNotification';
 import { Input } from '../ui/input';
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '../ui/input-group';
 
+
 interface SidebarItem {
   id: string;
   title: string;
@@ -41,7 +43,12 @@ interface SidebarItem {
 
 const Sidebar: React.FC = () => {
   const router = useRouter();
+  const { t } = useI18n();
   const pathname = usePathname();
+
+  // A recordings page flag is needed by both the collapsed rail and the
+  // expanded list, so it lives at component scope rather than inside a renderer.
+  const isRecordingsPage = pathname === '/recordings';
   const {
     currentMeeting,
     setCurrentMeeting,
@@ -467,7 +474,7 @@ const Sidebar: React.FC = () => {
               </button>
             </TooltipTrigger>
             <TooltipContent side="right">
-              <p>Home</p>
+              <p>{t('nav.home')}</p>
             </TooltipContent>
           </Tooltip>
 
@@ -486,7 +493,7 @@ const Sidebar: React.FC = () => {
               </button>
             </TooltipTrigger>
             <TooltipContent side="right">
-              <p>{isRecording ? "Recording in progress..." : "Start Recording"}</p>
+              <p>{isRecording ? t('nav.recordingInProgress') : t('nav.startRecording')}</p>
             </TooltipContent>
           </Tooltip>
 
@@ -501,10 +508,27 @@ const Sidebar: React.FC = () => {
                 </button>
               </TooltipTrigger>
               <TooltipContent side="right">
-                <p>Import Audio</p>
+                <p>{t('nav.importAudio')}</p>
               </TooltipContent>
             </Tooltip>
           )}
+
+          {/* Recordings: saved audio is app content, not a setting, so it sits
+              beside Home rather than inside the settings tabs. */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={() => router.push('/recordings')}
+                className={`p-2 rounded-lg transition-colors duration-150 ${isRecordingsPage ? 'bg-gray-100' : 'hover:bg-gray-100'
+                  }`}
+              >
+                <AudioLines className="w-5 h-5 text-gray-600" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="right">
+              <p>{t('nav.recordings')}</p>
+            </TooltipContent>
+          </Tooltip>
 
           <Tooltip>
             <TooltipTrigger asChild>
@@ -520,7 +544,7 @@ const Sidebar: React.FC = () => {
               </button>
             </TooltipTrigger>
             <TooltipContent side="right">
-              <p>Meeting Notes</p>
+              <p>{t('nav.meetingNotes')}</p>
             </TooltipContent>
           </Tooltip>
 
@@ -535,7 +559,7 @@ const Sidebar: React.FC = () => {
               </button>
             </TooltipTrigger>
             <TooltipContent side="right">
-              <p>Settings</p>
+              <p>{t('nav.settings')}</p>
             </TooltipContent>
           </Tooltip>
 
@@ -578,8 +602,12 @@ const Sidebar: React.FC = () => {
               toggleFolder(item.id);
             } else {
               setCurrentMeeting({ id: item.id, title: item.title });
-              const basePath = item.id.startsWith('intro-call') ? '/' :
-                item.id.includes('-') ? `/meeting-details?id=${item.id}` : `/notes/${item.id}`;
+              // The placeholder entry has no meeting behind it. Everything else
+              // is a real meeting id (`meeting-<uuid>`) and opens the details
+              // page; notes are reached through their own action on the row.
+              const basePath = item.id.startsWith('intro-call')
+                ? '/'
+                : `/meeting-details?id=${encodeURIComponent(item.id)}`;
               router.push(basePath);
             }
           }}
@@ -618,6 +646,20 @@ const Sidebar: React.FC = () => {
                 <span className="flex-1 break-words">{item.title}</span>
                 {isMeetingItem && (
                   <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        // Notes are keyed by meeting id, passed as a query
+                        // parameter rather than a path segment so the static
+                        // export does not need to enumerate runtime meeting ids.
+                        router.push(`/notes?id=${encodeURIComponent(item.id)}`);
+                      }}
+                      className="hover:text-amber-600 p-1 rounded-md hover:bg-amber-50 flex-shrink-0"
+                      aria-label={`Open notes for ${item.title}`}
+                      title="Open notes"
+                    >
+                      <StickyNote className="w-4 h-4" />
+                    </button>
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -696,7 +738,7 @@ const Sidebar: React.FC = () => {
 
                 <div className="relative mb-1">
                   <InputGroup >
-                    <InputGroupInput placeholder='Search meeting content...' value={searchQuery}
+                    <InputGroupInput placeholder={t('nav.searchPlaceholder')} value={searchQuery}
                       onChange={(e) => handleSearchChange(e.target.value)}
                     />
                     <InputGroupAddon>
@@ -728,7 +770,17 @@ const Sidebar: React.FC = () => {
                 className="p-3  text-lg font-semibold items-center hover:bg-gray-100 h-10   flex mx-3 mt-3 rounded-lg cursor-pointer"
               >
                 <Home className="w-4 h-4 mr-2" />
-                <span>Home</span>
+                <span>{t('nav.home')}</span>
+              </div>
+            )}
+            {!isCollapsed && (
+              <div
+                onClick={() => router.push('/recordings')}
+                className={`p-3 text-lg font-semibold items-center h-10 flex mx-3 mt-1 rounded-lg cursor-pointer ${isRecordingsPage ? 'bg-gray-100' : 'hover:bg-gray-100'
+                  }`}
+              >
+                <AudioLines className="w-4 h-4 mr-2" />
+                <span>{t('nav.recordings')}</span>
               </div>
             )}
           </div>
@@ -736,6 +788,7 @@ const Sidebar: React.FC = () => {
           {/* Content area */}
           <div className="flex-1 flex flex-col min-h-0">
             {renderCollapsedIcons()}
+
             {/* Meeting Notes folder header - fixed */}
             {!isCollapsed && (
               <div className="flex-shrink-0">
@@ -782,12 +835,12 @@ const Sidebar: React.FC = () => {
               {isRecording ? (
                 <>
                   <Square className="w-4 h-4 mr-2" />
-                  <span>Recording in progress...</span>
+                  <span>{t('nav.recordingInProgress')}</span>
                 </>
               ) : (
                 <>
                   <Mic className="w-4 h-4 mr-2" />
-                  <span>Start Recording</span>
+                  <span>{t('nav.startRecording')}</span>
                 </>
               )}
             </button>
@@ -798,7 +851,7 @@ const Sidebar: React.FC = () => {
                 className="w-full flex items-center justify-center px-3 py-2 mt-1 text-sm font-medium text-gray-700 bg-blue-100 hover:bg-blue-200 rounded-lg transition-colors shadow-sm"
               >
                 <Upload className="w-4 h-4 mr-2" />
-                <span>Import Audio</span>
+                <span>{t('nav.importAudio')}</span>
               </button>
             )}
 
@@ -807,7 +860,7 @@ const Sidebar: React.FC = () => {
               className="w-full flex items-center justify-center px-3 py-1.5 mt-1 mb-1 text-sm font-medium text-gray-700 bg-gray-200 hover:bg-gray-300 rounded-lg transition-colors shadow-sm"
             >
               <Settings className="w-4 h-4 mr-2" />
-              <span>Settings</span>
+              <span>{t('nav.settings')}</span>
             </button>
             <Info isCollapsed={isCollapsed} />
             <div className="w-full flex items-center justify-center px-3 py-1 text-xs text-gray-400">

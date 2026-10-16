@@ -14,13 +14,16 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Sparkles, Settings, Loader2, FileText, Check, Square } from 'lucide-react';
+import { Sparkles, Settings, Loader2, FileText, Check, Square, SlidersHorizontal } from 'lucide-react';
 import Analytics from '@/lib/analytics';
+import { TemplateManagerModal } from './TemplateManagerModal';
+import type { TemplateInfo } from '@/hooks/meeting-details/useTemplates';
 import { useState, useEffect, ReactNode } from 'react';
 
-interface SummaryGeneratorButtonGroupProps {
+export interface SummaryGeneratorButtonGroupProps {
   languageSlot?: ReactNode;
   modelConfig: ModelConfig;
   setModelConfig: (config: ModelConfig | ((prev: ModelConfig) => ModelConfig)) => void;
@@ -29,13 +32,27 @@ interface SummaryGeneratorButtonGroupProps {
   onStopGeneration: () => void;
   customPrompt: string;
   summaryStatus: 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
-  availableTemplates: Array<{ id: string, name: string, description: string }>;
+  availableTemplates: TemplateInfo[];
   selectedTemplate: string;
   onTemplateSelect: (templateId: string, templateName: string) => void;
   hasTranscripts?: boolean;
   hasSummary?: boolean;
   isModelConfigLoading?: boolean;
   onOpenModelSettings?: (openFn: () => void) => void;
+  /** Template management (optional: the selector still works without it). */
+  templateActions?: {
+    loadTemplate: (id: string) => Promise<{ name: string; description: string; sections: Array<{ title: string; instruction: string; format: string; item_format?: string | null }> }>;
+    saveTemplate: (params: {
+      templateId?: string | null;
+      name: string;
+      description: string;
+      sections: Array<{ title: string; instruction: string; format: string; item_format?: string | null }>;
+      overwrite?: boolean;
+    }) => Promise<{ id: string; overwritten: boolean }>;
+    duplicateTemplate: (id: string, newName?: string) => Promise<{ id: string }>;
+    deleteTemplate: (id: string) => Promise<void>;
+    getCustomTemplatesDir: () => Promise<string>;
+  };
 }
 
 export function SummaryGeneratorButtonGroup({
@@ -53,9 +70,11 @@ export function SummaryGeneratorButtonGroup({
   hasSummary = false,
   isModelConfigLoading = false,
   onOpenModelSettings,
+  templateActions,
   languageSlot
 }: SummaryGeneratorButtonGroupProps) {
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  const [templateManagerOpen, setTemplateManagerOpen] = useState(false);
 
   // Expose the function to open the modal via callback registration
   useEffect(() => {
@@ -188,8 +207,37 @@ export function SummaryGeneratorButtonGroup({
               </DropdownMenuItem>
             ))}
 
+            {templateActions && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={() => {
+                    setTemplateManagerOpen(true);
+                    Analytics.trackFeatureUsed('template_manager_opened');
+                  }}
+                  className="flex items-center gap-2"
+                >
+                  <SlidersHorizontal className="h-4 w-4" />
+                  <span>Manage templates…</span>
+                </DropdownMenuItem>
+              </>
+            )}
+
           </DropdownMenuContent>
         </DropdownMenu>
+      )}
+
+      {templateActions && (
+        <TemplateManagerModal
+          open={templateManagerOpen}
+          onOpenChange={setTemplateManagerOpen}
+          templates={availableTemplates}
+          loadTemplate={templateActions.loadTemplate}
+          saveTemplate={templateActions.saveTemplate}
+          duplicateTemplate={templateActions.duplicateTemplate}
+          deleteTemplate={templateActions.deleteTemplate}
+          getCustomTemplatesDir={templateActions.getCustomTemplatesDir}
+        />
       )}
     </ButtonGroup>
   );

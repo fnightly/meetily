@@ -24,6 +24,7 @@ import { UpdateCheckProvider } from '@/components/UpdateCheckProvider'
 import { RecordingPostProcessingProvider } from '@/contexts/RecordingPostProcessingProvider'
 import { ImportAudioDialog, ImportDropOverlay } from '@/components/ImportAudio'
 import { ImportDialogProvider } from '@/contexts/ImportDialogContext'
+import { I18nProvider } from '@/contexts/I18nContext'
 import { isAudioExtension, getAudioFormatsDisplayList } from '@/constants/audioFormats'
 
 
@@ -231,8 +232,9 @@ export default function RootLayout({
   }
 
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <body className={`${sourceSans3.variable} font-sans antialiased`}>
+        <I18nProvider>
         <AnalyticsProvider>
           <RecordingStateProvider>
             <TranscriptProvider>
@@ -275,6 +277,7 @@ export default function RootLayout({
             </TranscriptProvider>
           </RecordingStateProvider>
         </AnalyticsProvider>
+        </I18nProvider>
 
         <Toaster position="bottom-center" richColors closeButton />
       </body>

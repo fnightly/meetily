@@ -329,43 +329,68 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         ));
     }
 
-    // Validate that transcription models are available before starting recording
-    info!("🔍 Validating transcription model availability before starting recording...");
-    if let Err(validation_error) = transcription::validate_transcription_model_ready(&app).await {
-        error!("Model validation failed: {}", validation_error);
+    // Load preferences before validating the model. In deferred-transcription mode
+    // no engine is needed during capture, and model validation is by far the most
+    // expensive part of starting a recording: it loads the whole model into
+    // memory, which is seconds for `base` and tens of seconds for `large-v3`.
+    let (auto_save, defer_transcription, encoding, preferred_mic_name, preferred_system_name, recordings_folder) =
+        match super::recording_preferences::load_recording_preferences(&app).await {
+            Ok(prefs) => {
+                info!("📋 Loaded recording preferences: auto_save={}, defer_transcription={}, format={}, quality={}, preferred_mic={:?}, preferred_system={:?}",
+                      prefs.auto_save, prefs.defer_transcription, prefs.file_format, prefs.file_quality,
+                      prefs.preferred_mic_device, prefs.preferred_system_device);
+                (
+                    prefs.auto_save,
+                    prefs.defer_transcription,
+                    prefs.encoding_settings(),
+                    prefs.preferred_mic_device,
+                    prefs.preferred_system_device,
+                    Some(prefs.save_folder.clone()),
+                )
+            }
+            Err(e) => {
+                warn!("Failed to load recording preferences, using defaults: {}", e);
+                (
+                    true,
+                    false,
+                    super::formats::AudioEncodingSettings::default(),
+                    None,
+                    None,
+                    None,
+                )
+            }
+        };
 
-        // Emit error event for frontend - actionable: false to show toast instead of modal
-        // (download progress is already shown in top-right toast)
-        let _ = app.emit("transcription-error", serde_json::json!({
-            "error": validation_error,
-            "userMessage": format!("Recording cannot start: {}", validation_error),
-            "actionable": false,
-            "phase": "startup"
-        }));
+    if defer_transcription {
+        // Audio-only capture: transcription runs afterwards on the saved file, so
+        // starting the engine now would delay recording for no benefit.
+        info!("⏩ Deferred transcription is on; skipping transcription model validation for a faster start");
+    } else {
+        // Validate that transcription models are available before starting recording
+        info!("🔍 Validating transcription model availability before starting recording...");
+        if let Err(validation_error) = transcription::validate_transcription_model_ready(&app).await {
+            error!("Model validation failed: {}", validation_error);
 
-        return Err(validation_error);
+            // Emit error event for frontend - actionable: false to show toast instead of modal
+            // (download progress is already shown in top-right toast)
+            let _ = app.emit("transcription-error", serde_json::json!({
+                "error": validation_error,
+                "userMessage": format!("Recording cannot start: {}", validation_error),
+                "actionable": false,
+                "phase": "startup"
+            }));
+
+            return Err(validation_error);
+        }
+        info!("✅ Transcription model validation passed");
     }
-    info!("✅ Transcription model validation passed");
 
     // Notify frontend that startup has begun (surfaces STARTING state)
     app.emit("recording-starting", serde_json::json!({
         "message": "Recording initialization started"
     })).map_err(|e| e.to_string())?;
 
-    // Load recording preferences to get auto_save AND device preferences
-    let (auto_save, preferred_mic_name, preferred_system_name) =
-        match super::recording_preferences::load_recording_preferences(&app).await {
-            Ok(prefs) => {
-                info!("📋 Loaded recording preferences: auto_save={}, preferred_mic={:?}, preferred_system={:?}",
-                      prefs.auto_save, prefs.preferred_mic_device, prefs.preferred_system_device);
-                (prefs.auto_save, prefs.preferred_mic_device, prefs.preferred_system_device)
-            }
-            Err(e) => {
-                warn!("Failed to load recording preferences, using defaults: {}", e);
-                (true, None, None)
-            }
-        };
-
+    // Preferences were loaded above, before model validation.
     #[cfg(not(target_os = "macos"))]
     let microphone_device = resolve_mic_or_default(&app, preferred_mic_name.as_deref());
 
@@ -402,7 +427,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
     let transcription_receiver = manager
-        .start_recording(microphone_device, system_device, auto_save)
+        .start_recording(microphone_device, system_device, auto_save, defer_transcription, encoding, recordings_folder.clone())
         .await
         .map_err(|error| map_recording_start_error(&app, error))?;
 
@@ -410,6 +435,8 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // A background task will process device events (hot-swap) without frontend polling.
     let device_event_receiver = manager.take_device_event_receiver();
     let session = manager.get_state().clone();
+    // Capture the session's transcription mode before the manager is moved.
+    let defer_transcription_session = manager.get_state().is_transcription_deferred();
 
     // Store the manager globally to keep it alive
     {
@@ -428,7 +455,11 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     drop(engine_lifecycle_guard);
 
     // Start optimized parallel transcription task and store handle
-    let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver);
+    let task_handle = transcription::start_transcription_task(
+        app.clone(),
+        transcription_receiver,
+        defer_transcription_session,
+    );
     {
         let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
         *global_task = Some(task_handle);
@@ -519,6 +550,40 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         ));
     }
 
+    // Load preferences before validating the model, so deferred-transcription mode
+    // can skip loading an engine it will not use during capture. Model validation
+    // loads the whole model into memory — the slowest step in starting a recording.
+    let (auto_save, defer_transcription, encoding, recordings_folder) =
+        match super::recording_preferences::load_recording_preferences(&app).await {
+            Ok(prefs) => {
+                info!(
+                    "📋 Loaded recording preferences: auto_save={}, defer_transcription={}, format={}, quality={}",
+                    prefs.auto_save, prefs.defer_transcription, prefs.file_format, prefs.file_quality
+                );
+                (
+                    prefs.auto_save,
+                    prefs.defer_transcription,
+                    prefs.encoding_settings(),
+                    Some(prefs.save_folder.clone()),
+                )
+            }
+            Err(e) => {
+                warn!("Failed to load recording preferences, defaulting to auto_save=true: {}", e);
+                (
+                    true,
+                    false,
+                    super::formats::AudioEncodingSettings::default(),
+                    None,
+                )
+            }
+        };
+
+    if defer_transcription {
+        // Audio-only capture: the engine is not needed until the recording is later
+        // transcribed, so skip loading it and start capturing sooner.
+        info!("⏩ Deferred transcription is on; skipping transcription model validation for a faster start");
+    } else {
+
     // Validate that transcription models are available before starting recording
     info!("🔍 Validating transcription model availability before starting recording...");
     if let Err(validation_error) = transcription::validate_transcription_model_ready(&app).await {
@@ -536,6 +601,8 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         return Err(validation_error);
     }
     info!("✅ Transcription model validation passed");
+
+    }
 
     // Notify frontend that startup has begun (surfaces STARTING state)
     app.emit("recording-starting", serde_json::json!({
@@ -559,18 +626,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Create new recording manager
     let mut manager = RecordingManager::new();
 
-    // Load recording preferences to check auto_save setting
-    let auto_save = match super::recording_preferences::load_recording_preferences(&app).await {
-        Ok(prefs) => {
-            info!("📋 Loaded recording preferences: auto_save={}", prefs.auto_save);
-            prefs.auto_save
-        }
-        Err(e) => {
-            warn!("Failed to load recording preferences, defaulting to auto_save=true: {}", e);
-            true // Default to saving if preferences can't be loaded
-        }
-    };
-
+    // Preferences were loaded above, before model validation.
     // Always ensure a meeting name is set so incremental saver initializes
     let effective_meeting_name = meeting_name.clone().unwrap_or_else(|| {
         let now = chrono::Local::now();
@@ -589,7 +645,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     // Start recording with specified devices and auto_save setting
     let transcription_receiver = manager
-        .start_recording(mic_device, system_device, auto_save)
+        .start_recording(mic_device, system_device, auto_save, defer_transcription, encoding, recordings_folder.clone())
         .await
         .map_err(|error| map_recording_start_error(&app, error))?;
 
@@ -597,6 +653,8 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // A background task will process device events (hot-swap) without frontend polling.
     let device_event_receiver = manager.take_device_event_receiver();
     let session = manager.get_state().clone();
+    // Capture the session's transcription mode before the manager is moved.
+    let defer_transcription_session = manager.get_state().is_transcription_deferred();
 
     // Store the manager globally to keep it alive
     {
@@ -615,7 +673,11 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     drop(engine_lifecycle_guard);
 
     // Start optimized parallel transcription task and store handle
-    let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver);
+    let task_handle = transcription::start_transcription_task(
+        app.clone(),
+        transcription_receiver,
+        defer_transcription_session,
+    );
     {
         let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
         *global_task = Some(task_handle);
@@ -1013,12 +1075,17 @@ pub async fn stop_recording<R: Runtime>(
     );
 
     // Perform final cleanup with the manager if available
-    let (meeting_folder, meeting_name) = if let Some(mut manager) = manager_for_cleanup {
-        info!("🧹 Performing final cleanup and saving recording data");
+    let (meeting_folder, meeting_name, transcription_deferred) =
+        if let Some(mut manager) = manager_for_cleanup {
+            info!("🧹 Performing final cleanup and saving recording data");
 
-        // Extract meeting info BEFORE async operations
-        let meeting_folder = manager.get_meeting_folder();
-        let meeting_name = manager.get_meeting_name();
+            // Extract meeting info BEFORE async operations. The transcription mode
+            // comes from the live session rather than the stored preference: the
+            // user may have changed the setting mid-recording, and the frontend
+            // must be told what this recording actually did.
+            let meeting_folder = manager.get_meeting_folder();
+            let meeting_name = manager.get_meeting_name();
+            let transcription_deferred = manager.get_state().is_transcription_deferred();
 
         match tokio::time::timeout(
             tokio::time::Duration::from_secs(300), // 5 minutes max for file I/O
@@ -1040,10 +1107,10 @@ pub async fn stop_recording<R: Runtime>(
             }
         }
 
-        (meeting_folder, meeting_name)
+        (meeting_folder, meeting_name, transcription_deferred)
     } else {
         info!("ℹ️ No recording manager available for cleanup");
-        (None, None)
+        (None, None, false)
     };
 
     // Set recording flag to false
@@ -1079,13 +1146,16 @@ pub async fn stop_recording<R: Runtime>(
         }),
     );
 
-    // Emit final stop event with folder_path and meeting_name for frontend to save
+    // Emit final stop event with folder_path and meeting_name for frontend to save.
+    // `transcription_deferred` tells the frontend there are no live transcripts to
+    // wait for, so it can skip the polling wait and offer the follow-up choices.
     app.emit(
         "recording-stopped",
         serde_json::json!({
             "message": "Recording stopped - frontend will save after all transcripts received",
             "folder_path": folder_path_str,
-            "meeting_name": meeting_name_str
+            "meeting_name": meeting_name_str,
+            "transcription_deferred": transcription_deferred
         }),
     )
     .map_err(|e| e.to_string())?;
@@ -1103,11 +1173,25 @@ pub async fn is_recording() -> bool {
 }
 
 /// Get recording statistics
+///
+/// Registered as a Tauri command in `lib.rs`: the frontend polls this while
+/// stopping a recording and only saves once `is_processing` is false **and**
+/// `chunks_in_queue` is 0. Both fields must therefore be real — an earlier
+/// version reported `is_processing: false, chunks_in_queue: 0` as constants,
+/// which made the save happen while transcription was still running and
+/// truncated the transcript.
+#[tauri::command]
 pub async fn get_transcription_status() -> TranscriptionStatus {
+    let recording = IS_RECORDING.load(Ordering::SeqCst);
+    let pending = super::transcription::worker::pending_chunk_count();
+    let idle_ms = super::transcription::worker::millis_since_last_activity().unwrap_or(0);
+
     TranscriptionStatus {
-        chunks_in_queue: 0,
-        is_processing: IS_RECORDING.load(Ordering::SeqCst),
-        last_activity_ms: 0,
+        chunks_in_queue: pending,
+        // Recording counts as processing, and so does a non-empty queue: the
+        // worker loop may still be draining after the recorder has stopped.
+        is_processing: recording || pending > 0,
+        last_activity_ms: idle_ms,
     }
 }
 

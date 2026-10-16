@@ -3,7 +3,7 @@
 import { useState, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
-import { Copy, FolderOpen, RefreshCw } from 'lucide-react';
+import { Copy, FolderOpen, RefreshCw, Download } from 'lucide-react';
 import Analytics from '@/lib/analytics';
 import { RetranscribeDialog } from './RetranscribeDialog';
 import { useConfig } from '@/contexts/ConfigContext';
@@ -16,6 +16,9 @@ interface TranscriptButtonGroupProps {
   meetingId?: string;
   meetingFolderPath?: string | null;
   onRefetchTranscripts?: () => Promise<void>;
+  /** Export the meeting as Markdown (transcript + summary). */
+  onExportMarkdown?: () => void | Promise<void>;
+  isExporting?: boolean;
 }
 
 
@@ -26,6 +29,8 @@ export function TranscriptButtonGroup({
   meetingId,
   meetingFolderPath,
   onRefetchTranscripts,
+  onExportMarkdown,
+  isExporting = false,
 }: TranscriptButtonGroupProps) {
   const { betaFeatures } = useConfig();
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
@@ -53,6 +58,21 @@ export function TranscriptButtonGroup({
         >
           <Copy />
           <span className="hidden @[22rem]:inline">Copy</span>
+        </Button>
+
+        <Button
+          variant="outline"
+          size="sm"
+          className="px-2 @[22rem]:px-3"
+          onClick={() => {
+            Analytics.trackButtonClick('export_markdown', 'meeting_details');
+            onExportMarkdown?.();
+          }}
+          disabled={isExporting}
+          title="Export this meeting as Markdown (summary + transcript)"
+        >
+          <Download />
+          <span className="hidden @[22rem]:inline">{isExporting ? 'Exporting…' : 'Export'}</span>
         </Button>
 
         <Button

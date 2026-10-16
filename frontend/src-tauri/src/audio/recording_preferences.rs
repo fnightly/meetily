@@ -15,7 +15,57 @@ use crate::audio::capture::AudioCaptureBackend;
 pub struct RecordingPreferences {
     pub save_folder: PathBuf,
     pub auto_save: bool,
+    /// Output format identifier (`m4a`, `mp3`, `wav`, `flac`, `ogg`).
+    ///
+    /// Legacy values are accepted: `mp4`/`aac` are read as `m4a`, which is what
+    /// they always actually produced.
     pub file_format: String,
+    /// Encoding quality for lossy formats (`low`, `medium`, `high`, `best`).
+    /// Lossless formats ignore it.
+    #[serde(default = "default_file_quality")]
+    pub file_quality: String,
+    /// When true, recording does not run realtime transcription: only audio is
+    /// captured, and transcription is expected to be run afterwards on the
+    /// saved file (via the retranscription path). This trades live captions for
+    /// a much lighter recording session (no ASR inference competing with
+    /// capture, no realtime VAD pass).
+    #[serde(default)]
+    pub defer_transcription: bool,
+
+    /// When true, the whole transcript is rewritten by a local model once the
+    /// recording stops, to drop filler words and fix spoken punctuation.
+    ///
+    /// Off by default: cleanup rewrites the user's own words, so it is a lossy
+    /// transformation that has to be opted into.
+    #[serde(default)]
+    pub cleanup_after_recording: bool,
+
+    /// Stop automatically after this many seconds with no audible input.
+    ///
+    /// Zero disables the feature, which is the default: stopping on silence can
+    /// cut off a quiet ending, so it must be opted into.
+    #[serde(default)]
+    pub silence_stop_enabled_seconds: u32,
+
+    /// Hard cap on recording length in seconds. Zero means no cap.
+    ///
+    /// A safety net for the common "left it recording" case; it also bounds the
+    /// damage when a meeting runs long unattended.
+    #[serde(default)]
+    pub max_recording_seconds: u32,
+
+    /// Delete recordings older than this many days. Zero keeps them forever.
+    ///
+    /// Off by default: silently deleting a user's recordings is not something to
+    /// do without an explicit choice.
+    #[serde(default)]
+    pub recordings_retention_days: u32,
+
+    /// Warn when free space on the recordings volume drops below this many MB.
+    /// Zero disables the warning.
+    #[serde(default = "default_low_disk_warning_mb")]
+    pub low_disk_warning_mb: u32,
+
     #[serde(default)]
     pub preferred_mic_device: Option<String>,
     #[serde(default)]
@@ -25,12 +75,42 @@ pub struct RecordingPreferences {
     pub system_audio_backend: Option<String>,
 }
 
+/// Serde default for `file_quality`.
+fn default_file_quality() -> String {
+    super::formats::RecordingQuality::default().id().to_string()
+}
+
+/// Warn below 1 GB free by default.
+///
+/// A one-hour lossy recording is tens of MB, but a WAV recording is ~330 MB, so
+/// 1 GB leaves room for a long session before the disk is actually a problem.
+fn default_low_disk_warning_mb() -> u32 {
+    1024
+}
+
+impl RecordingPreferences {
+    /// Resolve the stored strings into validated encoding settings.
+    ///
+    /// Unknown or corrupt values fall back to the defaults instead of failing, so
+    /// a bad preferences file cannot block recording.
+    pub fn encoding_settings(&self) -> super::formats::AudioEncodingSettings {
+        super::formats::AudioEncodingSettings::from_stored(&self.file_format, &self.file_quality)
+    }
+}
+
 impl Default for RecordingPreferences {
     fn default() -> Self {
         Self {
             save_folder: get_default_recordings_folder(),
             auto_save: true,
-            file_format: "mp4".to_string(),
+            file_format: super::formats::RecordingFormat::default().id().to_string(),
+            file_quality: default_file_quality(),
+            defer_transcription: false,
+            cleanup_after_recording: false,
+            silence_stop_enabled_seconds: 0,
+            max_recording_seconds: 0,
+            recordings_retention_days: 0,
+            low_disk_warning_mb: default_low_disk_warning_mb(),
             preferred_mic_device: None,
             preferred_system_device: None,
             #[cfg(target_os = "macos")]
@@ -108,6 +188,9 @@ pub async fn load_recording_preferences<R: Runtime>(
     // Try to get the preferences from store
     let prefs = if let Some(value) = store.get("preferences") {
         match serde_json::from_value::<RecordingPreferences>(value.clone()) {
+            // `mut` is only needed on macOS, where the backend field is refreshed
+            // from the current capture backend below.
+            #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
             Ok(mut p) => {
                 info!("Loaded recording preferences from store");
                 // Update macOS backend to current value if needed
@@ -128,8 +211,11 @@ pub async fn load_recording_preferences<R: Runtime>(
         RecordingPreferences::default()
     };
 
-    info!("Loaded recording preferences: save_folder={:?}, auto_save={}, format={}, mic={:?}, system={:?}",
-          prefs.save_folder, prefs.auto_save, prefs.file_format,
+    // Logs the switches that change what gets written, so the effective settings
+    // can be confirmed from a log rather than inferred from behaviour.
+    info!("Loaded recording preferences: save_folder={:?}, auto_save={}, format={}, quality={}, defer_transcription={}, cleanup_after_recording={}, mic={:?}, system={:?}",
+          prefs.save_folder, prefs.auto_save, prefs.file_format, prefs.file_quality,
+          prefs.defer_transcription, prefs.cleanup_after_recording,
           prefs.preferred_mic_device, prefs.preferred_system_device);
     Ok(prefs)
 }
@@ -185,6 +271,56 @@ pub async fn get_recording_preferences<R: Runtime>(
     load_recording_preferences(&app)
         .await
         .map_err(|e| format!("Failed to load recording preferences: {}", e))
+}
+
+/// One selectable recording format/quality, for the settings UI.
+#[derive(Debug, Serialize)]
+pub struct RecordingFormatOption {
+    pub id: String,
+    pub label: String,
+    /// True when the format ignores the quality setting.
+    pub lossless: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecordingEncodingOptions {
+    pub formats: Vec<RecordingFormatOption>,
+    pub qualities: Vec<RecordingFormatOption>,
+    /// Format id to select when nothing is configured.
+    pub default_format: String,
+    pub default_quality: String,
+}
+
+/// Supported recording formats and quality levels.
+///
+/// Exposed from Rust so the UI cannot offer a format the encoder does not
+/// support — the previous hardcoded UI list had no connection to the encoder at
+/// all, which is how it ended up advertising a format that was never produced.
+#[tauri::command]
+pub async fn get_recording_encoding_options() -> Result<RecordingEncodingOptions, String> {
+    use super::formats::{RecordingFormat, RecordingQuality};
+
+    Ok(RecordingEncodingOptions {
+        formats: RecordingFormat::ALL
+            .iter()
+            .map(|f| RecordingFormatOption {
+                id: f.id().to_string(),
+                label: f.label().to_string(),
+                lossless: f.is_lossless(),
+            })
+            .collect(),
+        qualities: RecordingQuality::ALL
+            .iter()
+            .map(|q| RecordingFormatOption {
+                id: q.id().to_string(),
+                label: q.label().to_string(),
+                // Quality is meaningless for lossless formats; the UI hides it.
+                lossless: false,
+            })
+            .collect(),
+        default_format: RecordingFormat::default().id().to_string(),
+        default_quality: RecordingQuality::default().id().to_string(),
+    })
 }
 
 #[tauri::command]
@@ -245,13 +381,49 @@ pub async fn open_recordings_folder<R: Runtime>(app: AppHandle<R>) -> Result<(),
 
 #[tauri::command]
 pub async fn select_recording_folder<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
 ) -> Result<Option<String>, String> {
-    // Use Tauri's dialog to select folder
-    // For now, return None - this would need to be implemented with tauri-plugin-dialog
-    // when it's available in the Cargo.toml
-    warn!("Folder selection not yet implemented - using dialog plugin");
-    Ok(None)
+    use tauri_plugin_dialog::DialogExt;
+
+    // Default the dialog to the currently configured folder so the user can see
+    // where recordings go today.
+    let current = load_recording_preferences(&app)
+        .await
+        .map(|p| p.save_folder)
+        .ok();
+
+    let app_for_dialog = app.clone();
+    let picked = tokio::task::spawn_blocking(move || {
+        let mut builder = app_for_dialog.dialog().file().set_title("Select recordings folder");
+        if let Some(dir) = current.filter(|d| d.exists()) {
+            builder = builder.set_directory(dir);
+        }
+        builder.blocking_pick_folder()
+    })
+    .await
+    .map_err(|e| format!("Folder dialog task failed: {e}"))?;
+
+    let Some(folder) = picked else {
+        info!("User cancelled recordings folder selection");
+        return Ok(None);
+    };
+
+    let path = PathBuf::from(folder.to_string());
+    ensure_recordings_directory(&path).map_err(|e| format!("Failed to prepare recordings folder: {e}"))?;
+
+    // Persist immediately: the caller expects the choice to take effect, and the
+    // settings UI reads the same preference back.
+    let mut prefs = load_recording_preferences(&app)
+        .await
+        .map_err(|e| format!("Failed to load recording preferences: {e}"))?;
+    prefs.save_folder = path.clone();
+    save_recording_preferences(&app, &prefs)
+        .await
+        .map_err(|e| format!("Failed to save recording preferences: {e}"))?;
+
+    let as_string = path.to_string_lossy().to_string();
+    info!("Recordings folder set to: {}", as_string);
+    Ok(Some(as_string))
 }
 
 // Backend selection commands

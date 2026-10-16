@@ -69,7 +69,7 @@ pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) 
             config
         }
         Ok(None) => {
-            info!("📝 No transcript config found, defaulting to parakeet");
+            info!("📝 No transcript config found, using the catalog default provider");
             crate::api::api::TranscriptConfig {
                 provider: "parakeet".to_string(),
                 model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
@@ -77,7 +77,7 @@ pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) 
             }
         }
         Err(e) => {
-            warn!("⚠️ Failed to get transcript config: {}, defaulting to parakeet", e);
+            warn!("⚠️ Failed to get transcript config: {}, using the catalog default provider", e);
             crate::api::api::TranscriptConfig {
                 provider: "parakeet".to_string(),
                 model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
@@ -85,6 +85,20 @@ pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) 
             }
         }
     };
+
+    // Reserved providers (listed in settings but not wired up) must be refused
+    // here, before any recording starts. This is the chokepoint that keeps cloud
+    // audio upload impossible while those providers are unimplemented.
+    super::catalog::ensure_selectable(&config.provider)?;
+
+    // Language capability is checked per provider: recommending Parakeet for a
+    // Chinese meeting produced unusable output with no explanation.
+    let requested_language = crate::get_language_preference_internal();
+    if let Err(e) = super::catalog::validate_language(&config.provider, requested_language.as_deref())
+    {
+        warn!("❌ Provider/language mismatch: {}", e);
+        return Err(e);
+    }
 
     // Validate based on provider
     match config.provider.as_str() {
@@ -136,6 +150,16 @@ pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) 
             }
         }
         other => {
+            // Reserved providers (cloud) land here: they are listed in settings
+            // but must not be used to record yet.
+            if !super::catalog::is_implemented(other) {
+                return Err(super::catalog::ensure_selectable(other)
+                    .err()
+                    .unwrap_or_else(|| {
+                        format!("Transcription provider '{}' is not available", other)
+                    }));
+            }
+
             warn!("❌ Unsupported transcription provider for local recording: {}", other);
             Err(format!(
                 "Provider '{}' is not supported for local transcription. Please select 'localWhisper' or 'parakeet'.",
@@ -145,12 +169,37 @@ pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) 
     }
 }
 
-/// Get or initialize the appropriate transcription engine based on provider configuration
+/// Get or initialize the transcription engine for the configured provider.
+///
+/// `provider_override` forces a specific provider for this session, which is how
+/// a language-compatible provider gets used for one recording without rewriting
+/// the user's saved settings.
 pub async fn get_or_init_transcription_engine<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<TranscriptionEngine, String> {
+    get_or_init_transcription_engine_for(app, None).await
+}
+
+/// Read the provider id from the stored transcript config, falling back to the
+/// catalog default when nothing is configured.
+///
+/// Callers that need to reason about provider choice *before* initializing an
+/// engine (e.g. language-compatibility switching) use this instead of
+/// duplicating the config lookup and its default.
+pub async fn configured_provider_id<R: Runtime>(app: &AppHandle<R>) -> String {
+    match crate::api::api::api_get_transcript_config(app.clone(), app.clone().state(), None).await {
+        Ok(Some(config)) => config.provider,
+        _ => super::catalog::default_provider_id().to_string(),
+    }
+}
+
+/// Get or initialize the transcription engine, optionally overriding the provider.
+pub async fn get_or_init_transcription_engine_for<R: Runtime>(
+    app: &AppHandle<R>,
+    provider_override: Option<&str>,
+) -> Result<TranscriptionEngine, String> {
     // Get provider configuration from API
-    let config = match crate::api::api::api_get_transcript_config(
+    let mut config = match crate::api::api::api_get_transcript_config(
         app.clone(),
         app.clone().state(),
         None,
@@ -165,22 +214,32 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
             config
         }
         Ok(None) => {
-            info!("📝 No transcript config found, defaulting to parakeet");
+            info!("📝 No transcript config found, using the catalog default provider");
             crate::api::api::TranscriptConfig {
-                provider: "parakeet".to_string(),
+                provider: super::catalog::default_provider_id().to_string(),
                 model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
                 api_key: None,
             }
         }
         Err(e) => {
-            warn!("⚠️ Failed to get transcript config: {}, defaulting to parakeet", e);
+            warn!("⚠️ Failed to get transcript config: {}, using the catalog default provider", e);
             crate::api::api::TranscriptConfig {
-                provider: "parakeet".to_string(),
+                provider: super::catalog::default_provider_id().to_string(),
                 model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
                 api_key: None,
             }
         }
     };
+
+    if let Some(forced) = provider_override {
+        if forced != config.provider {
+            info!(
+                "🔀 Overriding transcript provider for this session: {} -> {} (language compatibility)",
+                config.provider, forced
+            );
+            config.provider = forced.to_string();
+        }
+    }
 
     // Initialize the appropriate engine based on provider
     match config.provider.as_str() {
@@ -213,6 +272,12 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
             }
         }
         "localWhisper" | _ => {
+            // `localWhisper` is the fallback arm, so an unrecognised provider id
+            // would silently be treated as Whisper. Refuse reserved ids instead.
+            if config.provider != "localWhisper" {
+                super::catalog::ensure_selectable(&config.provider)?;
+            }
+
             info!("🎤 Initializing Whisper transcription engine");
             let whisper_engine = get_or_init_whisper(app).await?;
             Ok(TranscriptionEngine::Whisper(whisper_engine))

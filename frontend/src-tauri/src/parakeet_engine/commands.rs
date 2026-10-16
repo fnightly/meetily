@@ -10,13 +10,24 @@ pub static PARAKEET_ENGINE: Mutex<Option<Arc<ParakeetEngine>>> = Mutex::new(None
 // Global models directory path (set during app initialization)
 static MODELS_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
-/// Initialize the models directory path using app_data_dir
+/// Resolve the models directory (user-configurable, defaults to app_data_dir/models)
 /// This should be called during app setup before parakeet_init
 pub fn set_models_directory<R: Runtime>(app: &AppHandle<R>) {
-    let app_data_dir = app.path().app_data_dir()
-        .expect("Failed to get app data dir");
-
-    let models_dir = app_data_dir.join("models");
+    // Prefer the user's configured storage location; fall back to the historical
+    // app_data_dir/models when unset or unresolvable.
+    let models_dir = match crate::storage::load_storage_config(app).models_folder(app) {
+        Ok(dir) => dir,
+        Err(e) => {
+            log::error!("Failed to resolve configured models directory ({e}); using default");
+            match app.path().app_data_dir() {
+                Ok(dir) => dir.join("models"),
+                Err(e) => {
+                    log::error!("Failed to get app data dir: {e}");
+                    return;
+                }
+            }
+        }
+    };
 
     // Create directory if it doesn't exist
     if !models_dir.exists() {

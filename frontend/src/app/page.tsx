@@ -17,6 +17,7 @@ import { useRecordingStart } from '@/hooks/useRecordingStart';
 import { useRecordingStop } from '@/hooks/useRecordingStop';
 import { useTranscriptRecovery } from '@/hooks/useTranscriptRecovery';
 import { TranscriptRecovery } from '@/components/TranscriptRecovery';
+import { PostRecordingDialog } from '@/components/PostRecordingDialog';
 import { indexedDBService } from '@/services/indexedDBService';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
@@ -43,7 +44,12 @@ export default function Home() {
   const { handleRecordingStart } = useRecordingStart(isRecording, setIsRecordingState, showModal);
 
   // Get handleRecordingStop function and setIsStopping (state comes from global context)
-  const { handleRecordingStop, setIsStopping } = useRecordingStop(
+  const {
+    handleRecordingStop,
+    setIsStopping,
+    pendingPostRecording,
+    handlePostRecordingChoice,
+  } = useRecordingStop(
     setIsRecordingState,
     setIsRecordingDisabled
   );
@@ -205,6 +211,20 @@ export default function Home() {
         onRecover={handleRecovery}
         onDelete={deleteRecoverableMeeting}
         onLoadPreview={loadMeetingTranscripts}
+      />
+
+      {/* Ask what to do with a recording that has no live transcript. The audio
+          is already saved by this point, so every choice keeps it. */}
+      <PostRecordingDialog
+        open={pendingPostRecording !== null}
+        input={{
+          // Reaching this dialog means live transcription was skipped.
+          deferred: true,
+          transcriptCount: 0,
+          hasAudio: true,
+        }}
+        onChoose={handlePostRecordingChoice}
+        onDismiss={() => void handlePostRecordingChoice('keep')}
       />
       <div className="flex flex-1 overflow-hidden">
         <TranscriptPanel

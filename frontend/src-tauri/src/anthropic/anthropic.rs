@@ -97,7 +97,7 @@ pub async fn get_anthropic_models(api_key: Option<String>) -> Result<Vec<Anthrop
 
     // Fetch from API
     log::info!("Fetching Anthropic models from API...");
-    let client = reqwest::Client::new();
+    let client = crate::http_client::client_with_proxy();
 
     let response = match client
         .get("https://api.anthropic.com/v1/models")

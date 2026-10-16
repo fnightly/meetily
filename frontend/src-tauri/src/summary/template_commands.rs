@@ -1,4 +1,4 @@
-use crate::summary::templates;
+use crate::summary::templates::{self, Template, TemplateSection};
 use serde::{Deserialize, Serialize};
 use tauri::Runtime;
 use tracing::{info, warn};
@@ -14,6 +14,10 @@ pub struct TemplateInfo {
 
     /// Brief description of the template's purpose
     pub description: String,
+
+    /// Whether this is a user-authored template (editable and deletable) as
+    /// opposed to one shipped with the app.
+    pub is_custom: bool,
 }
 
 /// Detailed template structure for preview/debugging
@@ -30,6 +34,30 @@ pub struct TemplateDetails {
 
     /// List of section titles in order
     pub sections: Vec<String>,
+
+    /// Whether this is a user-authored template.
+    pub is_custom: bool,
+}
+
+/// A full template payload used when creating or editing a custom template.
+#[derive(Debug, Deserialize)]
+pub struct TemplateSectionInput {
+    pub title: String,
+    pub instruction: String,
+    pub format: String,
+    #[serde(default)]
+    pub item_format: Option<String>,
+}
+
+/// Result of saving a custom template.
+#[derive(Debug, Serialize)]
+pub struct SaveTemplateResult {
+    /// Identifier the template was stored under (may be generated).
+    pub id: String,
+    /// Absolute path of the written file.
+    pub path: String,
+    /// True when an existing custom template was replaced.
+    pub overwritten: bool,
 }
 
 /// Lists all available templates
@@ -38,21 +66,20 @@ pub struct TemplateDetails {
 /// Templates are automatically discovered - no code changes needed to add new templates.
 ///
 /// # Returns
-/// Vector of TemplateInfo with id, name, and description for each template
+/// Vector of TemplateInfo with id, name, description and origin for each template
 #[tauri::command]
 pub async fn api_list_templates<R: Runtime>(
     _app: tauri::AppHandle<R>,
 ) -> Result<Vec<TemplateInfo>, String> {
     info!("api_list_templates called");
 
-    let templates = templates::list_templates();
-
-    let template_infos: Vec<TemplateInfo> = templates
+    let template_infos: Vec<TemplateInfo> = templates::list_templates_detailed()
         .into_iter()
-        .map(|(id, name, description)| TemplateInfo {
+        .map(|(id, name, description, is_custom)| TemplateInfo {
             id,
             name,
             description,
+            is_custom,
         })
         .collect();
 
@@ -84,15 +111,137 @@ pub async fn api_get_template_details<R: Runtime>(
         .collect();
 
     let details = TemplateDetails {
-        id: template_id,
+        id: template_id.clone(),
         name: template.name,
         description: template.description,
         sections: section_titles,
+        is_custom: templates::is_custom_template(&template_id),
     };
 
     info!("Retrieved template details for '{}'", details.name);
 
     Ok(details)
+}
+
+/// Returns the full definition of a template, including every section's
+/// instruction, so the editor can load an existing template.
+#[tauri::command]
+pub async fn api_get_template_full<R: Runtime>(
+    _app: tauri::AppHandle<R>,
+    template_id: String,
+) -> Result<Template, String> {
+    info!("api_get_template_full called for template_id: {}", template_id);
+    templates::get_template(&template_id)
+}
+
+/// Directory where custom templates are stored (for display in the UI).
+#[tauri::command]
+pub async fn api_get_custom_templates_dir<R: Runtime>(
+    _app: tauri::AppHandle<R>,
+) -> Result<String, String> {
+    templates::custom_templates_write_dir().map(|p| p.to_string_lossy().to_string())
+}
+
+/// Create or update a custom template.
+///
+/// When `template_id` is `None` a unique id is derived from the template name.
+/// Saving over a built-in template is refused; saving over an existing custom
+/// template requires `overwrite = true`.
+#[tauri::command]
+pub async fn api_save_template<R: Runtime>(
+    _app: tauri::AppHandle<R>,
+    template_id: Option<String>,
+    name: String,
+    description: String,
+    sections: Vec<TemplateSectionInput>,
+    overwrite: Option<bool>,
+) -> Result<SaveTemplateResult, String> {
+    info!(
+        "api_save_template called (id: {:?}, name: {}, sections: {})",
+        template_id,
+        name,
+        sections.len()
+    );
+
+    let template = Template {
+        name: name.clone(),
+        description,
+        sections: sections
+            .into_iter()
+            .map(|s| TemplateSection {
+                title: s.title,
+                instruction: s.instruction,
+                format: s.format,
+                item_format: s.item_format,
+                example_item_format: None,
+            })
+            .collect(),
+    };
+
+    // Validate before touching the filesystem so a bad payload cannot leave a
+    // half-written template behind.
+    template.validate()?;
+
+    let overwrite = overwrite.unwrap_or(false);
+
+    let (id, overwritten) = match template_id.filter(|id| !id.trim().is_empty()) {
+        Some(id) => {
+            let exists = templates::is_custom_template(&id);
+            (id, exists)
+        }
+        None => (templates::unique_template_id(&name), false),
+    };
+
+    let path = templates::save_custom_template(&id, &template, overwrite)?;
+
+    info!("Template '{}' saved to {:?}", id, path);
+
+    Ok(SaveTemplateResult {
+        id,
+        path: path.to_string_lossy().to_string(),
+        overwritten,
+    })
+}
+
+/// Delete a custom template. Built-in templates are refused.
+#[tauri::command]
+pub async fn api_delete_template<R: Runtime>(
+    _app: tauri::AppHandle<R>,
+    template_id: String,
+) -> Result<(), String> {
+    info!("api_delete_template called for template_id: {}", template_id);
+    templates::delete_custom_template(&template_id)
+}
+
+/// Duplicate any template (built-in included) into a new custom template.
+#[tauri::command]
+pub async fn api_duplicate_template<R: Runtime>(
+    _app: tauri::AppHandle<R>,
+    template_id: String,
+    new_name: Option<String>,
+) -> Result<SaveTemplateResult, String> {
+    info!("api_duplicate_template called for template_id: {}", template_id);
+
+    let source = templates::get_template(&template_id)?;
+
+    let name = new_name
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| format!("{} (copy)", source.name));
+
+    let duplicated = Template {
+        name: name.clone(),
+        description: source.description.clone(),
+        sections: source.sections.clone(),
+    };
+
+    let new_id = templates::unique_template_id(&name);
+    let path = templates::save_custom_template(&new_id, &duplicated, false)?;
+
+    Ok(SaveTemplateResult {
+        id: new_id,
+        path: path.to_string_lossy().to_string(),
+        overwritten: false,
+    })
 }
 
 /// Validates a custom template JSON string

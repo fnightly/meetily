@@ -1,7 +1,6 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex as StdMutex;
-// Removed unused import
 
 // Performance optimization: Conditional logging macros for hot paths
 #[cfg(debug_assertions)]
@@ -28,8 +27,14 @@ macro_rules! perf_trace {
     ($($arg:tt)*) => {};
 }
 
-// Make these macros available to other modules
+// Make these macros available to other modules.
+//
+// In release builds both expand to nothing, so no call site actually consumes
+// the re-export and rustc reports it as unused. The macros are still needed in
+// debug builds, so the import cannot simply be dropped.
+#[allow(unused_imports)]
 pub(crate) use perf_debug;
+#[allow(unused_imports)]
 pub(crate) use perf_trace;
 
 // Re-export async logging macros for external use (removed due to macro conflicts)
@@ -41,15 +46,19 @@ pub mod audio;
 pub mod config;
 pub mod console_utils;
 pub mod database;
+pub mod dictionary;
+pub mod disk_space;
 pub mod notifications;
 pub mod ollama;
 pub mod onboarding;
 pub mod openai;
 pub mod anthropic;
 pub mod groq;
+pub mod http_client;
 pub mod openrouter;
 pub mod parakeet_engine;
 pub mod state;
+pub mod storage;
 pub mod summary;
 pub mod tray;
 pub mod utils;
@@ -67,13 +76,43 @@ static RECORDING_FLAG: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "windows")]
 static ONNX_RUNTIME_INIT_ERROR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+/// Set once the bundled ONNX Runtime has been initialised successfully.
+///
+/// Recorded separately from the error because `ort` *panics* when a session is
+/// created before initialisation, rather than returning an error. Knowing only
+/// whether initialisation failed is therefore not enough to decide whether it is
+/// safe to touch `ort`: "never attempted" must be treated as unsafe too.
+#[cfg(target_os = "windows")]
+static ONNX_RUNTIME_READY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether it is safe to create an ONNX session.
+///
+/// On Windows this requires a successful `ort::init_from`; otherwise `ort` panics
+/// and takes the process down, which for a failed DLL load would be far worse than
+/// a reported error. On other platforms `ort` links the runtime at build time, so
+/// there is nothing to check.
 pub(crate) fn ensure_onnx_runtime_available() -> anyhow::Result<()> {
     #[cfg(target_os = "windows")]
-    if let Some(error) = ONNX_RUNTIME_INIT_ERROR.get() {
-        anyhow::bail!("{error}");
+    {
+        if let Some(error) = ONNX_RUNTIME_INIT_ERROR.get() {
+            anyhow::bail!("{error}");
+        }
+
+        if !ONNX_RUNTIME_READY.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!(
+                "The bundled ONNX Runtime has not been initialised yet, so ONNX models cannot be loaded"
+            );
+        }
     }
 
     Ok(())
+}
+
+/// Record a successful ONNX Runtime initialisation.
+#[cfg(target_os = "windows")]
+pub(crate) fn record_onnx_runtime_ready() {
+    ONNX_RUNTIME_READY.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 #[cfg(target_os = "windows")]
@@ -130,12 +169,8 @@ struct RecordingArgs {
     save_path: String,
 }
 
-#[derive(Debug, Serialize, Clone)]
-struct TranscriptionStatus {
-    chunks_in_queue: usize,
-    is_processing: bool,
-    last_activity_ms: u64,
-}
+// NOTE: `TranscriptionStatus` is defined by `audio::recording_commands` and
+// returned by the command registered below.
 
 #[tauri::command]
 async fn start_recording<R: Runtime>(
@@ -267,14 +302,13 @@ async fn is_recording() -> bool {
     audio::recording_commands::is_recording().await
 }
 
-#[tauri::command]
-fn get_transcription_status() -> TranscriptionStatus {
-    TranscriptionStatus {
-        chunks_in_queue: 0,
-        is_processing: false,
-        last_activity_ms: 0,
-    }
-}
+// NOTE: `get_transcription_status` used to be defined here as a stub that always
+// returned `is_processing: false, chunks_in_queue: 0`. The frontend polls this
+// command in `useRecordingStop` to wait for the transcription queue to drain
+// before saving a meeting, so the stub made that wait complete on the first
+// poll and truncated the tail of every saved transcript. The real
+// implementation in `audio::recording_commands` (which reports `IS_RECORDING`)
+// is registered below instead.
 
 #[tauri::command]
 fn read_audio_file(file_path: String) -> Result<Vec<u8>, String> {
@@ -487,10 +521,13 @@ pub fn run() {
                             .commit()
                             .map(|_| ())
                     }) {
-                        Ok(()) => log::info!(
-                            "Initialized bundled ONNX Runtime from {}",
-                            runtime_path.display()
-                        ),
+                        Ok(()) => {
+                            record_onnx_runtime_ready();
+                            log::info!(
+                                "Initialized bundled ONNX Runtime from {}",
+                                runtime_path.display()
+                            )
+                        }
                         Err(error) => record_onnx_runtime_failure(format!(
                             "Failed to initialize bundled ONNX Runtime from {}: {}",
                             runtime_path.display(),
@@ -585,8 +622,20 @@ pub fn run() {
             })
             .expect("Failed to initialize database");
 
-            // Initialize bundled templates directory for dynamic template discovery
-            log::info!("Initializing bundled templates directory...");
+            // Initialize templates: the app-data dir is where user-authored
+            // templates live (beside the database), the resource dir holds the
+            // templates shipped with the app.
+            log::info!("Initializing template directories...");
+            match _app.handle().path().app_data_dir() {
+                Ok(app_data_dir) => {
+                    log::info!("Custom templates directory base: {:?}", app_data_dir);
+                    summary::templates::set_app_data_dir(app_data_dir);
+                }
+                Err(e) => {
+                    log::warn!("Failed to resolve app data dir for custom templates: {}", e);
+                }
+            }
+
             if let Ok(resource_path) = _app.handle().path().resource_dir() {
                 let templates_dir = resource_path.join("templates");
                 log::info!("Setting bundled templates directory to: {:?}", templates_dir);
@@ -613,7 +662,8 @@ pub fn run() {
             start_recording,
             stop_recording,
             is_recording,
-            get_transcription_status,
+            // Real transcription-queue status (replaces the former zero-valued stub).
+            audio::recording_commands::get_transcription_status,
             read_audio_file,
             save_transcript,
             analytics::commands::init_analytics,
@@ -752,6 +802,11 @@ pub fn run() {
             // Template commands
             summary::template_commands::api_list_templates,
             summary::template_commands::api_get_template_details,
+            summary::template_commands::api_get_template_full,
+            summary::template_commands::api_get_custom_templates_dir,
+            summary::template_commands::api_save_template,
+            summary::template_commands::api_delete_template,
+            summary::template_commands::api_duplicate_template,
             summary::template_commands::api_validate_template,
             // Built-in AI commands
             summary::summary_engine::commands::builtin_ai_list_models,
@@ -765,6 +820,18 @@ pub fn run() {
             openrouter::get_openrouter_models,
             audio::recording_preferences::get_recording_preferences,
             audio::recording_preferences::set_recording_preferences,
+            audio::recording_preferences::get_recording_encoding_options,
+            audio::retention_commands::get_recording_disk_space,
+            audio::retention_commands::purge_expired_recordings,
+            audio::retention_commands::preview_retention_sweep,
+            // Saved recordings: listing plus per-recording management.
+            audio::recordings_commands::list_saved_recordings,
+            audio::recordings_commands::open_recording_folder,
+            audio::recordings_commands::rename_saved_recording,
+            audio::recordings_commands::delete_saved_recording,
+            audio::recordings_commands::move_saved_recording,
+            audio::recordings_commands::delete_saved_recording_summary,
+            audio::recordings_commands::saved_recording_has_audio,
             audio::recording_preferences::get_default_recordings_folder_path,
             audio::recording_preferences::open_recordings_folder,
             audio::recording_preferences::select_recording_folder,
@@ -774,6 +841,19 @@ pub fn run() {
             audio::recording_preferences::get_audio_backend_info,
             // Language preference commands
             set_language_preference,
+            // Speech provider catalog (capabilities, readiness, language support)
+            audio::transcription::provider_commands::api_list_speech_providers,
+            audio::transcription::provider_commands::api_get_active_speech_settings,
+            audio::transcription::provider_commands::api_validate_speech_selection,
+            audio::transcription::provider_commands::api_get_provider_languages,
+            // Unified storage location commands (database / models / notes / recordings)
+            storage::commands::get_storage_config,
+            storage::commands::set_storage_config,
+            storage::commands::pick_storage_directory,
+            storage::commands::storage_restart_required,
+            storage::commands::open_storage_folder,
+            storage::commands::reset_storage_location,
+            storage::commands::storage_default_subdirs,
             // Notification system commands
             notifications::commands::get_notification_settings,
             notifications::commands::set_notification_settings,
@@ -811,6 +891,21 @@ pub fn run() {
             // Database and Models path commands
             database::commands::get_database_directory,
             database::commands::open_database_folder,
+            // Meeting notes commands (user-authored notes + note images)
+            database::notes_commands::api_get_meeting_note,
+            database::notes_commands::api_save_meeting_note,
+            database::notes_commands::api_delete_meeting_note,
+            database::notes_commands::api_meeting_has_note,
+            database::notes_commands::api_get_note_images_dir,
+            database::notes_commands::api_save_note_image,
+            database::notes_commands::api_read_note_image,
+            database::notes_commands::api_delete_note_image,
+            // Custom vocabulary: exact spellings for names and jargon the speech
+            // model would otherwise mangle.
+            dictionary::get_dictionary,
+            dictionary::set_dictionary,
+            // Transcript cleanup. Local models only: it sends the whole transcript.
+            summary::cleanup_commands::cleanup_transcript,
             whisper_engine::commands::open_models_folder,
             // Onboarding commands
             onboarding::get_onboarding_status,

@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 use anyhow::{Result, anyhow};
 use log::{info, warn, error};
-use super::encode::encode_single_audio;
+use super::encode::{encode_single_audio, transcode_audio};
+use super::formats::AudioEncodingSettings;
 use super::recording_state::AudioChunk;
 use serde::{Serialize, Deserialize};
 
@@ -23,6 +24,9 @@ pub struct IncrementalAudioSaver {
     checkpoints_dir: PathBuf,
     meeting_folder: PathBuf,
     sample_rate: u32,
+    /// Format/quality the finished recording should be written as. Checkpoints
+    /// stay AAC/MP4 regardless; see `finalize`.
+    encoding: AudioEncodingSettings,
 }
 
 impl IncrementalAudioSaver {
@@ -32,6 +36,15 @@ impl IncrementalAudioSaver {
     /// * `meeting_folder` - Path to the meeting folder (contains .checkpoints/)
     /// * `sample_rate` - Sample rate of audio (typically 48000)
     pub fn new(meeting_folder: PathBuf, sample_rate: u32) -> Result<Self> {
+        Self::with_encoding(meeting_folder, sample_rate, AudioEncodingSettings::default())
+    }
+
+    /// Create a saver that writes the finished recording in `encoding`.
+    pub fn with_encoding(
+        meeting_folder: PathBuf,
+        sample_rate: u32,
+        encoding: AudioEncodingSettings,
+    ) -> Result<Self> {
         let checkpoints_dir = meeting_folder.join(".checkpoints");
 
         // Verify checkpoints directory exists
@@ -46,6 +59,7 @@ impl IncrementalAudioSaver {
             checkpoints_dir,
             meeting_folder,
             sample_rate,
+            encoding,
         })
     }
 
@@ -111,11 +125,16 @@ impl IncrementalAudioSaver {
         Ok(())
     }
 
-    /// Finalize the recording: save final checkpoint, merge all checkpoints, cleanup
+    /// Finalize the recording: save final checkpoint, merge all checkpoints,
+    /// transcode into the requested format, then clean up.
     ///
-    /// Returns the path to the final merged audio.mp4 file
+    /// Returns the path to the finished recording (extension depends on the
+    /// configured format).
     pub async fn finalize(&mut self) -> Result<PathBuf> {
-        info!("Finalizing incremental recording...");
+        info!(
+            "Finalizing incremental recording (target format: {})...",
+            self.encoding.format.id()
+        );
 
         // Save final buffer if not empty
         if !self.checkpoint_buffer.is_empty() {
@@ -128,9 +147,62 @@ impl IncrementalAudioSaver {
             return Err(anyhow!("No audio checkpoints to merge - recording may have failed"));
         }
 
-        // Merge all checkpoints using FFmpeg concat
-        let final_audio_path = self.meeting_folder.join("audio.mp4");
-        self.merge_checkpoints(&final_audio_path).await?;
+        let final_audio_path = self.meeting_folder.join(self.encoding.output_file_name());
+
+        // Checkpoints are AAC in MP4. Concatenating them stays cheap and keeps the
+        // crash-recovery path untouched, so the user's format is produced by a
+        // single pass over the merged file rather than by encoding every 30-second
+        // chunk in a format that may not concatenate cleanly.
+        //
+        // The final pass runs even when the container already matches, because it
+        // is also what writes the metadata tags. For a matching container it is a
+        // stream copy, so it costs no re-encoding.
+        let intermediate = self.meeting_folder.join(".merged-intermediate.mp4");
+        self.merge_checkpoints(&intermediate).await?;
+
+        // Re-encoding happens only when the target container differs from AAC/MP4.
+        let mut settings = self.encoding.clone();
+        if matches!(settings.format, super::formats::RecordingFormat::M4a) {
+            settings.copy_stream = true;
+        }
+
+        let merged_for_final = intermediate.clone();
+        let target = final_audio_path.clone();
+        let target_label = settings.format.label();
+        let target_id = settings.format.id().to_string();
+
+        // FFmpeg is CPU-bound; keep it off the async runtime so it cannot stall
+        // other tasks during teardown.
+        let finalize_result = tokio::task::spawn_blocking(move || {
+            transcode_audio(&merged_for_final, &target, settings)
+        })
+        .await
+        .map_err(|e| anyhow!("Finalize task failed to join: {}", e))?;
+
+        match finalize_result {
+            Ok(()) => {
+                if let Err(e) = std::fs::remove_file(&intermediate) {
+                    warn!("Failed to remove finalize intermediate: {}", e);
+                }
+            }
+            Err(e) => {
+                // Keep the audio rather than lose the recording: fall back to the
+                // merged AAC file and report where it really is.
+                error!("Producing {} failed: {}", target_id, e);
+                warn!(
+                    "Keeping the merged AAC file as {} instead",
+                    intermediate.display()
+                );
+                return Err(anyhow!(
+                    "Recording saved as AAC ({}), but producing {} failed: {}. \
+                     The audio is intact at {}.",
+                    intermediate.display(),
+                    target_label,
+                    e,
+                    intermediate.display()
+                ));
+            }
+        }
 
         // Clean up checkpoints directory
         info!("Cleaning up {} checkpoint files", self.checkpoint_count);

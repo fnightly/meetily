@@ -70,4 +70,21 @@ pub trait TranscriptionProvider: Send + Sync {
 
     /// Get the provider name (for logging/debugging)
     fn provider_name(&self) -> &'static str;
+
+    /// Whether this provider runs locally or sends audio off the machine.
+    ///
+    /// Defaults to local: a new provider must opt in to being a cloud provider,
+    /// so an omission cannot silently make audio leave the device.
+    fn kind(&self) -> super::catalog::ProviderKind {
+        super::catalog::ProviderKind::Local
+    }
+
+    /// Whether this provider can transcribe the given language.
+    ///
+    /// Defaults to accepting everything, which matches the previous behaviour of
+    /// every existing provider. Providers with a restricted language set should
+    /// override this instead of failing later with unusable output.
+    fn supports_language(&self, _language: Option<&str>) -> bool {
+        true
+    }
 }

@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
-import { ArrowLeft, Settings2, Mic, Database as DatabaseIcon, SparkleIcon, FlaskConical } from 'lucide-react';
+import { ArrowLeft, Settings2, Mic, Database as DatabaseIcon, SparkleIcon, FlaskConical, BookA } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { invoke } from '@tauri-apps/api/core';
 import { motion } from 'framer-motion';
@@ -11,20 +11,26 @@ import { PreferenceSettings } from '@/components/PreferenceSettings';
 import { SummaryModelSettings } from '@/components/SummaryModelSettings';
 import { BetaSettings } from '@/components/BetaSettings';
 import { useConfig } from '@/contexts/ConfigContext';
+import { DictionarySettings } from '@/components/DictionarySettings';
+import { useI18n } from '@/contexts/I18nContext';
+import { LOCALES, LOCALE_LABELS, type Locale } from '@/lib/i18n';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 
-// Tabs configuration (constant)
+// Tabs configuration (constant). Labels are translation keys, resolved at render
+// so the tab bar follows the chosen interface language.
 const TABS = [
-  { value: 'general', label: 'General', icon: Settings2 },
-  { value: 'recording', label: 'Recordings', icon: Mic },
-  { value: 'Transcriptionmodels', label: 'Transcription', icon: DatabaseIcon },
-  { value: 'summaryModels', label: 'Summary', icon: SparkleIcon },
-  { value: 'beta', label: 'Beta', icon: FlaskConical }
+  { value: 'general', labelKey: 'settings.tabs.general', icon: Settings2 },
+  { value: 'recording', labelKey: 'settings.tabs.recording', icon: Mic },
+  { value: 'dictionary', labelKey: 'settings.tabs.dictionary', icon: BookA },
+  { value: 'Transcriptionmodels', labelKey: 'settings.tabs.transcription', icon: DatabaseIcon },
+  { value: 'summaryModels', labelKey: 'settings.tabs.summary', icon: SparkleIcon },
+  { value: 'beta', labelKey: 'settings.tabs.beta', icon: FlaskConical }
 ] as const;
 
 export default function SettingsPage() {
   const router = useRouter();
   const { transcriptModelConfig, setTranscriptModelConfig } = useConfig();
+  const { t, locale, setLocale } = useI18n();
 
   // Animation state for tabs
   const [activeTab, setActiveTab] = useState('general');
@@ -73,9 +79,9 @@ export default function SettingsPage() {
               className="flex items-center gap-2 text-gray-600 hover:text-gray-900 transition-colors"
             >
               <ArrowLeft className="w-5 h-5" />
-              <span>Back</span>
+              <span>{t('common.back')}</span>
             </button>
-            <h1 className="text-3xl font-bold">Settings</h1>
+            <h1 className="text-3xl font-bold">{t('settings.title')}</h1>
           </div>
         </div>
       </div>
@@ -96,7 +102,7 @@ export default function SettingsPage() {
                     className="flex items-center gap-2 px-6 py-4 bg-transparent rounded-none border-0 data-[state=active]:bg-transparent data-[state=active]:text-blue-600 data-[state=active]:shadow-none text-gray-600 hover:text-gray-900 relative z-10"
                   >
                     <Icon className="w-4 h-4" />
-                    {tab.label}
+                    {t(tab.labelKey)}
                   </TabsTrigger>
                 );
               })}
@@ -110,10 +116,39 @@ export default function SettingsPage() {
             </TabsList>
 
             <TabsContent value="general">
+              {/* Interface language first: it changes how everything below reads,
+                  and it is the one setting a user who cannot read the current
+                  language needs to find immediately. */}
+              <div className="p-4 border rounded-lg mb-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <div className="font-medium">{t('settings.language')}</div>
+                    <div className="text-sm text-gray-600 mt-1">
+                      {t('settings.language.description')}
+                    </div>
+                  </div>
+                  <select
+                    aria-label={t('settings.language')}
+                    value={locale}
+                    onChange={(event) => setLocale(event.target.value as Locale)}
+                    className="shrink-0 px-3 py-2 text-sm border border-gray-300 rounded-md bg-white"
+                  >
+                    {LOCALES.map((value) => (
+                      <option key={value} value={value}>
+                        {LOCALE_LABELS[value]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
               <PreferenceSettings />
             </TabsContent>
             <TabsContent value="recording">
               <RecordingSettings />
+            </TabsContent>
+            <TabsContent value="dictionary" className="mt-6">
+              <DictionarySettings />
             </TabsContent>
             <TabsContent value="Transcriptionmodels">
               <TranscriptSettings

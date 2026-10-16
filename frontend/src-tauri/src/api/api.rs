@@ -244,7 +244,7 @@ async fn make_api_request<R: Runtime, T: for<'de> Deserialize<'de>>(
     additional_headers: Option<HashMap<String, String>>,
     auth_token: Option<String>, // Pass auth token from frontend
 ) -> Result<T, String> {
-    let client = reqwest::Client::new();
+    let client = crate::http_client::client_with_proxy();
     let server_url = get_server_address(app).await?;
 
     let url = format!("{}{}", server_url, endpoint);
@@ -1082,7 +1082,7 @@ pub async fn test_backend_connection<R: Runtime>(
 ) -> Result<String, String> {
     log_debug!("Testing backend connection...");
 
-    let client = reqwest::Client::new();
+    let client = crate::http_client::client_with_proxy();
     let server_url = get_server_address(&app).await?;
 
     log_debug!("Testing connection to: {}", server_url);
@@ -1124,7 +1124,7 @@ pub async fn debug_backend_connection<R: Runtime>(app: AppHandle<R>) -> Result<S
     };
 
     // Test 2: Make a simple HTTP request to the backend
-    let client = reqwest::Client::new();
+    let client = crate::http_client::client_with_proxy();
     let test_url = format!("{}/docs", server_url); // Try the docs endpoint which should be public
 
     log_debug!("Testing connection to: {}", test_url);
@@ -1303,10 +1303,11 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
         "max_tokens": 5
     });
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    // Proxy-aware: this command tests a user-supplied OpenAI-compatible endpoint,
+    // which may well be behind the same proxy the rest of the app needs.
+    let client = crate::http_client::client_with_proxy_and_timeout(
+        std::time::Duration::from_secs(30),
+    );
 
     let mut request = client
         .post(&url)

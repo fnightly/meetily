@@ -543,7 +543,12 @@ impl SummaryService {
             }),
         };
 
-        let client = reqwest::Client::new();
+        let client = crate::http_client::client_with_proxy();
+
+        // The user's vocabulary is injected into the summary prompt so proper
+        // nouns survive into the notes with the spelling the user expects.
+        let dictionary = crate::dictionary::load_dictionary(&_app);
+
         let result = generate_meeting_summary(
             &client,
             &provider,
@@ -564,6 +569,7 @@ impl SummaryService {
             summary_language.as_deref(),
             detected_summary_language.as_deref(),
             cached_english.as_deref(),
+            &dictionary,
         )
         .await;
 

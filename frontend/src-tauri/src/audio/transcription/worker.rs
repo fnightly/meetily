@@ -17,6 +17,76 @@ static SEQUENCE_COUNTER: AtomicU64 = AtomicU64::new(0);
 // Speech detection flag - reset per recording session
 static SPEECH_DETECTED_EMITTED: AtomicBool = AtomicBool::new(false);
 
+// ---------------------------------------------------------------------------
+// Live queue accounting
+//
+// The frontend polls `get_transcription_status` while stopping a recording and
+// treats "not processing and nothing queued" as "safe to save". That only works
+// if the queue depth is real: it was previously hard-coded to zero, so the wait
+// finished on the first poll and the tail of the transcript was dropped.
+//
+// These counters are incremented when a chunk is dispatched to a worker and
+// decremented when that chunk's processing finishes (success or failure).
+// ---------------------------------------------------------------------------
+
+/// Chunks handed to workers but not yet finished.
+static CHUNKS_PENDING: AtomicU64 = AtomicU64::new(0);
+
+/// Milliseconds since the UNIX epoch of the last queue activity (0 = none yet).
+static LAST_ACTIVITY_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Reset the queue accounting for a new recording session.
+pub fn reset_queue_stats() {
+    CHUNKS_PENDING.store(0, Ordering::SeqCst);
+    LAST_ACTIVITY_MS.store(0, Ordering::SeqCst);
+}
+
+fn mark_activity() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    LAST_ACTIVITY_MS.store(now, Ordering::SeqCst);
+}
+
+/// Record that a chunk was handed to a worker.
+fn note_chunk_started() {
+    CHUNKS_PENDING.fetch_add(1, Ordering::SeqCst);
+    mark_activity();
+}
+
+/// Record that a chunk finished, whatever the outcome.
+///
+/// Every path that consumes a chunk must call this exactly once, otherwise the
+/// pending count never reaches zero and `useRecordingStop` waits the full 60s
+/// timeout before saving.
+fn note_chunk_finished() {
+    // Saturating decrement: the count must never wrap around.
+    let _ = CHUNKS_PENDING.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |pending| {
+        Some(pending.saturating_sub(1))
+    });
+    mark_activity();
+}
+
+/// Number of chunks dispatched but not yet completed.
+pub fn pending_chunk_count() -> usize {
+    CHUNKS_PENDING.load(Ordering::SeqCst) as usize
+}
+
+/// Milliseconds elapsed since the last queue activity, or `None` if there has
+/// been none this session.
+pub fn millis_since_last_activity() -> Option<u64> {
+    let last = LAST_ACTIVITY_MS.load(Ordering::SeqCst);
+    if last == 0 {
+        return None;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(last);
+    Some(now.saturating_sub(last))
+}
+
 /// Reset the speech detected flag for a new recording session
 pub fn reset_speech_detected_flag() {
     SPEECH_DETECTED_EMITTED.store(false, Ordering::SeqCst);
@@ -24,9 +94,15 @@ pub fn reset_speech_detected_flag() {
 }
 
 /// Returns true if the transcript text is non-trivial and should be emitted.
-/// Filters empty/whitespace-only text; no confidence gating is applied.
+///
+/// Beyond empty text this rejects content-free output — a bare "。" or "。。。" —
+/// which Whisper emits over silence. Without this the transcript fills with
+/// punctuation during quiet stretches, and every such segment is also written to
+/// the database and fed to the summariser.
+///
+/// No confidence gating is applied.
 fn should_emit_transcript(text: &str) -> bool {
-    !text.trim().is_empty()
+    crate::audio::transcript_text::sanitize_segment(text).is_some()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -48,27 +124,119 @@ pub struct TranscriptUpdate {
 // have been moved to recording_commands.rs where they have access to RECORDING_MANAGER
 
 /// Optimized parallel transcription task ensuring ZERO chunk loss
+///
+/// `defer_transcription` disables realtime transcription for this session: the
+/// VAD segment stream is drained and discarded instead of being fed to the ASR
+/// engine, so recording stays cheap. The saved audio is expected to be
+/// transcribed afterwards through the retranscription path.
 pub fn start_transcription_task<R: Runtime>(
     app: AppHandle<R>,
-    transcription_receiver: tokio::sync::mpsc::UnboundedReceiver<AudioChunk>,
+    mut transcription_receiver: tokio::sync::mpsc::UnboundedReceiver<AudioChunk>,
+    defer_transcription: bool,
 ) -> tokio::task::JoinHandle<()> {
+    if defer_transcription {
+        return tokio::spawn(async move {
+            info!(
+                "⏸️ Deferred-transcription mode: realtime transcription disabled for this session; \
+                 draining audio segments without ASR"
+            );
+
+            // Nothing is queued for ASR this session, and stale counts from a
+            // previous run must not make the stop path wait or look busy.
+            reset_queue_stats();
+
+            // Report an honest status so the UI wait-loop does not mistake this
+            // session for an idle one that has already finished transcribing.
+            let _ = app.emit(
+                "transcription-deferred",
+                serde_json::json!({
+                    "deferred": true,
+                    "userMessage": "Transcription was skipped during recording. It can be run on the saved audio afterwards."
+                }),
+            );
+
+            let mut drained: u64 = 0;
+            while let Some(_chunk) = transcription_receiver.recv().await {
+                drained += 1;
+            }
+
+            info!("⏸️ Deferred-transcription session ended after draining {drained} audio segments");
+            let _ = app.emit(
+                "transcription-queue-complete",
+                serde_json::json!({ "deferred": true, "segmentsDiscarded": drained }),
+            );
+        });
+    }
+
     tokio::spawn(async move {
         info!("🚀 Starting optimized parallel transcription task - guaranteeing zero chunk loss");
 
+        // Fresh queue accounting for this session.
+        reset_queue_stats();
+
         // Initialize transcription engine (Whisper or Parakeet based on config)
-        let transcription_engine = match super::engine::get_or_init_transcription_engine(&app).await {
-            Ok(engine) => engine,
-            Err(e) => {
-                error!("Failed to initialize transcription engine: {}", e);
-                let _ = app.emit("transcription-error", serde_json::json!({
-                    "error": e,
-                    "userMessage": "Recording failed: Unable to initialize speech recognition. Please check your model settings.",
-                    "actionable": true,
-                    "phase": "active"
-                }));
-                return;
+        //
+        // The configured provider may not support the language about to be
+        // spoken: Parakeet is the default and is English-only, so a Chinese
+        // meeting would run through an English-only model. Pick a provider that
+        // can handle the language and tell the user we did.
+        let language_pref = crate::get_language_preference_internal();
+        let configured_provider = super::engine::configured_provider_id(&app).await;
+        let chosen_provider = super::catalog::select_provider_for_language(
+            &configured_provider,
+            language_pref.as_deref(),
+            |_| true,
+        );
+
+        let provider_override = match chosen_provider {
+            Some(chosen) if chosen != configured_provider => {
+                let configured_label = super::catalog::find_provider(&configured_provider)
+                    .map(|p| p.display_name)
+                    .unwrap_or(configured_provider.as_str());
+                let chosen_label = super::catalog::find_provider(chosen)
+                    .map(|p| p.display_name)
+                    .unwrap_or(chosen);
+
+                info!(
+                    "🔀 {configured_label} does not support language {:?}; using {chosen_label} for this session",
+                    language_pref
+                );
+
+                // Surface the switch: silently changing the engine would hide
+                // why the transcript looks different (or slower) than usual.
+                let _ = app.emit(
+                    "transcription-provider-switched",
+                    serde_json::json!({
+                        "from": configured_provider,
+                        "to": chosen,
+                        "fromLabel": configured_label,
+                        "toLabel": chosen_label,
+                        "language": language_pref,
+                        "userMessage": format!(
+                            "{configured_label} does not support this language, so {chosen_label} is being used for this recording."
+                        ),
+                    }),
+                );
+
+                Some(chosen)
             }
+            _ => None,
         };
+
+        let transcription_engine =
+            match super::engine::get_or_init_transcription_engine_for(&app, provider_override).await {
+                Ok(engine) => engine,
+                Err(e) => {
+                    error!("Failed to initialize transcription engine: {}", e);
+                    let _ = app.emit("transcription-error", serde_json::json!({
+                        "error": e,
+                        "userMessage": "Recording failed: Unable to initialize speech recognition. Please check your model settings.",
+                        "actionable": true,
+                        "phase": "active"
+                    }));
+                    return;
+                }
+            };
 
         // Create parallel workers for faster processing while preserving ALL chunks
         const NUM_WORKERS: usize = 1; // Serial processing ensures transcripts emit in chronological order
@@ -144,6 +312,7 @@ pub fn start_transcription_task<R: Runtime>(
                                 warn!("⚠️ Worker {}: Model unloaded, but continuing to preserve chunk {}", worker_id, chunk.chunk_id);
                                 // Still count as completed even if we can't process
                                 chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
+                                note_chunk_finished();
                                 continue;
                             }
 
@@ -234,11 +403,13 @@ pub fn start_transcription_task<R: Runtime>(
                                             // Skip silently, this is expected for very short chunks
                                             info!("Worker {}: {}", worker_id, e);
                                             chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
+                                            note_chunk_finished();
                                             continue;
                                         }
                                         TranscriptionError::ModelNotLoaded => {
                                             warn!("Worker {}: Model unloaded during transcription", worker_id);
                                             chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
+                                            note_chunk_finished();
                                             continue;
                                         }
                                         _ => {
@@ -252,6 +423,7 @@ pub fn start_transcription_task<R: Runtime>(
                             // Mark chunk as completed
                             let completed =
                                 chunks_completed_clone.fetch_add(1, Ordering::SeqCst) + 1;
+                            note_chunk_finished();
                             let queued = chunks_queued_clone.load(Ordering::SeqCst);
 
                             // PERFORMANCE: Only log progress every 5th chunk to reduce I/O overhead
@@ -316,6 +488,7 @@ pub fn start_transcription_task<R: Runtime>(
         let mut receiver = transcription_receiver;
         while let Some(chunk) = receiver.recv().await {
             let queued = chunks_queued.fetch_add(1, Ordering::SeqCst) + 1;
+            note_chunk_started();
             info!(
                 "📥 Dispatching chunk {} to workers (total queued: {})",
                 chunk.chunk_id, queued
@@ -604,5 +777,24 @@ fn format_recording_time(seconds: f64) -> String {
         fn drops_empty_and_whitespace_only() {
             assert!(!should_emit_transcript(""));
             assert!(!should_emit_transcript("   "));
+        }
+
+        #[test]
+        fn drops_punctuation_only_hallucinations() {
+            // Whisper emits these over silence, and a Chinese transcript produces
+            // the full-width forms. Emitting them fills the transcript with noise.
+            assert!(!should_emit_transcript("."));
+            assert!(!should_emit_transcript("..."));
+            assert!(!should_emit_transcript("。"));
+            assert!(!should_emit_transcript("。。。"));
+            assert!(!should_emit_transcript("，。！？"));
+        }
+
+        #[test]
+        fn keeps_real_chinese_speech() {
+            assert!(should_emit_transcript("你好"));
+            assert!(should_emit_transcript("我们今天讨论了三件事。"));
+            // A short answer with trailing punctuation is real content.
+            assert!(should_emit_transcript("好。"));
         }
     }

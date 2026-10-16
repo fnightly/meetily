@@ -7,6 +7,12 @@ import { Label } from './ui/label';
 import { Eye, EyeOff, Lock, Unlock } from 'lucide-react';
 import { ModelManager } from './WhisperModelManager';
 import { ParakeetModelManager } from './ParakeetModelManager';
+import { useSpeechProviders, type SpeechProviderView } from '@/hooks/useSpeechProviders';
+
+/** Prefix for the provider list, by where the audio goes. */
+function providerIcon(provider: SpeechProviderView): string {
+    return provider.kind === 'cloud' ? '☁️ ' : '🏠 ';
+}
 
 
 export interface TranscriptModelProps {
@@ -27,6 +33,29 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(true);
     const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
     const [uiProvider, setUiProvider] = useState<TranscriptModelProps['provider']>(transcriptModelConfig.provider);
+
+    // Provider capabilities come from the backend catalog (single source of
+    // truth); the UI must not hardcode which providers exist or what they support.
+    const { providers, active, validateSelection } = useSpeechProviders();
+
+    const selectedProvider = providers.find((p) => p.id === uiProvider);
+
+    // Surface a provider/language mismatch as soon as the user opens settings,
+    // rather than letting the failure appear when they hit record.
+    const [selectionWarning, setSelectionWarning] = useState<string | null>(null);
+    useEffect(() => {
+        let cancelled = false;
+        const language = active?.language ?? null;
+        if (!uiProvider) return;
+
+        validateSelection(uiProvider, language).then((problem) => {
+            if (!cancelled) setSelectionWarning(problem);
+        });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [uiProvider, active?.language, validateSelection]);
 
     // Sync uiProvider when backend config changes (e.g., after model selection or initial load)
     useEffect(() => {
@@ -50,15 +79,8 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
             setApiKey(null);
         }
     };
-    const modelOptions = {
-        localWhisper: [], // Model selection handled by ModelManager component
-        parakeet: [], // Model selection handled by ParakeetModelManager component
-        deepgram: ['nova-2-phonecall'],
-        elevenLabs: ['eleven_multilingual_v2'],
-        groq: ['llama-3.3-70b-versatile'],
-        openai: ['gpt-4o'],
-    };
-    const requiresApiKey = transcriptModelConfig.provider === 'deepgram' || transcriptModelConfig.provider === 'elevenLabs' || transcriptModelConfig.provider === 'openai' || transcriptModelConfig.provider === 'groq';
+    const configuredProvider = providers.find((p) => p.id === transcriptModelConfig.provider);
+    const requiresApiKey = configuredProvider?.requires_api_key ?? false;
 
     const handleInputClick = () => {
         if (isApiKeyLocked) {
@@ -121,14 +143,47 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     <SelectValue placeholder="Select provider" />
                                 </SelectTrigger>
                                 <SelectContent>
-                                    <SelectItem value="parakeet">⚡ Parakeet (Recommended - Real-time / Accurate)</SelectItem>
-                                    <SelectItem value="localWhisper">🏠 Local Whisper (High Accuracy)</SelectItem>
-                                    {/* <SelectItem value="deepgram">☁️ Deepgram (Backup)</SelectItem>
-                                    <SelectItem value="elevenLabs">☁️ ElevenLabs</SelectItem>
-                                    <SelectItem value="groq">☁️ Groq</SelectItem>
-                                    <SelectItem value="openai">☁️ OpenAI</SelectItem> */}
+                                    {providers.length === 0 && (
+                                        <>
+                                            <SelectItem value="parakeet">⚡ Parakeet</SelectItem>
+                                            <SelectItem value="localWhisper">🏠 Local Whisper</SelectItem>
+                                        </>
+                                    )}
+                                    {providers.map((provider) => (
+                                        <SelectItem
+                                            key={provider.id}
+                                            value={provider.id}
+                                            disabled={!provider.selectable}
+                                            title={provider.notes}
+                                        >
+                                            {providerIcon(provider)}
+                                            {provider.display_name}
+                                            {!provider.selectable && ' — not available yet'}
+                                            {provider.selectable && provider.requires_api_key && ' (Cloud)'}
+                                        </SelectItem>
+                                    ))}
                                 </SelectContent>
                             </Select>
+
+                            {/* Explain the selected provider's limits inline, so a
+                                mismatch is visible before recording starts. */}
+                            {selectedProvider?.notes && (
+                                <p className="text-xs text-gray-500 mt-2">{selectedProvider.notes}</p>
+                            )}
+                            {selectedProvider && !selectedProvider.selectable && (
+                                <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2 mt-2">
+                                    Reserved but not implemented: selecting this provider does not upload your
+                                    audio anywhere. Use a local provider to transcribe.
+                                </p>
+                            )}
+                            {selectionWarning && (
+                                <p
+                                    role="status"
+                                    className="text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2 mt-2"
+                                >
+                                    {selectionWarning}
+                                </p>
+                            )}
 
                             {uiProvider !== 'localWhisper' && uiProvider !== 'parakeet' && (
                                 <Select
@@ -142,7 +197,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                         <SelectValue placeholder="Select model" />
                                     </SelectTrigger>
                                     <SelectContent>
-                                        {modelOptions[uiProvider].map((model) => (
+                                        {(selectedProvider?.models ?? []).map((model) => (
                                             <SelectItem key={model} value={model}>{model}</SelectItem>
                                         ))}
                                     </SelectContent>

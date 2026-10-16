@@ -121,6 +121,11 @@ pub struct RecordingState {
     // Pause time tracking
     pause_start: Mutex<Option<Instant>>,
     total_pause_duration: Mutex<std::time::Duration>,
+
+    /// When set, this session captures audio only and skips realtime
+    /// transcription. The transcription task reads this to decide whether to
+    /// consume the VAD segment stream at all.
+    defer_transcription: AtomicBool,
 }
 
 impl RecordingState {
@@ -140,7 +145,21 @@ impl RecordingState {
             recording_start: Mutex::new(None),
             pause_start: Mutex::new(None),
             total_pause_duration: Mutex::new(std::time::Duration::ZERO),
+            defer_transcription: AtomicBool::new(false),
         })
+    }
+
+    /// Enable/disable deferred transcription for the session that is about to start.
+    ///
+    /// Must be set before `start_recording` so the transcription task sees it on
+    /// its first check.
+    pub fn set_defer_transcription(&self, defer: bool) {
+        self.defer_transcription.store(defer, Ordering::SeqCst);
+    }
+
+    /// Whether realtime transcription is disabled for this session.
+    pub fn is_transcription_deferred(&self) -> bool {
+        self.defer_transcription.load(Ordering::SeqCst)
     }
 
     // Recording control
@@ -402,6 +421,7 @@ impl Default for RecordingState {
             recording_start: Mutex::new(None),
             pause_start: Mutex::new(None),
             total_pause_duration: Mutex::new(std::time::Duration::ZERO),
+            defer_transcription: AtomicBool::new(false),
         }
     }
 }

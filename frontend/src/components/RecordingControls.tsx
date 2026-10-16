@@ -9,8 +9,15 @@ import { listen } from '@tauri-apps/api/event';
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import Analytics from '@/lib/analytics';
+import { toast } from 'sonner';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import type { TranscriptionErrorPayload } from '@/services/transcriptService';
+import { RecordingLevelMonitor } from '@/components/RecordingLevelMonitor';
+import {
+  useRecordingLevelMonitoring,
+  formatDuration,
+  type RecordingLimits,
+} from '@/hooks/useRecordingLevelMonitoring';
 
 interface RecordingControlsProps {
   isRecording: boolean;
@@ -60,6 +67,64 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   const [isValidatingModel, setIsValidatingModel] = useState(false);
   const [speechDetected, setSpeechDetected] = useState(false);
   const [deviceError, setDeviceError] = useState<{ title: string, message: string } | null>(null);
+
+  // Recording limits, loaded from preferences. Defaults are "off" so the
+  // behaviour is unchanged until the user opts in.
+  const [recordingLimits, setRecordingLimits] = useState<RecordingLimits>({
+    silenceStopSeconds: 0,
+    maxRecordingSeconds: 0,
+  });
+
+  // The limits are enforced from a hook declared above `handleStopRecording`, so
+  // the stop handler is reached through a ref rather than reordering the
+  // component's many callbacks.
+  const handleRecordingStopRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    invoke<{ silence_stop_enabled_seconds?: number; max_recording_seconds?: number }>(
+      'get_recording_preferences',
+    )
+      .then((prefs) =>
+        setRecordingLimits({
+          silenceStopSeconds: prefs?.silence_stop_enabled_seconds ?? 0,
+          maxRecordingSeconds: prefs?.max_recording_seconds ?? 0,
+        }),
+      )
+      .catch((error) => console.error('Failed to load recording limits:', error));
+  }, []);
+
+  // Keep the OS level monitor running only while capture is live, so the meter
+  // above has data and the microphone is released when recording stops. The same
+  // hook enforces the optional silence and length limits.
+  useRecordingLevelMonitoring(
+    isRecording,
+    [selectedDevices?.micDevice, selectedDevices?.systemDevice].filter(
+      (name): name is string => Boolean(name),
+    ),
+    {
+      silenceStopSeconds: recordingLimits.silenceStopSeconds,
+      maxRecordingSeconds: recordingLimits.maxRecordingSeconds,
+    },
+    {
+      onLimitReached: (reason) => {
+        toast.info(reason);
+        // Reuse the normal stop path so the recording is finalized (merged,
+        // converted, tagged) exactly as a manual stop would.
+        void handleRecordingStopRef.current?.();
+      },
+      onLimitApproaching: (what, secondsRemaining) => {
+        toast.warning(`${what}: stopping in ${formatDuration(secondsRemaining)}`, {
+          id: 'recording-limit-warning',
+        });
+      },
+      onDiskSpaceLow: (freeMb) => {
+        toast.warning('Low disk space', {
+          id: 'recording-disk-warning',
+          description: `Only ${freeMb} MB free where recordings are saved. Free up space so the rest of this recording is not lost.`,
+        });
+      },
+    },
+  );
 
   const currentTime = 0;
   const duration = 0;
@@ -203,6 +268,10 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     await stopRecordingAction();
   }, [isRecording, isStarting, isStopping, isStartingRecording, stopRecordingAction, onStopInitiated]);
 
+  // Expose the stop handler to the level-monitoring hook, which may fire a limit
+  // stop before this callback has been recreated.
+  handleRecordingStopRef.current = handleStopRecording;
+
   const handlePauseRecording = useCallback(async () => {
     if (!isRecording || isPaused || isPausing) return;
 
@@ -308,10 +377,33 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
           setSpeechDetected(true);
         });
 
+        // Provider auto-switch notice: the configured engine does not support the
+        // selected language, so a compatible one is used for this recording.
+        // Without this the user would only notice that transcripts look different.
+        const providerSwitchedUnsubscribe = await listen<{
+          fromLabel?: string;
+          toLabel?: string;
+          language?: string | null;
+          userMessage?: string;
+        }>('transcription-provider-switched', (event) => {
+          const { fromLabel, toLabel, language, userMessage } = event.payload ?? {};
+          console.log('transcription-provider-switched event received:', event);
+
+          toast.info('Transcription engine changed for this recording', {
+            description:
+              userMessage
+              ?? `${fromLabel ?? 'The selected engine'} does not support ${
+                language ? `"${language}"` : 'this language'
+              }, so ${toLabel ?? 'another engine'} is being used.`,
+            duration: 8000,
+          });
+        });
+
         unsubscribes = [
           transcriptErrorUnsubscribe,
           transcriptionErrorUnsubscribe,
-          speechDetectedUnsubscribe
+          speechDetectedUnsubscribe,
+          providerSwitchedUnsubscribe
         ];
         console.log('Recording event listeners set up successfully');
       } catch (error) {
@@ -476,6 +568,14 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                       />
                     ))}
                   </div>
+
+                  {/* Live input levels. Placed next to the recording indicator so a
+                      silent microphone or wrong output device is visible while it
+                      still matters, rather than after the meeting. */}
+                  <RecordingLevelMonitor
+                    active={isRecording && !isPaused}
+                    className="mx-4 min-w-[16rem]"
+                  />
                 </>
               )}
             </>

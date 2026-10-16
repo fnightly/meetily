@@ -62,7 +62,6 @@ interface SidebarContextType {
   stopSummaryPolling: (meetingId: string, processId?: string) => void;
   // Refetch meetings from backend
   refetchMeetings: () => Promise<void>;
-
 }
 
 const SidebarContext = createContext<SidebarContextType | null>(null);
@@ -316,7 +315,6 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       startSummaryPolling,
       stopSummaryPolling,
       refetchMeetings: fetchMeetings,
-
     }}>
       {children}
     </SidebarContext.Provider>

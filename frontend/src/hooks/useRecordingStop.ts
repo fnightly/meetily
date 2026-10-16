@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
+import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { useTranscripts } from '@/contexts/TranscriptContext';
@@ -8,6 +9,8 @@ import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateCon
 import { storageService } from '@/services/storageService';
 import { transcriptService } from '@/services/transcriptService';
 import Analytics from '@/lib/analytics';
+import { actionNeedsTranscription, type PostRecordingAction } from '@/lib/post-recording';
+import type { TranscriptSegmentData } from '@/types';
 import {
   applyPinnedSummaryLanguageToMeeting,
   detectAndCacheSummaryLanguage,
@@ -22,6 +25,10 @@ interface UseRecordingStopReturn {
   isSavingTranscript: boolean;
   summaryStatus: SummaryStatus;
   setIsStopping: (value: boolean) => void;
+  /** Recording awaiting a transcription decision, or null. */
+  pendingPostRecording: { meetingId: string } | null;
+  /** Apply the user's choice for the pending recording. */
+  handlePostRecordingChoice: (action: PostRecordingAction) => Promise<void>;
 }
 
 /**
@@ -50,6 +57,15 @@ export function useRecordingStop(
     isProcessing: isProcessingTranscript,
     isSaving: isSavingTranscript
   } = recordingState;
+
+  /**
+   * A saved recording awaiting the user's decision about transcription.
+   *
+   * Non-null while the post-recording dialog should be shown.
+   */
+  const [pendingPostRecording, setPendingPostRecording] = useState<{
+    meetingId: string;
+  } | null>(null);
 
   const {
     transcriptsRef,
@@ -86,10 +102,11 @@ export function useRecordingStop(
           message: string;
           folder_path?: string;
           meeting_name?: string;
+          transcription_deferred?: boolean;
         }>('recording-stopped', async (event) => {
           // Create promise that resolves when sessionStorage is set (prevents race condition)
           recordingStoppedDataRef.current = (async () => {
-            const { folder_path, meeting_name } = event.payload;
+            const { folder_path, meeting_name, transcription_deferred } = event.payload;
 
             // Store folder_path and meeting_name for later use in handleRecordingStop
             if (folder_path) {
@@ -98,6 +115,13 @@ export function useRecordingStop(
             if (meeting_name) {
               sessionStorage.setItem('last_recording_meeting_name', meeting_name);
             }
+            // Recorded per session, not read from preferences at stop time: the
+            // user may have changed the setting while recording, and the stop path
+            // must reflect what this recording actually did.
+            sessionStorage.setItem(
+              'last_recording_deferred',
+              transcription_deferred ? 'true' : 'false',
+            );
           })();
 
         });
@@ -116,6 +140,118 @@ export function useRecordingStop(
       }
     };
   }, [router]);
+
+  /**
+   * Navigate to a saved meeting.
+   *
+   * Shared by the normal path and the post-recording choice path so both land in
+   * the same place.
+   */
+  const navigateToMeeting = useCallback(
+    (meetingId: string) => {
+      router.push(`/meeting-details?id=${meetingId}&source=recording`);
+      clearTranscripts();
+      Analytics.trackPageView('meeting_details');
+      setStatus(RecordingStatus.IDLE);
+    },
+    [router, clearTranscripts, setStatus],
+  );
+
+  /**
+   * Rewrite the transcript with a local model, when the user has opted in.
+   *
+   * Cleanup removes filler words and fixes spoken punctuation, which means it
+   * rewrites the user's own words — so it is off unless enabled, and the text is
+   * re-split into the existing segments rather than replacing them wholesale so
+   * playback timings survive.
+   *
+   * Any failure keeps the original transcript. Losing a meeting's text because a
+   * cleanup model was unavailable would be far worse than storing it uncleaned.
+   */
+  const applyTranscriptCleanup = useCallback(
+    // Generic over the element type so the caller's own shape (with its string or
+    // numeric timestamp) survives; only `text` is ever rewritten.
+    async <T extends { text: string }>(segments: T[]): Promise<T[]> => {
+      if (segments.length === 0) return segments;
+
+      try {
+        const prefs = await invoke<{ cleanup_after_recording?: boolean }>(
+          'get_recording_preferences',
+        );
+        if (!prefs?.cleanup_after_recording) {
+          console.log('Transcript cleanup is disabled; keeping the raw transcript');
+          return segments;
+        }
+      } catch (error) {
+        console.warn('Could not read the cleanup preference; skipping cleanup:', error);
+        return segments;
+      }
+
+      try {
+        setStatus(RecordingStatus.PROCESSING_TRANSCRIPTS, 'Cleaning up the transcript...');
+
+        const joined = segments.map((segment) => segment.text).join('\n');
+        const outcome = await invoke<{
+          cleaned: string | null;
+          applied: boolean;
+          skipped: string | null;
+        }>('cleanup_transcript', { text: joined });
+
+        if (!outcome.applied || !outcome.cleaned) {
+          if (outcome.skipped) console.log(`Transcript cleanup skipped: ${outcome.skipped}`);
+          return segments;
+        }
+
+        // Keep the timing of each original segment: only the text is replaced, so
+        // playback sync and the audio offsets stored with each row stay valid.
+        const cleanedLines = outcome.cleaned
+          .split('\n')
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0);
+
+        if (cleanedLines.length === 0) {
+          console.warn('Cleanup produced no lines; keeping the raw transcript');
+          return segments;
+        }
+
+        const cleanedSegments = segments.map((segment, index) => ({
+          ...segment,
+          // A model may merge or split lines; mapping by position keeps the shape
+          // predictable, and any surplus text is appended to the last segment
+          // rather than dropped.
+          text: cleanedLines[index] ?? '',
+        }));
+
+        const merged = cleanedSegments
+          .map((segment) => segment.text)
+          .join(' ')
+          .trim();
+
+        if (cleanedLines.length > segments.length) {
+          const surplus = cleanedLines.slice(segments.length).join(' ');
+          const last = cleanedSegments[cleanedSegments.length - 1];
+          last.text = `${last.text} ${surplus}`.trim();
+        } else if (!merged) {
+          console.warn('Cleanup produced empty segments; keeping the raw transcript');
+          return segments;
+        }
+
+        // Drop segments the model emptied out, e.g. a line that was pure filler.
+        const kept = cleanedSegments.filter((segment) => segment.text.length > 0);
+        if (kept.length === 0) return segments;
+
+        console.log(`Transcript cleanup applied: ${segments.length} -> ${kept.length} segments`);
+        return kept;
+      } catch (error) {
+        console.error('Transcript cleanup failed; keeping the raw transcript:', error);
+        toast.warning('Transcript cleanup failed', {
+          description: 'The recording was saved with the original transcript.',
+        });
+        return segments;
+      }
+    },
+    [setStatus],
+  );
 
   // Main recording stop handler
   const handleRecordingStop = useCallback(async (isCallApi: boolean) => {
@@ -145,6 +281,11 @@ export function useRecordingStop(
       // This function only handles post-stop processing (transcription wait, API call, navigation)
       console.log('Recording already stopped by RecordingControls, processing transcription...');
 
+      // Whether this recording skipped realtime transcription. Read from the stop
+      // event rather than preferences: the setting may have changed mid-recording.
+      const deferred =
+        sessionStorage.getItem('last_recording_deferred') === 'true';
+
       // Wait for transcription to complete
       setStatus(RecordingStatus.PROCESSING_TRANSCRIPTS, 'Waiting for transcription...');
       console.log('Waiting for transcription to complete...');
@@ -152,7 +293,10 @@ export function useRecordingStop(
       const MAX_WAIT_TIME = 60000; // 60 seconds maximum wait (increased for longer processing)
       const POLL_INTERVAL = 500; // Check every 500ms
       let elapsedTime = 0;
-      let transcriptionComplete = false;
+      // In deferred mode no chunks were ever queued for transcription, so there is
+      // nothing to wait for: going through the poll loop would stall the stop
+      // sequence for the "no recent activity" grace period on every recording.
+      let transcriptionComplete = deferred;
 
       // Listen for transcription-complete event
       const unlistenComplete = await listen('transcription-complete', () => {
@@ -199,7 +343,11 @@ export function useRecordingStop(
       console.log('🧹 CLEANUP: Cleaning up transcription-complete listener');
       unlistenComplete();
 
-      if (!transcriptionComplete && elapsedTime >= MAX_WAIT_TIME) {
+      if (deferred) {
+        // No live transcription happened, so there are no late segments to wait
+        // for and nothing in the buffer to flush.
+        console.log('⏩ Transcription was deferred; skipping the post-wait grace period');
+      } else if (!transcriptionComplete && elapsedTime >= MAX_WAIT_TIME) {
         console.warn('⏰ Transcription wait timeout reached after', elapsedTime, 'ms');
       } else {
         console.log('✅ Transcription completed after', elapsedTime, 'ms');
@@ -233,12 +381,21 @@ export function useRecordingStop(
       // Save to SQLite
       // NOTE: enabled to save COMPLETE transcripts after frontend receives all updates
       // This ensures user sees all transcripts streaming in before database save
-      if (isCallApi && transcriptionComplete == true) {
+      //
+      // In deferred mode the meeting is saved even though it has no transcript rows:
+      // without a meeting record the audio on disk is unreachable from the UI, so it
+      // could never be transcribed afterwards. An empty transcript list is a valid
+      // state for a saved recording.
+      if (isCallApi && (transcriptionComplete || deferred)) {
 
         setStatus(RecordingStatus.SAVING, 'Saving meeting to database...');
 
         // Get fresh transcript state (ALL transcripts including late ones)
-        const freshTranscripts = [...transcriptsRef.current];
+        let freshTranscripts = [...transcriptsRef.current];
+
+        // Cleanup runs before saving so the database stores the cleaned text and
+        // the user never sees the raw version replaced afterwards.
+        freshTranscripts = await applyTranscriptCleanup(freshTranscripts);
 
         // Get folder_path and meeting_name from recording-stopped event
         const folderPath = sessionStorage.getItem('last_recording_folder_path');
@@ -322,28 +479,30 @@ export function useRecordingStop(
           // Mark as completed
           setStatus(RecordingStatus.COMPLETED);
 
-          // Show success toast with navigation option
-          toast.success('Recording saved successfully!', {
-            description: `${freshTranscripts.length} transcript segments saved.`,
-            action: {
-              label: 'View Meeting',
-              onClick: () => {
-                router.push(`/meeting-details?id=${meetingId}`);
-                Analytics.trackButtonClick('view_meeting_from_toast', 'recording_complete');
-              }
-            },
-            duration: 10000,
-          });
+          if (deferred) {
+            // Deferred transcription has no live text, so the sensible next step is
+            // a choice rather than a silent save. Ask, then act on the answer.
+            toast.success('Recording saved', {
+              description: 'Audio saved. Choose whether to transcribe it.',
+            });
+            setPendingPostRecording({ meetingId });
+          } else {
+            // Show success toast with navigation option
+            toast.success('Recording saved successfully!', {
+              description: `${freshTranscripts.length} transcript segments saved.`,
+              action: {
+                label: 'View Meeting',
+                onClick: () => {
+                  router.push(`/meeting-details?id=${meetingId}`);
+                  Analytics.trackButtonClick('view_meeting_from_toast', 'recording_complete');
+                }
+              },
+              duration: 10000,
+            });
 
-          // Auto-navigate after a short delay with source parameter
-          setTimeout(() => {
-            router.push(`/meeting-details?id=${meetingId}&source=recording`);
-            clearTranscripts()
-            Analytics.trackPageView('meeting_details');
-
-            // Reset to IDLE after navigation
-            setStatus(RecordingStatus.IDLE);
-          }, 2000);
+            // Auto-navigate after a short delay with source parameter
+            setTimeout(() => navigateToMeeting(meetingId), 2000);
+          }
           // Track meeting completion analytics
           try {
             // Calculate meeting duration from transcript timestamps
@@ -435,7 +594,102 @@ export function useRecordingStop(
     meetings,
     setIsMeetingActive,
     router,
+    navigateToMeeting,
+    setPendingPostRecording,
   ]);
+
+  /**
+   * Wait until a retranscription finishes.
+   *
+   * `start_retranscription_command` returns as soon as the work is queued, so the
+   * completion event is what marks it done. Bounded by a timeout so a lost event
+   * still lets the UI finish rather than hanging on the dialog.
+   */
+  const waitForRetranscription = useCallback(
+    async (meetingId: string, timeoutMs = 30 * 60 * 1000): Promise<void> => {
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        let unlisten: (() => void) | undefined;
+
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          unlisten?.();
+          resolve();
+        };
+
+        const timer = setTimeout(() => {
+          console.warn('Retranscription wait timed out; continuing');
+          finish();
+        }, timeoutMs);
+
+        listen<{ meeting_id?: string }>('retranscription-complete', (event) => {
+          // Only react to this meeting's completion.
+          if (!event.payload?.meeting_id || event.payload.meeting_id === meetingId) {
+            finish();
+          }
+        })
+          .then((fn) => {
+            if (settled) fn();
+            else unlisten = fn;
+          })
+          .catch((error) => {
+            console.error('Failed to subscribe to retranscription-complete:', error);
+            finish();
+          });
+      });
+    },
+    [],
+  );
+
+  /**
+   * Apply the user's choice for a recording that has no live transcript.
+   *
+   * `keep` is the do-nothing path: the audio is already saved and the meeting can
+   * be transcribed later from its details page.
+   */
+  const handlePostRecordingChoice = useCallback(
+    async (action: PostRecordingAction) => {
+      const pending = pendingPostRecording;
+      setPendingPostRecording(null);
+
+      if (!pending) return;
+
+      const { meetingId } = pending;
+      const folderPath = sessionStorage.getItem('last_recording_folder_path');
+
+      if (action !== 'keep' && actionNeedsTranscription(action) && folderPath) {
+        try {
+          toast.info('Transcribing the recording…', {
+            description: 'You can keep using the app while this runs.',
+          });
+
+          await invoke('start_retranscription_command', {
+            meetingId,
+            meetingFolderPath: folderPath,
+            language: null,
+            model: null,
+            provider: null,
+          });
+
+          await waitForRetranscription(meetingId);
+          toast.success('Transcription complete');
+        } catch (error) {
+          console.error('Post-recording follow-up failed:', error);
+          toast.error('Transcription failed', {
+            description: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      // Summarising is left to the meeting page, which owns the model
+      // configuration and the transcript payload. The existing auto-summary
+      // setting decides whether one is produced, so the user is not asked twice.
+      navigateToMeeting(meetingId);
+    },
+    [pendingPostRecording, navigateToMeeting, waitForRetranscription],
+  );
 
   // Expose handleRecordingStop function to window for Rust callbacks
   const handleRecordingStopRef = useRef(handleRecordingStop);
@@ -466,5 +720,7 @@ export function useRecordingStop(
     setIsStopping: (value: boolean) => {
       setStatus(value ? RecordingStatus.STOPPING : RecordingStatus.IDLE);
     },
+    pendingPostRecording,
+    handlePostRecordingChoice,
   };
 }

@@ -862,13 +862,20 @@ impl ParakeetEngine {
             .await
             .map_err(|error| anyhow!("Failed to create model directory: {}", error))?;
 
-        let client = reqwest::Client::builder()
-            .tcp_nodelay(true)
-            .pool_max_idle_per_host(1)
-            .timeout(Duration::from_secs(3600))
-            .connect_timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|error| anyhow!("Failed to create HTTP client: {}", error))?;
+        // Proxy-aware client: `Client::builder()` alone ignores the OS proxy
+        // setting, which breaks the download on machines that need one. Goes
+        // through the shared helper so loopback hosts stay direct.
+        let client = {
+            let builder = reqwest::Client::builder()
+                .tcp_nodelay(true)
+                .pool_max_idle_per_host(1)
+                .timeout(Duration::from_secs(3600))
+                .connect_timeout(Duration::from_secs(30));
+
+            crate::http_client::apply_proxy(builder)
+                .build()
+                .map_err(|error| anyhow!("Failed to create HTTP client: {}", error))?
+        };
         let total_bytes: u64 = artifacts.iter().map(|artifact| artifact.exact_bytes).sum();
         let download_started = Instant::now();
         let mut confirmed_bytes = 0u64;
