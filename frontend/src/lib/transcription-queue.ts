@@ -205,3 +205,22 @@ export function isTranscriptionPending(
   const item = state.items[folderPath];
   return item !== undefined && isPending(item.status);
 }
+
+/**
+ * i18n key for a backend progress stage, or null for one this build does not know.
+ *
+ * The backend emits fixed stage ids; mapping them here keeps the interface in the
+ * user's language instead of showing the raw id, while an unknown future stage
+ * still renders as the backend's own text rather than disappearing.
+ */
+const TRANSCRIPTION_STAGE_KEYS: Record<string, string> = {
+  decoding: 'library.stage.decoding',
+  vad: 'library.stage.vad',
+  transcribing: 'library.stage.transcribing',
+  saving: 'library.stage.saving',
+  complete: 'library.stage.complete',
+};
+
+export function transcriptionStageKey(stage: string): string | null {
+  return TRANSCRIPTION_STAGE_KEYS[stage] ?? null;
+}

@@ -5,6 +5,7 @@ import {
   nextQueuedFolder,
   transcriptionItem,
   transcriptionQueueReducer,
+  transcriptionStageKey,
   type TranscriptionQueueEvent,
   type TranscriptionQueueState,
 } from '../../src/lib/transcription-queue';
@@ -200,6 +201,22 @@ describe('completion advances the queue', () => {
   test('completion for an unknown folder changes nothing', () => {
     const state = queueOf('a');
     expect(run(state, { type: 'complete', folderPath: 'missing', segmentsCount: 1 })).toBe(state);
+  });
+});
+
+describe('progress stage labels', () => {
+  test('maps known backend stages to i18n keys', () => {
+    expect(transcriptionStageKey('decoding')).toBe('library.stage.decoding');
+    expect(transcriptionStageKey('vad')).toBe('library.stage.vad');
+    expect(transcriptionStageKey('transcribing')).toBe('library.stage.transcribing');
+    expect(transcriptionStageKey('saving')).toBe('library.stage.saving');
+    expect(transcriptionStageKey('complete')).toBe('library.stage.complete');
+  });
+
+  test('an unknown or empty stage has no translation', () => {
+    // The caller falls back to the backend text rather than hiding it.
+    expect(transcriptionStageKey('new-stage')).toBeNull();
+    expect(transcriptionStageKey('')).toBeNull();
   });
 });
 

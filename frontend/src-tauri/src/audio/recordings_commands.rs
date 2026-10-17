@@ -128,11 +128,21 @@ pub async fn ensure_meeting_for_recording(
     folder_path: String,
     meeting_title: String,
 ) -> Result<String, String> {
-    let pool = state.db_manager.pool();
+    find_or_create_meeting(state.db_manager.pool(), &folder_path, &meeting_title).await
+}
 
+/// Look up a folder's meeting, creating an empty one on first use.
+///
+/// Kept out of the command so the reuse rule can be tested against an in-memory
+/// database: a second transcribe attempt must not add a duplicate meeting row.
+async fn find_or_create_meeting(
+    pool: &sqlx::SqlitePool,
+    folder_path: &str,
+    meeting_title: &str,
+) -> Result<String, String> {
     let existing: Option<String> =
         sqlx::query_scalar("SELECT id FROM meetings WHERE folder_path = ? LIMIT 1")
-            .bind(&folder_path)
+            .bind(folder_path)
             .fetch_optional(pool)
             .await
             .map_err(|e| format!("Failed to look up the meeting for this recording: {}", e))?;
@@ -141,7 +151,7 @@ pub async fn ensure_meeting_for_recording(
         return Ok(meeting_id);
     }
 
-    TranscriptsRepository::save_transcript(pool, &meeting_title, &[], Some(folder_path))
+    TranscriptsRepository::save_transcript(pool, meeting_title, &[], Some(folder_path.to_string()))
         .await
         .map_err(|e| format!("Failed to create a meeting for this recording: {}", e))
 }
@@ -429,6 +439,52 @@ mod tests {
         .expect("write metadata");
         std::fs::write(folder.join("audio.m4a"), vec![0u8; 2048]).expect("write audio");
         folder
+    }
+
+    /// The meetings table as the migration creates it, reduced to the columns the
+    /// lookup and insert touch.
+    async fn test_pool() -> sqlx::SqlitePool {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory database");
+        sqlx::query(
+            "CREATE TABLE meetings (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                folder_path TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create meetings table");
+        pool
+    }
+
+    #[tokio::test]
+    async fn meeting_for_a_folder_is_created_once_and_then_reused() {
+        let pool = test_pool().await;
+
+        let first = find_or_create_meeting(&pool, "D:\\recordings\\a", "First title")
+            .await
+            .expect("create");
+        // A retry, possibly after a rename, must not add a second meeting row.
+        let again = find_or_create_meeting(&pool, "D:\\recordings\\a", "Renamed")
+            .await
+            .expect("reuse");
+        assert_eq!(first, again);
+
+        let other = find_or_create_meeting(&pool, "D:\\recordings\\b", "Second")
+            .await
+            .expect("create second");
+        assert_ne!(first, other);
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM meetings")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count, 2, "one meeting row per recording folder");
     }
 
     #[test]

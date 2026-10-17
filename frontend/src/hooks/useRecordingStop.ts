@@ -11,6 +11,7 @@ import { storageService } from '@/services/storageService';
 import { transcriptService } from '@/services/transcriptService';
 import Analytics from '@/lib/analytics';
 import { actionNeedsTranscription, type PostRecordingAction } from '@/lib/post-recording';
+import { batchTranscriptionTarget, type ActiveSpeechSettings } from '@/lib/transcription-target';
 import type { TranscriptSegmentData } from '@/types';
 import {
   applyPinnedSummaryLanguageToMeeting,
@@ -644,6 +645,17 @@ export function useRecordingStop(
     [],
   );
 
+  // The batch command falls back to Whisper when it is not told which engine to
+  // use; forward the active speech settings so a Parakeet or cloud choice is used.
+  const resolveBatchTarget = useCallback(async () => {
+    try {
+      return batchTranscriptionTarget(await invoke<ActiveSpeechSettings>('api_get_active_speech_settings'));
+    } catch (error) {
+      console.error('Failed to read the active speech settings:', error);
+      return batchTranscriptionTarget(null);
+    }
+  }, []);
+
   /**
    * Apply the user's choice for a recording that has no live transcript.
    *
@@ -669,9 +681,7 @@ export function useRecordingStop(
           await invoke('start_retranscription_command', {
             meetingId,
             meetingFolderPath: folderPath,
-            language: null,
-            model: null,
-            provider: null,
+            ...(await resolveBatchTarget()),
           });
 
           await waitForRetranscription(meetingId);
@@ -689,7 +699,7 @@ export function useRecordingStop(
       // setting decides whether one is produced, so the user is not asked twice.
       navigateToMeeting(meetingId);
     },
-    [pendingPostRecording, navigateToMeeting, waitForRetranscription],
+    [pendingPostRecording, navigateToMeeting, resolveBatchTarget, waitForRetranscription],
   );
 
   // Expose handleRecordingStop function to window for Rust callbacks

@@ -40,6 +40,7 @@ import {
   type LibraryFilter,
   type LibrarySort,
 } from '@/lib/library-view';
+import { transcriptionStageKey } from '@/lib/transcription-queue';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useI18n } from '@/contexts/I18nContext';
@@ -552,6 +553,7 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
             )}
         {group.items.map((entry) => {
           const transcriptionItem = transcription.statusFor(entry.folder_path);
+          const stageKey = transcriptionItem ? transcriptionStageKey(transcriptionItem.stage) : null;
           const isTranscribing =
             transcriptionItem !== undefined &&
             (transcriptionItem.status === 'queued' || transcriptionItem.status === 'running');
@@ -698,7 +700,9 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
                             />
                           </div>
                           <span className="truncate text-[11px] tabular-nums text-blue-700">
-                            {transcriptionItem.stage ? `${transcriptionItem.stage} · ` : ''}
+                            {transcriptionItem.stage
+                              ? `${stageKey ? t(stageKey) : transcriptionItem.stage} · `
+                              : ''}
                             {transcriptionItem.percentage}%
                           </span>
                         </div>
