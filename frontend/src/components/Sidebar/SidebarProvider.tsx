@@ -6,19 +6,45 @@ import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import type { SummaryProcessResponse } from '@/types';
-
-
-
-interface SidebarItem {
-  id: string;
-  title: string;
-  type: 'folder' | 'file';
-  children?: SidebarItem[];
-}
+import type { RecordingsListView } from '@/lib/recordings';
+import { mergeSidebarEntries, type SidebarEntry } from '@/lib/sidebar-entries';
 
 export interface CurrentMeeting {
   id: string;
   title: string;
+  /**
+   * Folder the meeting's recording lives in, when the backend reports one. The
+   * merged sidebar list matches a meeting against a recording on this value.
+   */
+  folderPath?: string | null;
+}
+
+/**
+ * Fill in the recording folder for meetings that arrive without one.
+ *
+ * The list command returns only an id and a title, while the merged list needs the
+ * folder to recognise that a meeting and a recording are the same item. The
+ * per-meeting metadata command is the only source for it, so it is asked once per
+ * meeting that needs it; a meeting that cannot answer simply claims no recording,
+ * which is the same outcome as a meeting whose audio is gone.
+ */
+async function withRecordingFolders(meetings: CurrentMeeting[]): Promise<CurrentMeeting[]> {
+  return Promise.all(
+    meetings.map(async (meeting) => {
+      if (meeting.folderPath) return meeting;
+
+      try {
+        const metadata = await invoke<{ folder_path?: string | null } | null>(
+          'api_get_meeting_metadata',
+          { meetingId: meeting.id },
+        );
+        return { ...meeting, folderPath: metadata?.folder_path ?? null };
+      } catch (error) {
+        console.error('Error fetching meeting folder path:', meeting.id, error);
+        return { ...meeting, folderPath: null };
+      }
+    }),
+  );
 }
 
 // Search result type for transcript search
@@ -38,11 +64,23 @@ interface SummaryPoll {
 interface SidebarContextType {
   currentMeeting: CurrentMeeting | null;
   setCurrentMeeting: (meeting: CurrentMeeting | null) => void;
-  sidebarItems: SidebarItem[];
   isCollapsed: boolean;
   toggleCollapse: () => void;
   meetings: CurrentMeeting[];
   setMeetings: (meetings: CurrentMeeting[]) => void;
+  /** True until the first meeting fetch has settled. */
+  meetingsLoading: boolean;
+  /**
+   * The merged list the sidebar renders: one row per meeting-or-recording. Shared
+   * from here so the list is built from one copy of each list.
+   */
+  entries: SidebarEntry[];
+  /** The recordings folder as last read, for the recordings page. */
+  recordingsView: RecordingsListView | null;
+  recordingsLoading: boolean;
+  /** Why the last recordings read failed, or null. */
+  recordingsError: string | null;
+  refetchRecordings: () => Promise<void>;
   isMeetingActive: boolean;
   setIsMeetingActive: (active: boolean) => void;
   handleRecordingToggle: () => void;
@@ -78,7 +116,10 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const [currentMeeting, setCurrentMeeting] = useState<CurrentMeeting | null>({ id: 'intro-call', title: '+ New Call' });
   const [isCollapsed, setIsCollapsed] = useState(true);
   const [meetings, setMeetings] = useState<CurrentMeeting[]>([]);
-  const [sidebarItems, setSidebarItems] = useState<SidebarItem[]>([]);
+  const [meetingsLoading, setMeetingsLoading] = useState(true);
+  const [recordingsView, setRecordingsView] = useState<RecordingsListView | null>(null);
+  const [recordingsLoading, setRecordingsLoading] = useState(true);
+  const [recordingsError, setRecordingsError] = useState<string | null>(null);
   const [isMeetingActive, setIsMeetingActive] = useState(false);
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -95,18 +136,22 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   // Extract fetchMeetings as a reusable function
   const fetchMeetings = React.useCallback(async () => {
     if (serverAddress) {
+      setMeetingsLoading(true);
       try {
-        const meetings = await invoke('api_get_meetings') as Array<{ id: string, title: string }>;
+        const meetings = await invoke('api_get_meetings') as Array<{ id: string, title: string, folder_path?: string | null }>;
         const transformedMeetings = meetings.map((meeting: any) => ({
           id: meeting.id,
-          title: meeting.title
+          title: meeting.title,
+          folderPath: meeting.folder_path ?? null
         }));
-        setMeetings(transformedMeetings);
+        setMeetings(await withRecordingFolders(transformedMeetings));
         Analytics.trackBackendConnection(true);
       } catch (error) {
         console.error('Error fetching meetings:', error);
         setMeetings([]);
         Analytics.trackBackendConnection(false, error instanceof Error ? error.message : 'Unknown error');
+      } finally {
+        setMeetingsLoading(false);
       }
     }
   }, [serverAddress]);
@@ -114,6 +159,27 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     fetchMeetings();
   }, [serverAddress, fetchMeetings]);
+
+  // Recordings live in the provider rather than in the sidebar or the recordings
+  // page, so both read one copy and a change made in either shows up in the other.
+  const fetchRecordings = React.useCallback(async () => {
+    setRecordingsLoading(true);
+    try {
+      setRecordingsView(await invoke<RecordingsListView>('list_saved_recordings'));
+      setRecordingsError(null);
+    } catch (error) {
+      console.error('Error fetching recordings:', error);
+      // The last good list is kept: stale audio rows are more useful than an
+      // empty list, and the error is reported beside them.
+      setRecordingsError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRecordingsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchRecordings();
+  }, [fetchRecordings]);
 
   useEffect(() => {
     const fetchSettings = async () => {
@@ -123,17 +189,10 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     fetchSettings();
   }, []);
 
-  const baseItems: SidebarItem[] = [
-    {
-      id: 'meetings',
-      title: 'Meeting Notes',
-      type: 'folder' as const,
-      children: [
-        ...meetings.map(meeting => ({ id: meeting.id, title: meeting.title, type: 'file' as const }))
-      ]
-    },
-  ];
-
+  const entries = React.useMemo(
+    () => mergeSidebarEntries(meetings, recordingsView?.recordings ?? []),
+    [meetings, recordingsView]
+  );
 
   const toggleCollapse = () => {
     setIsCollapsed(!isCollapsed);
@@ -144,13 +203,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     if (pathname === '/') {
       setCurrentMeeting({ id: 'intro-call', title: '+ New Call' });
     }
-    setSidebarItems(baseItems);
   }, [pathname]);
-
-  // Update sidebar items when meetings change
-  useEffect(() => {
-    setSidebarItems(baseItems);
-  }, [meetings]);
 
   // Function to handle recording toggle from sidebar
   const handleRecordingToggle = () => {
@@ -297,11 +350,16 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     <SidebarContext.Provider value={{
       currentMeeting,
       setCurrentMeeting,
-      sidebarItems,
       isCollapsed,
       toggleCollapse,
       meetings,
       setMeetings,
+      meetingsLoading,
+      entries,
+      recordingsView,
+      recordingsLoading,
+      recordingsError,
+      refetchRecordings: fetchRecordings,
       isMeetingActive,
       setIsMeetingActive,
       handleRecordingToggle,

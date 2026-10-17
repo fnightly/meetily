@@ -1,11 +1,13 @@
 'use client';
 
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
-import { ChevronDown, ChevronRight, File, Settings, ChevronLeftCircle, ChevronRightCircle, Calendar, StickyNote, Home, Trash2, Mic, Square, Plus, Search, Pencil, NotebookPen, SearchIcon, X, Upload, AudioLines } from 'lucide-react';
+import { File, Settings, ChevronLeftCircle, ChevronRightCircle, StickyNote, Home, Trash2, Mic, Square, Search, Pencil, NotebookPen, SearchIcon, X, Upload, AudioLines, Loader2, RefreshCw } from 'lucide-react';
 import { useI18n } from '@/contexts/I18nContext';
 import { useRouter, usePathname } from 'next/navigation';
 import { useSidebar } from './SidebarProvider';
 import type { CurrentMeeting } from '@/components/Sidebar/SidebarProvider';
+import { formatBytes, formatDuration, formatRecordedAt } from '@/lib/recordings';
+import type { SidebarEntry } from '@/lib/sidebar-entries';
 import { ConfirmationModal } from '../ConfirmationModel/confirmation-modal';
 import { ModelConfig } from '@/components/ModelSettingsModal';
 import { SettingTabs } from '../SettingTabs';
@@ -34,25 +36,14 @@ import { Input } from '../ui/input';
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '../ui/input-group';
 
 
-interface SidebarItem {
-  id: string;
-  title: string;
-  type: 'folder' | 'file';
-  children?: SidebarItem[];
-}
-
 const Sidebar: React.FC = () => {
   const router = useRouter();
   const { t } = useI18n();
   const pathname = usePathname();
 
-  // A recordings page flag is needed by both the collapsed rail and the
-  // expanded list, so it lives at component scope rather than inside a renderer.
-  const isRecordingsPage = pathname === '/recordings';
   const {
     currentMeeting,
     setCurrentMeeting,
-    sidebarItems,
     isCollapsed,
     toggleCollapse,
     handleRecordingToggle,
@@ -61,14 +52,18 @@ const Sidebar: React.FC = () => {
     isSearching,
     meetings,
     setMeetings,
-    serverAddress
+    serverAddress,
+    entries,
+    meetingsLoading,
+    recordingsLoading,
+    recordingsError,
+    refetchRecordings
   } = useSidebar();
 
   // Get recording state from RecordingStateContext (single source of truth)
   const { isRecording } = useRecordingState();
   const { openImportDialog } = useImportDialog();
   const { betaFeatures } = useConfig();
-  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set(['meetings']));
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [showModelSettings, setShowModelSettings] = useState(false);
   const [modelConfig, setModelConfig] = useState<ModelConfig>({
@@ -91,15 +86,6 @@ const Sidebar: React.FC = () => {
     currentTitle: ''
   });
   const [editingTitle, setEditingTitle] = useState<string>('');
-
-  // Ensure 'meetings' folder is always expanded
-  useEffect(() => {
-    if (!expandedFolders.has('meetings')) {
-      const newExpanded = new Set(expandedFolders);
-      newExpanded.add('meetings');
-      setExpandedFolders(newExpanded);
-    }
-  }, [expandedFolders]);
 
   // useEffect(() => {
   //   if (settingsSaveSuccess !== null) {
@@ -253,76 +239,21 @@ const Sidebar: React.FC = () => {
 
     // Search through transcripts
     await searchTranscripts(value);
+  }, [searchTranscripts]);
 
-    // Make sure the meetings folder is expanded when searching
-    if (!expandedFolders.has('meetings')) {
-      const newExpanded = new Set(expandedFolders);
-      newExpanded.add('meetings');
-      setExpandedFolders(newExpanded);
-    }
-  }, [expandedFolders, searchTranscripts]);
+  // Transcript matches arrive keyed by meeting, so a row survives the filter when
+  // either its title or its transcript matches.
+  const visibleEntries = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return entries;
 
-  // Combine search results with sidebar items
-  const filteredSidebarItems = useMemo(() => {
-    if (!searchQuery.trim()) return sidebarItems;
+    const matchedMeetingIds = new Set(searchResults.map(result => result.id));
 
-    // If we have search results, highlight matching meetings
-    if (searchResults.length > 0) {
-      // Get the IDs of meetings that matched in transcripts
-      const matchedMeetingIds = new Set(searchResults.map(result => result.id));
-
-      return sidebarItems
-        .map(folder => {
-          // Always include folders in the results
-          if (folder.type === 'folder') {
-            if (!folder.children) return folder;
-
-            // Filter children based on search results or title match
-            const filteredChildren = folder.children.filter(item => {
-              // Include if the meeting ID is in our search results
-              if (matchedMeetingIds.has(item.id)) return true;
-
-              // Or if the title matches the search query
-              return item.title.toLowerCase().includes(searchQuery.toLowerCase());
-            });
-
-            return {
-              ...folder,
-              children: filteredChildren
-            };
-          }
-
-          // For non-folder items, check if they match the search
-          return (matchedMeetingIds.has(folder.id) ||
-            folder.title.toLowerCase().includes(searchQuery.toLowerCase()))
-            ? folder : undefined;
-        })
-        .filter((item): item is SidebarItem => item !== undefined); // Type-safe filter
-    } else {
-      // Fall back to title-only filtering if no transcript results
-      return sidebarItems
-        .map(folder => {
-          // Always include folders in the results
-          if (folder.type === 'folder') {
-            if (!folder.children) return folder;
-
-            // Filter children based on search query
-            const filteredChildren = folder.children.filter(item =>
-              item.title.toLowerCase().includes(searchQuery.toLowerCase())
-            );
-
-            return {
-              ...folder,
-              children: filteredChildren
-            };
-          }
-
-          // For non-folder items, check if they match the search
-          return folder.title.toLowerCase().includes(searchQuery.toLowerCase()) ? folder : undefined;
-        })
-        .filter((item): item is SidebarItem => item !== undefined); // Type-safe filter
-    }
-  }, [sidebarItems, searchQuery, searchResults, expandedFolders]);
+    return entries.filter(entry =>
+      entry.title.toLowerCase().includes(query)
+      || (entry.meetingId !== null && matchedMeetingIds.has(entry.meetingId))
+    );
+  }, [entries, searchQuery, searchResults]);
 
 
   const handleDelete = async (itemId: string) => {
@@ -428,17 +359,6 @@ const Sidebar: React.FC = () => {
     setEditingTitle('');
   };
 
-  const toggleFolder = (folderId: string) => {
-    // Normal toggle behavior for all folders
-    const newExpanded = new Set(expandedFolders);
-    if (newExpanded.has(folderId)) {
-      newExpanded.delete(folderId);
-    } else {
-      newExpanded.add(folderId);
-    }
-    setExpandedFolders(newExpanded);
-  };
-
   // Expose setShowModelSettings to window for Rust tray to call
   useEffect(() => {
     (window as any).openSettings = () => {
@@ -513,30 +433,12 @@ const Sidebar: React.FC = () => {
             </Tooltip>
           )}
 
-          {/* Recordings: saved audio is app content, not a setting, so it sits
-              beside Home rather than inside the settings tabs. */}
+          {/* Recordings have no entry of their own: they are rows in the list
+              below, merged with the meeting they belong to. */}
           <Tooltip>
             <TooltipTrigger asChild>
               <button
-                onClick={() => router.push('/recordings')}
-                className={`p-2 rounded-lg transition-colors duration-150 ${isRecordingsPage ? 'bg-gray-100' : 'hover:bg-gray-100'
-                  }`}
-              >
-                <AudioLines className="w-5 h-5 text-gray-600" />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="right">
-              <p>{t('nav.recordings')}</p>
-            </TooltipContent>
-          </Tooltip>
-
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                onClick={() => {
-                  if (isCollapsed) toggleCollapse();
-                  toggleFolder('meetings');
-                }}
+                onClick={toggleCollapse}
                 className={`p-2 rounded-lg transition-colors duration-150 ${isMeetingPage ? 'bg-gray-100' : 'hover:bg-gray-100'
                   }`}
               >
@@ -544,7 +446,7 @@ const Sidebar: React.FC = () => {
               </button>
             </TooltipTrigger>
             <TooltipContent side="right">
-              <p>{t('nav.meetingNotes')}</p>
+              <p>{t('nav.library')}</p>
             </TooltipContent>
           </Tooltip>
 
@@ -569,136 +471,122 @@ const Sidebar: React.FC = () => {
     );
   };
 
-  // Find matching transcript snippet for a meeting item
-  const findMatchingSnippet = (itemId: string) => {
-    if (!searchQuery.trim() || !searchResults.length) return null;
-    return searchResults.find(result => result.id === itemId);
+  /**
+   * Open the row.
+   *
+   * A row backed by a meeting opens the meeting; a recording with no meeting row
+   * has no details page, so it opens the recordings library, where it can be
+   * transcribed, renamed or moved.
+   */
+  const openEntry = (entry: SidebarEntry) => {
+    if (!entry.meetingId) {
+      router.push('/recordings');
+      return;
+    }
+
+    setCurrentMeeting({ id: entry.meetingId, title: entry.title });
+    // The meeting id travels as a query parameter rather than a path segment so
+    // the static export does not need to enumerate runtime meeting ids.
+    router.push(`/meeting-details?id=${encodeURIComponent(entry.meetingId)}`);
   };
 
-  const renderItem = (item: SidebarItem, depth = 0) => {
-    const isExpanded = expandedFolders.has(item.id);
-    const paddingLeft = `${depth * 12 + 12}px`;
-    const isActive = item.type === 'file' && currentMeeting?.id === item.id;
-    const isMeetingItem = item.id.includes('-') && !item.id.startsWith('intro-call');
+  // Transcript search can match a row whose title does not, so the matching
+  // excerpt is looked up by meeting id.
+  const matchingSnippet = (entry: SidebarEntry) => {
+    if (!entry.meetingId || !searchQuery.trim() || !searchResults.length) return null;
+    return searchResults.find(result => result.id === entry.meetingId) ?? null;
+  };
 
-    // Check if this item has a matching transcript snippet
-    const matchingResult = isMeetingItem ? findMatchingSnippet(item.id) : null;
-    const hasTranscriptMatch = !!matchingResult;
+  const renderEntry = (entry: SidebarEntry) => {
+    const isActive = entry.meetingId !== null && currentMeeting?.id === entry.meetingId;
+    const snippet = matchingSnippet(entry);
 
-    if (isCollapsed) return null;
+    // Only the facts that are known are shown: a meeting whose recording is gone
+    // has no date, duration or size, and three dashes would be noise.
+    const details = [
+      entry.createdAt ? formatRecordedAt(entry.createdAt) : null,
+      entry.durationSeconds !== null ? formatDuration(entry.durationSeconds) : null,
+      entry.audioBytes !== null ? formatBytes(entry.audioBytes) : null,
+    ].filter((part): part is string => part !== null);
 
     return (
-      <div key={item.id}>
-        <div
-          className={`flex items-center transition-all duration-150 group ${item.type === 'folder' && depth === 0
-            ? 'p-3 text-lg font-semibold h-10 mx-3 mt-3 rounded-lg'
-            : `px-3 py-2 my-0.5 rounded-md text-sm ${isActive ? 'bg-blue-100 text-blue-700 font-medium' :
-              hasTranscriptMatch ? 'bg-yellow-50' : 'hover:bg-gray-50'
-            } cursor-pointer`
-            }`}
-          style={item.type === 'folder' && depth === 0 ? {} : { paddingLeft }}
-          onClick={() => {
-            if (item.type === 'folder') {
-              toggleFolder(item.id);
-            } else {
-              setCurrentMeeting({ id: item.id, title: item.title });
-              // The placeholder entry has no meeting behind it. Everything else
-              // is a real meeting id (`meeting-<uuid>`) and opens the details
-              // page; notes are reached through their own action on the row.
-              const basePath = item.id.startsWith('intro-call')
-                ? '/'
-                : `/meeting-details?id=${encodeURIComponent(item.id)}`;
-              router.push(basePath);
-            }
-          }}
-        >
-          {item.type === 'folder' ? (
-            <>
-              {item.id === 'meetings' ? (
-                <Calendar className="w-4 h-4 mr-2" />
-              ) : item.id === 'notes' ? (
-                <Calendar className="w-4 h-4 mr-2" />
-              ) : null}
-              <span className={depth === 0 ? "" : "font-medium"}>{item.title}</span>
-              <div className="ml-auto">
-                {isExpanded ? (
-                  <ChevronDown className="w-4 h-4 text-gray-500" />
-                ) : (
-                  <ChevronRight className="w-4 h-4 text-gray-500" />
-                )}
-              </div>
-              {searchQuery && item.id === 'meetings' && isSearching && (
-                <span className="ml-2 text-xs text-blue-500 animate-pulse">Searching...</span>
-              )}
-            </>
-          ) : (
-            <div className="flex flex-col w-full">
-              <div className="flex items-center w-full">
-                {isMeetingItem ? (
-                  <div className="flex-shrink-0 flex items-center justify-center w-6 h-6 rounded-full mr-2 bg-gray-100">
-                    <File className="w-3.5 h-3.5 text-gray-600" />
-                  </div>
-                ) : (
-                  <div className="flex-shrink-0 flex items-center justify-center w-6 h-6 rounded-full mr-2 bg-blue-100">
-                    <Plus className="w-3.5 h-3.5 text-blue-600" />
-                  </div>
-                )}
-                <span className="flex-1 break-words">{item.title}</span>
-                {isMeetingItem && (
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        // Notes are keyed by meeting id, passed as a query
-                        // parameter rather than a path segment so the static
-                        // export does not need to enumerate runtime meeting ids.
-                        router.push(`/notes?id=${encodeURIComponent(item.id)}`);
-                      }}
-                      className="hover:text-amber-600 p-1 rounded-md hover:bg-amber-50 flex-shrink-0"
-                      aria-label={`Open notes for ${item.title}`}
-                      title="Open notes"
-                    >
-                      <StickyNote className="w-4 h-4" />
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleEditStart(item.id, item.title);
-                      }}
-                      className="hover:text-blue-600 p-1 rounded-md hover:bg-blue-50 flex-shrink-0"
-                      aria-label="Edit meeting title"
-                    >
-                      <Pencil className="w-4 h-4" />
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setDeleteModalState({ isOpen: true, itemId: item.id });
-                      }}
-                      className="hover:text-red-600 p-1 rounded-md hover:bg-red-50 flex-shrink-0"
-                      aria-label="Delete meeting"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                )}
-              </div>
+      <li key={entry.key}>
+        <div className={`flex items-center rounded-md transition-colors duration-150 ${isActive ? 'bg-blue-100 text-blue-700 font-medium' : 'hover:bg-gray-50'
+          }`}>
+          <button
+            type="button"
+            onClick={() => openEntry(entry)}
+            aria-label={entry.meetingId
+              ? t('nav.openMeeting', { title: entry.title })
+              : t('nav.openRecording', { title: entry.title })}
+            className="flex-1 min-w-0 flex items-start gap-2 px-3 py-2 text-left text-sm rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            <span className={`flex-shrink-0 flex items-center justify-center w-6 h-6 rounded-full ${entry.meetingId ? 'bg-gray-100' : 'bg-blue-100'
+              }`}>
+              {entry.meetingId
+                ? <File className="w-3.5 h-3.5 text-gray-600" />
+                : <AudioLines className="w-3.5 h-3.5 text-blue-600" />}
+            </span>
 
-              {/* Show transcript match snippet if available */}
-              {hasTranscriptMatch && (
-                <div className="mt-1 ml-8 text-xs text-gray-500 bg-yellow-50 p-1.5 rounded border border-yellow-100 line-clamp-2">
-                  <span className="font-medium text-yellow-600">Match:</span> {matchingResult.matchContext}
-                </div>
+            <span className="flex-1 min-w-0">
+              <span className="flex items-center gap-1.5 flex-wrap">
+                <span className="break-words">{entry.title}</span>
+                {entry.hasTranscript && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-800">
+                    {t('library.badgeTranscript')}
+                  </span>
+                )}
+                {entry.hasSummary && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-800">
+                    {t('library.badgeSummary')}
+                  </span>
+                )}
+              </span>
+
+              {details.length > 0 && (
+                <span className="block text-xs text-gray-500 mt-0.5">{details.join(' · ')}</span>
               )}
+
+              {snippet && (
+                <span className="block mt-1 text-xs text-gray-500 bg-yellow-50 p-1.5 rounded border border-yellow-100 line-clamp-2">
+                  <span className="font-medium text-yellow-600">{t('nav.match')}</span> {snippet.matchContext}
+                </span>
+              )}
+            </span>
+          </button>
+
+          {entry.meetingId && (
+            // Always rendered rather than revealed on hover: these are the only
+            // way to reach a meeting's notes, and a keyboard user cannot hover.
+            <div className="flex items-center gap-0.5 pr-1 flex-shrink-0">
+              <button
+                type="button"
+                onClick={() => router.push(`/notes?id=${encodeURIComponent(entry.meetingId as string)}`)}
+                className="text-gray-500 hover:text-amber-600 p-1 rounded-md hover:bg-amber-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+                aria-label={t('nav.openNotes', { title: entry.title })}
+              >
+                <StickyNote className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => handleEditStart(entry.meetingId as string, entry.title)}
+                className="text-gray-500 hover:text-blue-600 p-1 rounded-md hover:bg-blue-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                aria-label={t('nav.renameMeeting', { title: entry.title })}
+              >
+                <Pencil className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setDeleteModalState({ isOpen: true, itemId: entry.meetingId })}
+                className="text-gray-500 hover:text-red-600 p-1 rounded-md hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+                aria-label={t('nav.deleteMeeting', { title: entry.title })}
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
             </div>
           )}
         </div>
-        {item.type === 'folder' && isExpanded && item.children && (
-          <div className="ml-1">
-            {item.children.map(child => renderItem(child, depth + 1))}
-          </div>
-        )}
-      </div>
+      </li>
     );
   };
 
@@ -773,51 +661,67 @@ const Sidebar: React.FC = () => {
                 <span>{t('nav.home')}</span>
               </div>
             )}
-            {!isCollapsed && (
-              <div
-                onClick={() => router.push('/recordings')}
-                className={`p-3 text-lg font-semibold items-center h-10 flex mx-3 mt-1 rounded-lg cursor-pointer ${isRecordingsPage ? 'bg-gray-100' : 'hover:bg-gray-100'
-                  }`}
-              >
-                <AudioLines className="w-4 h-4 mr-2" />
-                <span>{t('nav.recordings')}</span>
-              </div>
-            )}
           </div>
 
           {/* Content area */}
           <div className="flex-1 flex flex-col min-h-0">
             {renderCollapsedIcons()}
 
-            {/* Meeting Notes folder header - fixed */}
+            {/* List heading - fixed */}
             {!isCollapsed && (
               <div className="flex-shrink-0">
-                {filteredSidebarItems.filter(item => item.type === 'folder').map(item => (
-                  <div key={item.id}>
-                    <div
-                      className="flex items-center transition-all duration-150 p-3 text-lg font-semibold h-10 mx-3 mt-3 rounded-lg"
-                    >
-                      <NotebookPen className="w-4 h-4 mr-2 text-gray-600" />
-                      <span className="text-gray-700">{item.title}</span>
-                      {searchQuery && item.id === 'meetings' && isSearching && (
-                        <span className="ml-2 text-xs text-blue-500 animate-pulse">Searching...</span>
-                      )}
-                    </div>
-                  </div>
-                ))}
+                <div className="flex items-center transition-all duration-150 p-3 text-lg font-semibold h-10 mx-3 mt-3 rounded-lg">
+                  <NotebookPen className="w-4 h-4 mr-2 text-gray-600" />
+                  <span className="text-gray-700">{t('nav.library')}</span>
+                  {searchQuery && isSearching && (
+                    <span className="ml-2 text-xs text-blue-500 animate-pulse">{t('nav.searching')}</span>
+                  )}
+                </div>
               </div>
             )}
 
-            {/* Scrollable meeting items */}
+            {/* Scrollable list of meetings and recordings */}
             {!isCollapsed && (
               <div className="flex-1 overflow-y-auto custom-scrollbar min-h-0">
-                {filteredSidebarItems
-                  .filter(item => item.type === 'folder' && expandedFolders.has(item.id) && item.children)
-                  .map(item => (
-                    <div key={`${item.id}-children`} className="mx-3">
-                      {item.children!.map(child => renderItem(child, 1))}
-                    </div>
-                  ))}
+                {/* A read that failed is reported where the list is, with the way
+                    to try again, rather than looking like an empty library. */}
+                {recordingsError && (
+                  <div
+                    role="alert"
+                    className="mx-3 mb-1 p-2 rounded-md bg-red-50 border border-red-200 text-xs text-red-800 flex items-center gap-2"
+                  >
+                    <span className="flex-1">{t('library.loadFailed')}</span>
+                    <button
+                      type="button"
+                      onClick={() => void refetchRecordings()}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded border border-red-300 bg-white hover:bg-red-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      {t('common.retry')}
+                    </button>
+                  </div>
+                )}
+
+                {recordingsLoading && (
+                  <div className="mx-3 mb-1 flex items-center gap-2 text-xs text-gray-500">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    {t('library.loading')}
+                  </div>
+                )}
+
+                {!meetingsLoading && !recordingsLoading && !recordingsError && visibleEntries.length === 0 && (
+                  <div className="mx-3 mt-1 p-3 rounded-md border border-dashed text-xs text-gray-500">
+                    {searchQuery.trim()
+                      ? t('nav.noMatches', { query: searchQuery.trim() })
+                      : t('nav.emptyLibrary')}
+                  </div>
+                )}
+
+                {visibleEntries.length > 0 && (
+                  <ul className="mx-3 space-y-0.5">
+                    {visibleEntries.map(renderEntry)}
+                  </ul>
+                )}
               </div>
             )}
           </div>

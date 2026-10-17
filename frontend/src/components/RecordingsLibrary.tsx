@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import {
@@ -18,6 +18,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useI18n } from '@/contexts/I18nContext';
+import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import {
   Dialog,
   DialogContent,
@@ -32,7 +33,6 @@ import {
   formatDuration,
   formatRecordedAt,
   type RecordingEntry,
-  type RecordingsListView,
   type RecordingMutationResult,
 } from '@/lib/recordings';
 
@@ -47,33 +47,23 @@ interface RecordingsLibraryProps {
  * Reads the recordings folder rather than the meeting database, so a recording
  * whose meeting row was never written — an interrupted session, or a deferred
  * transcription — is still visible and manageable.
+ *
+ * The folder is read once, by the sidebar provider, and shared: the merged sidebar
+ * list is built from the same data, so a delete or rename here is reflected there
+ * without a second read of the disk.
  */
 export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
   const { t } = useI18n();
-  const [view, setView] = useState<RecordingsListView | null>(null);
-  const [loading, setLoading] = useState(true);
+  const {
+    recordingsView: view,
+    recordingsLoading: loading,
+    recordingsError,
+    refetchRecordings: load,
+  } = useSidebar();
   const [busy, setBusy] = useState<string | null>(null);
   const [renameTarget, setRenameTarget] = useState<RecordingEntry | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<RecordingEntry | null>(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      setView(await invoke<RecordingsListView>('list_saved_recordings'));
-    } catch (error) {
-      console.error('Failed to list saved recordings:', error);
-      toast.error(t('library.loadFailed'), {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
 
   /**
    * Run an operation that changes a recording, then reload.
@@ -204,7 +194,28 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
     return (
       <div className="flex items-center gap-2 text-sm text-gray-500 p-4">
         <Loader2 className="w-4 h-4 animate-spin" />
-        Reading the recordings folder…
+        {t('library.loading')}
+      </div>
+    );
+  }
+
+  // A failed read is shown with a way to retry rather than as an empty library:
+  // "nothing here" and "could not look" mean very different things.
+  if (recordingsError && !view) {
+    return (
+      <div
+        role="alert"
+        className="flex items-center justify-between gap-4 p-4 bg-red-50 border border-red-200 rounded-lg text-sm text-red-800"
+      >
+        <span>
+          {t('library.loadFailed')}
+          {': '}
+          {recordingsError}
+        </span>
+        <Button variant="outline" size="sm" onClick={() => void load()}>
+          <RefreshCw className="w-4 h-4" />
+          <span className="ml-2">{t('common.retry')}</span>
+        </Button>
       </div>
     );
   }

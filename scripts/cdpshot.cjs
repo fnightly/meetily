@@ -177,18 +177,21 @@ window.__TAURI_INTERNALS__ = {
               meeting_name: '产品周会', created_at: '2026-10-15T13:12:54Z',
               duration_seconds: 1850, audio_file: 'audio.mp3', audio_bytes: 18_400_000,
               has_transcript: true, has_summary: false,
+              sort_key: Math.floor(Date.parse('2026-10-15T13:12:54Z') / 1000),
             },
             {
               folder_name: 'Meeting 16_10_26_22_27_48', folder_path: 'D:\\\\meetily-recordings\\\\Meeting 16',
               meeting_name: '客户沟通', created_at: '2026-10-16T14:27:48Z',
               duration_seconds: 420, audio_file: 'audio.mp3', audio_bytes: 4_200_000,
               has_transcript: false, has_summary: false,
+              sort_key: Math.floor(Date.parse('2026-10-16T14:27:48Z') / 1000),
             },
             {
               folder_name: 'Standup 2026-10-14', folder_path: 'D:\\\\meetily-recordings\\\\Standup',
               meeting_name: '每日站会', created_at: '2026-10-14T01:05:00Z',
               duration_seconds: 900, audio_file: 'audio.m4a', audio_bytes: 9_800_000,
               has_transcript: true, has_summary: true,
+              sort_key: Math.floor(Date.parse('2026-10-14T01:05:00Z') / 1000),
             },
           ],
         };
@@ -279,12 +282,21 @@ window.__TAURI_INTERNALS__ = {
   // captured. The app's tabs only mount their content once selected.
   const clickText = process.argv[5];
   if (clickText) {
+    const isSelector = clickText.startsWith('sel:');
+    const wanted = isSelector ? clickText.slice(4) : clickText;
     const clicked = await send('Runtime.evaluate', {
       expression: `(() => {
-        const wanted = ${JSON.stringify(clickText)};
-        const nodes = Array.from(document.querySelectorAll('button,[role="tab"],a'));
-        const hit = nodes.find(n => (n.textContent || '').trim() === wanted)
-                 || nodes.find(n => (n.textContent || '').includes(wanted));
+        // The browser cannot see Node-side variables, so both the mode and the wanted
+        // value are injected as literals.
+        const isSelector = ${JSON.stringify(isSelector)};
+        const wanted = ${JSON.stringify(wanted)};
+        const nodes = isSelector
+          ? [document.querySelector(wanted)].filter(Boolean)
+          : Array.from(document.querySelectorAll('button,[role="tab"],a'));
+        const hit = isSelector
+          ? nodes[0]
+          : (nodes.find(n => (n.textContent || '').trim() === wanted)
+             || nodes.find(n => (n.textContent || '').includes(wanted)));
         if (!hit) return 'not found';
         // Radix responds to pointer events, not a bare click().
         const opts = { bubbles: true, cancelable: true, composed: true, button: 0 };
