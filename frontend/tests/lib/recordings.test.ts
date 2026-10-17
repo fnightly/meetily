@@ -4,6 +4,7 @@ import {
   formatDuration,
   formatRecordedAt,
   canTranscribe,
+  canRetranscribe,
   canSummarise,
   type RecordingEntry,
 } from '../../src/lib/recordings';
@@ -17,6 +18,7 @@ function entry(overrides: Partial<RecordingEntry> = {}): RecordingEntry {
     created_at: '2026-05-01T10:00:00Z',
     duration_seconds: 1800,
     audio_file: 'audio.m4a',
+    audio_path: '/recordings/Team Standup_2026-05-01_10-00/audio.m4a',
     audio_bytes: 1024,
     has_transcript: false,
     has_summary: false,
@@ -98,7 +100,35 @@ describe('canTranscribe', () => {
   });
 
   test('is false when there is no audio to transcribe', () => {
-    expect(canTranscribe(entry({ audio_file: null }))).toBe(false);
+    expect(canTranscribe(entry({ audio_file: null, audio_path: null }))).toBe(false);
+  });
+
+  test('accepts the absolute audio path when the bare file name is missing', () => {
+    // The list payload is transitioning to audio_path; either field proves the
+    // audio exists, so the Transcribe button must not disappear on one of them.
+    const entryWithPathOnly = entry({ audio_file: null, audio_path: '/recordings/x/audio.m4a' });
+    expect(canTranscribe(entryWithPathOnly)).toBe(true);
+  });
+
+  test('legacy payloads without audio_path still transcribe', () => {
+    const legacy = entry({ audio_path: undefined });
+    expect(canTranscribe(legacy)).toBe(true);
+  });
+});
+
+describe('canRetranscribe', () => {
+  test('is true whenever audio exists, transcript or not', () => {
+    expect(canRetranscribe(entry({ has_transcript: true }))).toBe(true);
+    expect(canRetranscribe(entry({ has_transcript: true, has_summary: true }))).toBe(true);
+    expect(canRetranscribe(entry({ has_transcript: false }))).toBe(true);
+  });
+
+  test('is false when there is nothing to transcribe', () => {
+    expect(canRetranscribe(entry({ audio_file: null, audio_path: null }))).toBe(false);
+  });
+
+  test('accepts the absolute audio path as proof of audio', () => {
+    expect(canRetranscribe(entry({ audio_file: null, audio_path: '/recordings/x/audio.m4a' }))).toBe(true);
   });
 });
 

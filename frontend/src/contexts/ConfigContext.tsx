@@ -8,6 +8,7 @@ import { configService, ModelConfig } from '@/services/configService';
 import { invoke } from '@tauri-apps/api/core';
 import Analytics from '@/lib/analytics';
 import { BetaFeatures, BetaFeatureKey, loadBetaFeatures, saveBetaFeatures } from '@/types/betaFeatures';
+import { resolveCaptureSystemAudio } from '@/lib/mic-settings';
 
 export interface OllamaModel {
   name: string;
@@ -62,6 +63,11 @@ interface ConfigContextType {
   // that is no longer running.
   selectedWindow: RecordableWindow | null;
   setSelectedWindow: (window: RecordableWindow | null) => void;
+
+  // Recording capture mode: false records the microphone only (external
+  // recording); true also captures the computer's own audio.
+  captureSystemAudio: boolean;
+  setCaptureSystemAudio: (capture: boolean) => void;
 
   // Language preference
   selectedLanguage: string;
@@ -148,6 +154,10 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
 
   // Which window's application the recording follows; null records the whole system.
   const [selectedWindow, setSelectedWindow] = useState<RecordableWindow | null>(null);
+
+  // Capture mode is loaded once at startup because the idle home screen renders it
+  // before the settings page (which owns the preference) is ever opened.
+  const [captureSystemAudio, setCaptureSystemAudio] = useState(true);
 
   // Language preference state
   const [selectedLanguage, setSelectedLanguage] = useState<string>(() => {
@@ -376,6 +386,22 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     loadDevicePreferences();
   }, []);
 
+  // Load the recording capture mode once. Older backends omit the field; those
+  // builds always captured system audio, so a missing value keeps the true default.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const prefs = await invoke<{ capture_system_audio?: boolean }>('get_recording_preferences');
+        if (alive) setCaptureSystemAudio(resolveCaptureSystemAudio(prefs?.capture_system_audio));
+      } catch (error) {
+        // Keep capturing system audio rather than silently narrowing the recording.
+        console.error('[ConfigContext] Failed to load recording capture mode:', error);
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
   // Calculate model options based on available models
   const modelOptions: Record<ModelConfig['provider'], string[]> = {
     ollama: models.map(model => model.name),
@@ -544,6 +570,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     setSelectedDevices,
     selectedWindow,
     setSelectedWindow,
+    captureSystemAudio,
+    setCaptureSystemAudio,
     selectedLanguage,
     setSelectedLanguage: handleSetSelectedLanguage,
     showConfidenceIndicator,
@@ -568,6 +596,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     transcriptModelConfig,
     selectedDevices,
     selectedWindow,
+    captureSystemAudio,
     selectedLanguage,
     handleSetSelectedLanguage,
     showConfidenceIndicator,

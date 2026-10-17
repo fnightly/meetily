@@ -44,7 +44,7 @@ export function HomeDashboard({ hasMicrophone, onStart, isStarting = false }: Ho
   const { t, locale } = useI18n();
   const router = useRouter();
   const { entries, setCurrentMeeting } = useSidebar();
-  const { selectedDevices, selectedWindow, setSelectedWindow, transcriptModelConfig, selectedLanguage, betaFeatures } = useConfig();
+  const { selectedDevices, selectedWindow, setSelectedWindow, captureSystemAudio, transcriptModelConfig, selectedLanguage, betaFeatures } = useConfig();
   const { openImportDialog } = useImportDialog();
   const prewarm = usePrewarmSpeechModel();
   const [now, setNow] = useState(() => new Date());
@@ -95,10 +95,13 @@ export function HomeDashboard({ hasMicrophone, onStart, isStarting = false }: Ho
   };
 
   // The selected window replaces the plain system-audio label: showing the window
-  // title tells the user what is actually about to be recorded.
-  const systemAudioValue = selectedWindow
-    ? formatWindowValue(selectedWindow, t('home.setup.windowFallback'))
-    : selectedDevices?.systemDevice || t('home.setup.defaultDevice');
+  // title tells the user what is actually about to be recorded. In microphone-only
+  // mode nothing from the computer is captured, so the row says so instead.
+  const systemAudioValue = !captureSystemAudio
+    ? t('home.setup.systemMicOnly')
+    : selectedWindow
+      ? formatWindowValue(selectedWindow, t('home.setup.windowFallback'))
+      : selectedDevices?.systemDevice || t('home.setup.defaultDevice');
 
   const setupItems: Array<{
     key: string;
@@ -119,8 +122,10 @@ export function HomeDashboard({ hasMicrophone, onStart, isStarting = false }: Ho
       icon: MonitorSpeaker,
       label: t('home.setup.system'),
       value: systemAudioValue,
-      onClick: () => setWindowPickerOpen(true),
-      actionLabel: t('home.setup.windowAria'),
+      // Microphone-only mode has no system audio to target, so the row must not
+      // offer the window picker.
+      onClick: captureSystemAudio ? () => setWindowPickerOpen(true) : undefined,
+      actionLabel: captureSystemAudio ? t('home.setup.windowAria') : undefined,
     },
     {
       key: 'engine',

@@ -18,7 +18,7 @@ pub fn configure_windows_audio(host: &cpal::Host) -> Result<Vec<AudioDevice>> {
                 if let Ok(name) = device.name() {
                     // For Windows, we need to mark output devices specifically for loopback
                     // info!("Found Windows output device: {}", name);
-                    devices.push(AudioDevice::new(name.clone(), DeviceType::Output));
+                    push_unique_device(&mut devices, name.clone(), DeviceType::Output);
                 }
             }
         } else {
@@ -30,7 +30,7 @@ pub fn configure_windows_audio(host: &cpal::Host) -> Result<Vec<AudioDevice>> {
             for device in input_devices {
                 if let Ok(name) = device.name() {
                     // info!("Found Windows input device: {}", name);
-                    devices.push(AudioDevice::new(name.clone(), DeviceType::Input));
+                    push_unique_device(&mut devices, name.clone(), DeviceType::Input);
                 }
             }
         } else {
@@ -48,7 +48,7 @@ pub fn configure_windows_audio(host: &cpal::Host) -> Result<Vec<AudioDevice>> {
             for device in input_devices {
                 if let Ok(name) = device.name() {
                     // info!("Found fallback input device: {}", name);
-                    devices.push(AudioDevice::new(name.clone(), DeviceType::Input));
+                    push_unique_device(&mut devices, name.clone(), DeviceType::Input);
                 }
             }
         } else {
@@ -60,7 +60,7 @@ pub fn configure_windows_audio(host: &cpal::Host) -> Result<Vec<AudioDevice>> {
             for device in output_devices {
                 if let Ok(name) = device.name() {
                     // info!("Found fallback output device: {}", name);
-                    devices.push(AudioDevice::new(name.clone(), DeviceType::Output));
+                    push_unique_device(&mut devices, name.clone(), DeviceType::Output);
                 }
             }
         } else {
@@ -76,7 +76,7 @@ pub fn configure_windows_audio(host: &cpal::Host) -> Result<Vec<AudioDevice>> {
         if let Some(device) = host.default_input_device() {
             if let Ok(name) = device.name() {
                 // info!("Adding default input device: {}", name);
-                devices.push(AudioDevice::new(name, DeviceType::Input));
+                push_unique_device(&mut devices, name, DeviceType::Input);
             }
         }
 
@@ -84,13 +84,139 @@ pub fn configure_windows_audio(host: &cpal::Host) -> Result<Vec<AudioDevice>> {
         if let Some(device) = host.default_output_device() {
             if let Ok(name) = device.name() {
                 // info!("Adding default output device: {}", name);
-                devices.push(AudioDevice::new(name, DeviceType::Output));
+                push_unique_device(&mut devices, name, DeviceType::Output);
             }
         }
     }
 
     debug!("Found {} Windows audio devices", devices.len());
     Ok(devices)
+}
+
+/// Add a device unless the same name and type is already listed.
+///
+/// WASAPI can enumerate an endpoint more than once, and the interface would then
+/// offer indistinguishable duplicates.
+fn push_unique_device(devices: &mut Vec<AudioDevice>, name: String, device_type: DeviceType) {
+    let device = AudioDevice::new(name, device_type);
+    if !devices.contains(&device) {
+        devices.push(device);
+    }
+}
+
+/// Rank how well a candidate endpoint name matches the requested base name.
+///
+/// Lower is better. The last tier is a substring test, which is how a stored name
+/// that no longer matches exactly still resolves — and why the tiers must be ranked
+/// instead of accepted in enumeration order.
+fn name_match_rank(candidate: &str, wanted: &str) -> Option<u8> {
+    if candidate == wanted {
+        Some(0)
+    } else if candidate.eq_ignore_ascii_case(wanted) {
+        Some(1)
+    } else if candidate.contains(wanted) {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// Indices of endpoints matching `wanted`, best tier first and enumeration order
+/// within a tier.
+fn ranked_match_indices(names: &[String], wanted: &str) -> Vec<usize> {
+    let mut matches: Vec<(u8, usize)> = names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| name_match_rank(name, wanted).map(|rank| (rank, index)))
+        .collect();
+    matches.sort_by_key(|(rank, index)| (*rank, *index));
+    matches.into_iter().map(|(_, index)| index).collect()
+}
+
+/// Turn a supported range into a config, preferring the pipeline's 48 kHz.
+///
+/// The rest of the capture path runs at 48 kHz, so asking for it here avoids a
+/// resample; a range that does not include 48 kHz keeps the old maximum-rate choice.
+fn preferred_config(range: cpal::SupportedStreamConfigRange) -> cpal::SupportedStreamConfig {
+    const PIPELINE_SAMPLE_RATE: u32 = 48_000;
+    let supports_pipeline_rate = range.min_sample_rate().0 <= PIPELINE_SAMPLE_RATE
+        && PIPELINE_SAMPLE_RATE <= range.max_sample_rate().0;
+    if supports_pipeline_rate {
+        range.with_sample_rate(cpal::SampleRate(PIPELINE_SAMPLE_RATE))
+    } else {
+        range.with_max_sample_rate()
+    }
+}
+
+/// First F32 stereo range, else the first F32 range, else the first range.
+fn choose_config(
+    configs: &[cpal::SupportedStreamConfigRange],
+) -> Option<cpal::SupportedStreamConfig> {
+    let chosen = configs
+        .iter()
+        .find(|config| {
+            config.sample_format() == cpal::SampleFormat::F32 && config.channels() == 2
+        })
+        .or_else(|| configs.iter().find(|config| config.sample_format() == cpal::SampleFormat::F32))
+        .or_else(|| configs.first())?;
+    Some(preferred_config(*chosen))
+}
+
+/// Input config for one endpoint: the endpoint default first, then its ranges.
+fn resolve_input_config(
+    device: &cpal::Device,
+    name: &str,
+) -> Option<cpal::SupportedStreamConfig> {
+    match device.default_input_config() {
+        Ok(default_config) => Some(default_config),
+        Err(e) => {
+            warn!(
+                "Failed to get default input config for '{}': {}. Trying supported configs...",
+                name, e
+            );
+            let configs: Vec<_> = match device.supported_input_configs() {
+                Ok(ranges) => ranges.collect(),
+                Err(e) => {
+                    warn!(
+                        "Could not enumerate supported configurations for device '{}': {}",
+                        name, e
+                    );
+                    return None;
+                }
+            };
+            if configs.is_empty() {
+                warn!("No supported input configurations found for device: {}", name);
+                return None;
+            }
+            choose_config(&configs)
+        }
+    }
+}
+
+/// Output config for one endpoint: its ranges first, then the endpoint default.
+fn resolve_output_config(
+    device: &cpal::Device,
+    name: &str,
+) -> Option<cpal::SupportedStreamConfig> {
+    let config = match device.supported_output_configs() {
+        Ok(ranges) => {
+            let configs: Vec<_> = ranges.collect();
+            if configs.is_empty() {
+                warn!("No supported output configurations found for device: {}", name);
+                None
+            } else {
+                choose_config(&configs)
+            }
+        }
+        Err(e) => {
+            warn!(
+                "Could not enumerate supported configurations for device '{}': {}",
+                name, e
+            );
+            None
+        }
+    };
+    config.or_else(|| device.default_output_config().ok())
 }
 
 /// Get Windows device and configuration using WASAPI
@@ -111,128 +237,54 @@ pub fn get_windows_device(audio_device: &AudioDevice) -> Result<(cpal::Device, c
 
     match audio_device.device_type {
         DeviceType::Input => {
-            for device in wasapi_host.input_devices()? {
-                if let Ok(name) = device.name() {
-                    info!("Checking input device: {}", name);
-                    // Check if the device name contains our base name
-                    if name == base_name || name.contains(base_name) {
-                        // info!("Found matching input device: {}", name);
+            let endpoints: Vec<(cpal::Device, String)> = wasapi_host
+                .input_devices()?
+                .filter_map(|device| device.name().ok().map(|name| (device, name)))
+                .collect();
+            let names: Vec<String> = endpoints.iter().map(|(_, name)| name.clone()).collect();
 
-                        // Try to get default input config with better error logging
-                        match device.default_input_config() {
-                            Ok(default_config) => {
-                                // info!("Using default input config: {:?}", default_config);
-                                return Ok((device, default_config));
-                            },
-                            Err(e) => {
-                                warn!("Failed to get default input config: {}. Trying supported configs...", e);
-
-                                // Try to find a supported configuration
-                                if let Ok(supported_configs) = device.supported_input_configs() {
-                                    let configs: Vec<_> = supported_configs.collect();
-                                    if configs.is_empty() {
-                                        warn!("No supported input configurations found for device: {}", name);
-                                    } else {
-                                        // info!("Found {} supported input configurations", configs.len());
-
-                                        // First try to find F32 format with 2 channels (stereo)
-                                        for config in &configs {
-                                            if config.sample_format() == cpal::SampleFormat::F32 && config.channels() == 2 {
-                                                let config = config.with_max_sample_rate();
-                                                // info!("Using stereo F32 input config: {:?}", config);
-                                                return Ok((device, config));
-                                            }
-                                        }
-
-                                        // Then try any F32 format
-                                        for config in &configs {
-                                            if config.sample_format() == cpal::SampleFormat::F32 {
-                                                let config = config.with_max_sample_rate();
-                                                // info!("Using F32 input config: {:?}", config);
-                                                return Ok((device, config));
-                                            }
-                                        }
-
-                                        // Finally, use the first available config
-                                        let config = configs[0].with_max_sample_rate();
-                                        info!("Using fallback input config: {:?}", config);
-                                        return Ok((device, config));
-                                    }
-                                } else {
-                                    warn!("Could not enumerate supported configurations for device: {}", name);
-                                }
-
-                                return Err(anyhow!("No compatible input configuration found for device: {}", name));
-                            }
-                        }
-                    }
+            let matches = ranked_match_indices(&names, base_name);
+            for index in &matches {
+                let (device, name) = &endpoints[*index];
+                info!("Checking input device: {}", name);
+                if let Some(config) = resolve_input_config(device, name) {
+                    return Ok((device.clone(), config));
                 }
+            }
+            if !matches.is_empty() {
+                return Err(anyhow!(
+                    "No compatible input configuration found for device: {}",
+                    base_name
+                ));
             }
 
             // If we didn't find a matching device, try the default input device as fallback
             info!("No matching input device found, trying default input device");
             if let Some(default_device) = wasapi_host.default_input_device() {
-                if let Ok(_name) = default_device.name() {
-                    // info!("Using default input device: {}", _name);
+                if let Ok(name) = default_device.name() {
+                    info!("Using default input device: {}", name);
                     if let Ok(config) = default_device.default_input_config() {
                         return Ok((default_device, config));
                     } else if let Ok(supported_configs) = default_device.supported_input_configs() {
                         if let Some(config) = supported_configs.into_iter().next() {
-                            return Ok((default_device, config.with_max_sample_rate()));
+                            return Ok((default_device, preferred_config(config)));
                         }
                     }
                 }
             }
         }
         DeviceType::Output => {
-            for device in wasapi_host.output_devices()? {
-                if let Ok(name) = device.name() {
-                    info!("Checking output device: {}", name);
-                    // Check if the device name contains our base name
-                    if name == base_name || name.contains(base_name) {
-                        // info!("Found matching output device: {}", name);
+            let endpoints: Vec<(cpal::Device, String)> = wasapi_host
+                .output_devices()?
+                .filter_map(|device| device.name().ok().map(|name| (device, name)))
+                .collect();
+            let names: Vec<String> = endpoints.iter().map(|(_, name)| name.clone()).collect();
 
-                        // For output devices, we want to use them in loopback mode
-                        if let Ok(supported_configs) = device.supported_output_configs() {
-                            let configs: Vec<_> = supported_configs.collect();
-                            if configs.is_empty() {
-                                warn!("No supported output configurations found for device: {}", name);
-                            } else {
-                                // info!("Found {} supported output configurations", configs.len());
-
-                                // Try to find a config that supports f32 format with 2 channels (stereo)
-                                for config in &configs {
-                                    if config.sample_format() == cpal::SampleFormat::F32 && config.channels() == 2 {
-                                        let config = config.with_max_sample_rate();
-                                        info!("Using stereo F32 output config: {:?}", config);
-                                        return Ok((device, config));
-                                    }
-                                }
-
-                                // Then try any F32 format
-                                for config in &configs {
-                                    if config.sample_format() == cpal::SampleFormat::F32 {
-                                        let config = config.with_max_sample_rate();
-                                        // info!("Using F32 output config: {:?}", config);
-                                        return Ok((device, config));
-                                    }
-                                }
-
-                                // Finally, use the first available config
-                                let config = configs[0].with_max_sample_rate();
-                                // info!("Using fallback output config: {:?}", config);
-                                return Ok((device, config));
-                            }
-                        } else {
-                            warn!("Could not enumerate supported configurations for device: {}", name);
-                        }
-
-                        // If we couldn't get supported configs, try default
-                        if let Ok(default_config) = device.default_output_config() {
-                            // info!("Using default output config: {:?}", default_config);
-                            return Ok((device, default_config));
-                        }
-                    }
+            for index in ranked_match_indices(&names, base_name) {
+                let (device, name) = &endpoints[index];
+                info!("Checking output device: {}", name);
+                if let Some(config) = resolve_output_config(device, name) {
+                    return Ok((device.clone(), config));
                 }
             }
 
@@ -245,7 +297,7 @@ pub fn get_windows_device(audio_device: &AudioDevice) -> Result<(cpal::Device, c
                         return Ok((default_device, config));
                     } else if let Ok(supported_configs) = default_device.supported_output_configs() {
                         if let Some(config) = supported_configs.into_iter().next() {
-                            return Ok((default_device, config.with_max_sample_rate()));
+                            return Ok((default_device, preferred_config(config)));
                         }
                     }
                 }
@@ -254,4 +306,56 @@ pub fn get_windows_device(audio_device: &AudioDevice) -> Result<(cpal::Device, c
     }
 
     Err(anyhow!("Device not found or no compatible configuration available: {}", audio_device.name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn name_match_prefers_exact_then_case_insensitive_then_substring() {
+        assert_eq!(
+            name_match_rank("Speakers (Realtek)", "Speakers (Realtek)"),
+            Some(0)
+        );
+        assert_eq!(
+            name_match_rank("speakers (realtek)", "Speakers (Realtek)"),
+            Some(1)
+        );
+        assert_eq!(
+            name_match_rank("Speakers (Realtek) [Loopback]", "Speakers (Realtek)"),
+            Some(2)
+        );
+        assert_eq!(name_match_rank("Microphone Array", "Speakers (Realtek)"), None);
+    }
+
+    #[test]
+    fn an_exact_match_wins_even_when_a_substring_match_comes_first() {
+        // "Mic" is contained in both longer endpoints; the endpoint literally named
+        // "Mic" must still be chosen over whichever was enumerated first.
+        let names = vec![
+            "Microphone (Realtek)".to_string(),
+            "Microphone Array".to_string(),
+            "Mic".to_string(),
+        ];
+        assert_eq!(ranked_match_indices(&names, "Mic"), vec![2, 0, 1]);
+    }
+
+    #[test]
+    fn case_insensitive_exact_beats_an_earlier_substring() {
+        let names = vec![
+            "Headphones (USB) [2]".to_string(),
+            "headphones (usb)".to_string(),
+        ];
+        assert_eq!(ranked_match_indices(&names, "Headphones (USB)"), vec![1, 0]);
+    }
+
+    #[test]
+    fn duplicate_endpoints_are_listed_once() {
+        let mut devices = Vec::new();
+        push_unique_device(&mut devices, "Microphone (USB)".to_string(), DeviceType::Input);
+        push_unique_device(&mut devices, "Microphone (USB)".to_string(), DeviceType::Input);
+        push_unique_device(&mut devices, "Microphone (USB)".to_string(), DeviceType::Output);
+        assert_eq!(devices.len(), 2);
+    }
 }

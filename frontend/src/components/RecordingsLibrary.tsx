@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import {
@@ -12,7 +12,9 @@ import {
   FolderInput,
   FolderOpen,
   Loader2,
+  Pause,
   Pencil,
+  Play,
   RefreshCw,
   Search,
   Sparkles,
@@ -23,6 +25,8 @@ import {
   HardDrive,
 } from 'lucide-react';
 import { ExportDialog } from '@/components/ExportDialog';
+import { RecordingAudioPreview } from '@/components/RecordingAudioPreview';
+import { useRecordingTranscription } from '@/hooks/useRecordingTranscription';
 import {
   groupByDate,
   libraryStats,
@@ -48,6 +52,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import {
+  canRetranscribe,
   canSummarise,
   canTranscribe,
   formatBytes,
@@ -93,8 +98,28 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
   const [deleteMeetingsToo, setDeleteMeetingsToo] = useState(false);
   const [batchBusy, setBatchBusy] = useState(false);
+  /** Folder whose inline audio player is expanded; only one at a time. */
+  const [previewFolder, setPreviewFolder] = useState<string | null>(null);
+  const [retranscribeTarget, setRetranscribeTarget] = useState<RecordingEntry | null>(null);
 
   const folderToMeeting = useMemo(() => meetingIdsByFolder(entries), [entries]);
+
+  /**
+   * Reload after a transcription settles: the transcript badge and the meeting
+   * row (materialised by ensure_meeting_for_recording) both come from the disk
+   * and the database, so both lists need re-reading.
+   */
+  const handleTranscriptionFinished = useCallback(async () => {
+    await load();
+    await refetchMeetings();
+    onChanged?.();
+  }, [load, refetchMeetings, onChanged]);
+
+  const transcription = useRecordingTranscription({
+    recordings: view?.recordings ?? [],
+    meetingIdFor: (folderPath) => folderToMeeting.get(folderPath),
+    onFinished: handleTranscriptionFinished,
+  });
 
   // Full-text search over transcripts, debounced; hits are mapped to folders.
   useEffect(() => {
@@ -151,9 +176,17 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
   }, [view]);
 
   const selectedEntries = (view?.recordings ?? []).filter((r) => selected.has(r.folder_path));
+  // Batch transcribe covers what a per-row action could do: audio exists, no
+  // transcript yet, and the recording is not already waiting/running in the queue.
+  const transcribableSelected = selectedEntries.filter(
+    (entry) => canTranscribe(entry) && !transcription.isPending(entry.folder_path),
+  );
   const exportableIds = selectedEntries
     .map((r) => (r.has_transcript || r.has_summary ? folderToMeeting.get(r.folder_path) : undefined))
     .filter((id): id is string => !!id);
+  // Deleting a folder mid-transcription would pull the audio out from under the
+  // running job, so the batch action waits for those rows to settle.
+  const selectedTranscribing = selectedEntries.some((entry) => transcription.isPending(entry.folder_path));
   const allVisibleSelected = visible.length > 0 && visible.every((r) => selected.has(r.folder_path));
 
   const toggleOne = (folder: string) =>
@@ -275,41 +308,10 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
     );
   };
 
-  const handleTranscribe = async (entry: RecordingEntry) => {
-    setBusy(entry.folder_path);
-    try {
-      // Retranscription attaches transcripts to a meeting row, so a recording
-      // without one is saved first.
-      const saved = await invoke<{ meeting_id?: string }>('api_save_transcript', {
-        meetingTitle: entry.meeting_name,
-        transcripts: [],
-        folderPath: entry.folder_path,
-      });
-
-      const meetingId = saved?.meeting_id;
-      if (!meetingId) throw new Error('No meeting id was returned');
-
-      await invoke('start_retranscription_command', {
-        meetingId,
-        meetingFolderPath: entry.folder_path,
-        language: null,
-        model: null,
-        provider: null,
-      });
-
-      toast.info(t('library.transcribeStarted'), {
-        description: t('library.transcribeStartedDetail'),
-      });
-      await load();
-      onChanged?.();
-    } catch (error) {
-      console.error('Failed to start transcription:', error);
-      toast.error(t('library.transcribeFailed'), {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setBusy(null);
-    }
+  const handleRetranscribeConfirm = () => {
+    const entry = retranscribeTarget;
+    setRetranscribeTarget(null);
+    if (entry) transcription.enqueue([entry]);
   };
 
   const handleSummarise = (entry: RecordingEntry) => {
@@ -483,6 +485,18 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
                   <Button
                     size="sm"
                     variant="outline"
+                    disabled={batchBusy || transcribableSelected.length === 0}
+                    title={t('library.transcribeSelectedHint')}
+                    onClick={() => transcription.enqueue(transcribableSelected)}
+                  >
+                    <FileText className="w-4 h-4" />
+                    <span className="ml-1.5">
+                      {t('library.transcribeSelected', { count: transcribableSelected.length })}
+                    </span>
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
                     disabled={batchBusy || exportableIds.length === 0}
                     title={exportableIds.length < selected.size ? t('library.exportPartialHint') : undefined}
                     onClick={() => {
@@ -497,7 +511,7 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
                     size="sm"
                     variant="outline"
                     className="text-red-600 hover:text-red-700"
-                    disabled={batchBusy}
+                    disabled={batchBusy || selectedTranscribing}
                     onClick={() => {
                       setDeleteMeetingsToo(false);
                       setBatchDeleteOpen(true);
@@ -537,13 +551,18 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
               </h5>
             )}
         {group.items.map((entry) => {
-          const isBusy = busy === entry.folder_path || batchBusy;
+          const transcriptionItem = transcription.statusFor(entry.folder_path);
+          const isTranscribing =
+            transcriptionItem !== undefined &&
+            (transcriptionItem.status === 'queued' || transcriptionItem.status === 'running');
+          const isBusy = busy === entry.folder_path || batchBusy || isTranscribing;
           const isSelected = selected.has(entry.folder_path);
           const meetingId = folderToMeeting.get(entry.folder_path);
+          const previewOpen = previewFolder === entry.folder_path;
 
           return (
+            <div key={entry.folder_path} className="space-y-1.5">
             <div
-              key={entry.folder_path}
               className={`group surface-card px-4 py-3 flex items-start gap-3 transition-colors ${
                 isSelected ? '!border-blue-300 bg-blue-50/50' : 'hover:border-slate-300'
               }`}
@@ -612,6 +631,20 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
               </div>
 
               <div className="flex items-center gap-1 shrink-0 flex-wrap justify-end">
+                {entry.audio_path && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() =>
+                      setPreviewFolder((prev) => (prev === entry.folder_path ? null : entry.folder_path))
+                    }
+                    aria-pressed={previewOpen}
+                    aria-label={previewOpen ? t('library.pause') : t('library.play')}
+                    title={t('library.playTitle')}
+                  >
+                    {previewOpen ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                  </Button>
+                )}
                 <Button
                   variant="ghost"
                   size="sm"
@@ -645,21 +678,86 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
                   <FolderInput className="w-4 h-4" />
                 </Button>
 
-                {canTranscribe(entry) && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => void handleTranscribe(entry)}
-                    disabled={isBusy}
-                    title={t('library.transcribeTitle')}
-                  >
-                    {isBusy ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <FileText className="w-4 h-4" />
+                {isTranscribing && transcriptionItem ? (
+                  <div className="flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50/70 px-2.5 py-1.5">
+                    <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin text-blue-600" />
+                    <div className="min-w-0">
+                      <div className="truncate text-xs font-medium text-blue-900">
+                        {transcriptionItem.status === 'queued'
+                          ? transcriptionItem.waitingForBusy
+                            ? t('library.transcribeBusy')
+                            : t('library.transcribeQueued')
+                          : t('library.transcribing')}
+                      </div>
+                      {transcriptionItem.status === 'running' && (
+                        <div className="mt-0.5 flex items-center gap-1.5">
+                          <div className="h-1 w-14 overflow-hidden rounded-full bg-blue-200">
+                            <div
+                              className="h-full rounded-full bg-blue-600 transition-[width]"
+                              style={{ width: `${transcriptionItem.percentage}%` }}
+                            />
+                          </div>
+                          <span className="truncate text-[11px] tabular-nums text-blue-700">
+                            {transcriptionItem.stage ? `${transcriptionItem.stage} · ` : ''}
+                            {transcriptionItem.percentage}%
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => transcription.cancel(entry.folder_path)}
+                      title={t('library.transcribeCancel')}
+                      aria-label={t('library.transcribeCancel')}
+                      className="ml-0.5 inline-flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md text-blue-700 transition-colors hover:bg-blue-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ) : transcriptionItem &&
+                  (transcriptionItem.status === 'error' || transcriptionItem.status === 'cancelled') ? (
+                  <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-2.5 py-1.5">
+                    <span className="text-xs text-red-800">
+                      {transcriptionItem.status === 'cancelled'
+                        ? t('library.transcribeCancelled')
+                        : t('library.transcribeFailed')}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => transcription.enqueue([entry])}
+                    >
+                      {t('common.retry')}
+                    </Button>
+                  </div>
+                ) : (
+                  <>
+                    {canTranscribe(entry) && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => transcription.enqueue([entry])}
+                        disabled={isBusy}
+                        title={t('library.transcribeTitle')}
+                      >
+                        <FileText className="w-4 h-4" />
+                        <span className="ml-1.5">{t('library.transcribe')}</span>
+                      </Button>
                     )}
-                    <span className="ml-1.5">{t('library.transcribe')}</span>
-                  </Button>
+                    {canRetranscribe(entry) && entry.has_transcript && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setRetranscribeTarget(entry)}
+                        disabled={isBusy}
+                        title={t('library.retranscribeTitle')}
+                      >
+                        <RefreshCw className="w-4 h-4" />
+                        <span className="ml-1.5">{t('library.retranscribe')}</span>
+                      </Button>
+                    )}
+                  </>
                 )}
 
                 {canSummarise(entry) && (
@@ -716,6 +814,10 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
                 </Button>
               </div>
             </div>
+            {previewOpen && entry.audio_path && (
+              <RecordingAudioPreview audioPath={entry.audio_path} />
+            )}
+            </div>
           );
         })}
           </section>
@@ -746,6 +848,26 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
             </Button>
             <Button onClick={() => void handleRenameConfirm()} disabled={!renameValue.trim()}>
               {t('common.rename')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Re-transcribe confirmation */}
+      <Dialog open={retranscribeTarget !== null} onOpenChange={(open) => !open && setRetranscribeTarget(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('library.retranscribeDialogTitle')}</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-gray-600">
+            {t('library.retranscribeDialogBody', { name: retranscribeTarget?.meeting_name ?? '' })}
+          </p>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setRetranscribeTarget(null)}>
+              {t('common.cancel')}
+            </Button>
+            <Button variant="destructive" onClick={handleRetranscribeConfirm}>
+              {t('library.retranscribe')}
             </Button>
           </DialogFooter>
         </DialogContent>

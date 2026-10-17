@@ -82,6 +82,24 @@ pub struct RecordingPreferences {
     #[cfg(target_os = "macos")]
     #[serde(default)]
     pub system_audio_backend: Option<String>,
+
+    /// When false the session records the microphone only: no system mix and no
+    /// per-window application audio.
+    ///
+    /// For an external recording (mic on a different device from the speakers) the
+    /// system stream carries nothing the microphone does not already pick up, and
+    /// opening it adds notification sounds and a second capture path.
+    #[serde(default = "default_capture_system_audio")]
+    pub capture_system_audio: bool,
+
+    /// Microphone gain in dB applied by the capture pipeline before the chunk is
+    /// written; clamped by recording_state so a stale file cannot break the track.
+    #[serde(default = "default_microphone_gain_db")]
+    pub microphone_gain_db: f32,
+
+    /// Run RNNoise on the microphone before mixing.
+    #[serde(default)]
+    pub noise_suppression: bool,
 }
 
 /// Serde default for `file_quality`.
@@ -103,6 +121,15 @@ fn default_keep_warm_minutes() -> u32 {
 
 fn default_low_disk_warning_mb() -> u32 {
     1024
+}
+
+/// Existing recordings captured the system mix; keep that unless asked otherwise.
+fn default_capture_system_audio() -> bool {
+    true
+}
+
+fn default_microphone_gain_db() -> f32 {
+    0.0
 }
 
 impl RecordingPreferences {
@@ -142,6 +169,9 @@ impl Default for RecordingPreferences {
             preferred_system_device: None,
             #[cfg(target_os = "macos")]
             system_audio_backend: Some("coreaudio".to_string()),
+            capture_system_audio: default_capture_system_audio(),
+            microphone_gain_db: default_microphone_gain_db(),
+            noise_suppression: false,
         }
     }
 }
@@ -213,7 +243,7 @@ pub async fn load_recording_preferences<R: Runtime>(
     };
 
     // Try to get the preferences from store
-    let prefs = if let Some(value) = store.get("preferences") {
+    let mut prefs = if let Some(value) = store.get("preferences") {
         match serde_json::from_value::<RecordingPreferences>(value.clone()) {
             // `mut` is only needed on macOS, where the backend field is refreshed
             // from the current capture backend below.
@@ -238,12 +268,18 @@ pub async fn load_recording_preferences<R: Runtime>(
         RecordingPreferences::default()
     };
 
+    // A gain read back from disk is untrusted input: a stale or hand-edited value
+    // must not reach the audio thread, where it would be multiplied into every sample.
+    prefs.microphone_gain_db =
+        super::recording_state::sanitize_microphone_gain_db(prefs.microphone_gain_db);
+
     // Logs the switches that change what gets written, so the effective settings
     // can be confirmed from a log rather than inferred from behaviour.
-    info!("Loaded recording preferences: save_folder={:?}, auto_save={}, format={}, quality={}, defer_transcription={}, cleanup_after_recording={}, mic={:?}, system={:?}",
+    info!("Loaded recording preferences: save_folder={:?}, auto_save={}, format={}, quality={}, defer_transcription={}, cleanup_after_recording={}, mic={:?}, system={:?}, capture_system_audio={}, mic_gain_db={}, noise_suppression={}",
           prefs.save_folder, prefs.auto_save, prefs.file_format, prefs.file_quality,
           prefs.defer_transcription, prefs.cleanup_after_recording,
-          prefs.preferred_mic_device, prefs.preferred_system_device);
+          prefs.preferred_mic_device, prefs.preferred_system_device,
+          prefs.capture_system_audio, prefs.microphone_gain_db, prefs.noise_suppression);
     Ok(prefs)
 }
 

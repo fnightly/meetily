@@ -14,6 +14,12 @@ export interface RecordingEntry {
   created_at: string | null;
   duration_seconds: number | null;
   audio_file: string | null;
+  /**
+   * Absolute path to the audio file, used by inline playback (`read_audio_file`).
+   * Optional because payloads from an older backend (and test fixtures) omit it;
+   * null/undefined means playback is unavailable even when `audio_file` is set.
+   */
+  audio_path?: string | null;
   audio_bytes: number | null;
   has_transcript: boolean;
   has_summary: boolean;
@@ -91,9 +97,24 @@ export function formatRecordedAt(createdAt: string | null | undefined): string {
   });
 }
 
-/** Whether a recording can be transcribed (it has audio). */
+/** Whether there is audio to work with (name or absolute path present). */
+function hasAudio(entry: RecordingEntry): boolean {
+  return entry.audio_file !== null || entry.audio_path != null;
+}
+
+/** Whether a recording can be transcribed for the first time (audio, no transcript). */
 export function canTranscribe(entry: RecordingEntry): boolean {
-  return entry.audio_file !== null && !entry.has_transcript;
+  return hasAudio(entry) && !entry.has_transcript;
+}
+
+/**
+ * Whether a recording can be transcribed again.
+ *
+ * Re-transcribing replaces the existing transcript, so the caller must ask for
+ * confirmation first; having audio is the only technical requirement.
+ */
+export function canRetranscribe(entry: RecordingEntry): boolean {
+  return hasAudio(entry);
 }
 
 /** Whether a recording can be summarised (it has a transcript). */

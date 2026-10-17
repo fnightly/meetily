@@ -281,8 +281,9 @@ impl AudioCapture {
         // Initialize audio enhancement processors for MICROPHONE ONLY
         // System audio doesn't need enhancement (already clean)
         let (noise_suppressor, high_pass_filter, normalizer) = if matches!(device_type, DeviceType::Microphone) {
-            // Initialize noise suppression (RNNoise) at 48kHz - CONDITIONAL based on flag
-            let ns = if super::ffmpeg_mixer::RNNOISE_APPLY_ENABLED {
+            // Initialize noise suppression (RNNoise) at 48kHz when the session asks for
+            // it. Read here because the processor must exist before the first callback.
+            let ns = if state.noise_suppression_enabled() {
                 match NoiseSuppressionProcessor::new(TARGET_SAMPLE_RATE) {
                     Ok(processor) => {
                         info!("✅ RNNoise noise suppression ENABLED for microphone '{}' (10-15 dB reduction)", device.name);
@@ -294,8 +295,7 @@ impl AudioCapture {
                     }
                 }
             } else {
-                info!("ℹ️ RNNoise noise suppression DISABLED for microphone '{}' (flag: RNNOISE_APPLY_ENABLED=false)", device.name);
-                info!("   Whisper handles noise well internally - RNNoise is optional");
+                info!("ℹ️ RNNoise noise suppression disabled for microphone '{}' (preference off)", device.name);
                 None
             };
 
@@ -577,8 +577,9 @@ impl AudioCapture {
                 }
             }
 
-            // STEP 2: Apply RNNoise noise suppression (10-15 dB reduction) - CONDITIONAL
-            if super::ffmpeg_mixer::RNNOISE_APPLY_ENABLED {
+            // STEP 2: Apply RNNoise noise suppression (10-15 dB reduction) when the
+            // session has it enabled.
+            if self.state.noise_suppression_enabled() {
                 if let Ok(mut ns_lock) = self.noise_suppressor.lock() {
                     if let Some(ref mut suppressor) = *ns_lock {
                         let before_len = mono_data.len();
@@ -625,6 +626,16 @@ impl AudioCapture {
                         let peak = mono_data.iter().map(|&x| x.abs()).fold(0.0f32, f32::max);
                         debug!("🎤 After normalization chunk {}: RMS={:.4}, Peak={:.4}", chunk_id, rms, peak);
                     }
+                }
+            }
+
+            // STEP 4: User gain, applied last so the normalizer cannot cancel it.
+            // This is the final sample-domain stage before the chunk is sent, so the
+            // only ceiling on a high setting is clipping into the saved track.
+            let gain = self.state.mic_gain_linear();
+            if gain != 1.0 {
+                for sample in mono_data.iter_mut() {
+                    *sample = (*sample * gain).clamp(-1.0, 1.0);
                 }
             }
         }

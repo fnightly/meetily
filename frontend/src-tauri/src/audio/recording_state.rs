@@ -33,6 +33,25 @@ pub struct ProcessedAudioChunk {
     pub device_type: DeviceType,
 }
 
+/// Microphone gain range offered by the interface, in dB.
+///
+/// Enforced here rather than only in the UI so a stale or hand-edited preferences
+/// file cannot produce a track that is inaudible or pure noise.
+pub const MICROPHONE_GAIN_MIN_DB: f32 = -12.0;
+pub const MICROPHONE_GAIN_MAX_DB: f32 = 24.0;
+
+/// Clamp a gain to the supported range, mapping NaN/infinity to unity.
+///
+/// A non-finite value would otherwise be multiplied into every sample and turn
+/// the whole track into NaN.
+pub fn sanitize_microphone_gain_db(gain_db: f32) -> f32 {
+    if gain_db.is_finite() {
+        gain_db.clamp(MICROPHONE_GAIN_MIN_DB, MICROPHONE_GAIN_MAX_DB)
+    } else {
+        0.0
+    }
+}
+
 /// Comprehensive error types for audio system
 #[derive(Debug, Clone)]
 pub enum AudioError {
@@ -135,6 +154,14 @@ pub struct RecordingState {
     /// transcription. The transcription task reads this to decide whether to
     /// consume the VAD segment stream at all.
     defer_transcription: AtomicBool,
+
+    /// Microphone gain in dB, stored as f32 bits because the capture callback reads
+    /// it on the audio thread while the UI may change it.
+    microphone_gain_db: AtomicU32,
+    /// Runtime switch for RNNoise on the microphone. The pipeline builds its
+    /// suppressor when the capture stream is created, so it must be set before
+    /// recording starts.
+    noise_suppression: AtomicBool,
 }
 
 impl RecordingState {
@@ -156,6 +183,8 @@ impl RecordingState {
             pause_start: Mutex::new(None),
             total_pause_duration: Mutex::new(std::time::Duration::ZERO),
             defer_transcription: AtomicBool::new(false),
+            microphone_gain_db: AtomicU32::new(0.0f32.to_bits()),
+            noise_suppression: AtomicBool::new(false),
         })
     }
 
@@ -170,6 +199,30 @@ impl RecordingState {
     /// Whether realtime transcription is disabled for this session.
     pub fn is_transcription_deferred(&self) -> bool {
         self.defer_transcription.load(Ordering::SeqCst)
+    }
+
+    /// Set the microphone gain the capture pipeline applies to each chunk.
+    pub fn set_microphone_gain_db(&self, gain_db: f32) {
+        self.microphone_gain_db
+            .store(sanitize_microphone_gain_db(gain_db).to_bits(), Ordering::SeqCst);
+    }
+
+    pub fn microphone_gain_db(&self) -> f32 {
+        f32::from_bits(self.microphone_gain_db.load(Ordering::SeqCst))
+    }
+
+    /// Linear multiplier for the current gain; 1.0 at 0 dB.
+    pub fn mic_gain_linear(&self) -> f32 {
+        10.0f32.powf(self.microphone_gain_db() / 20.0)
+    }
+
+    /// Enable RNNoise for the microphone in the session that is about to start.
+    pub fn set_noise_suppression(&self, enabled: bool) {
+        self.noise_suppression.store(enabled, Ordering::SeqCst);
+    }
+
+    pub fn noise_suppression_enabled(&self) -> bool {
+        self.noise_suppression.load(Ordering::SeqCst)
     }
 
     // Recording control
@@ -451,6 +504,8 @@ impl Default for RecordingState {
             pause_start: Mutex::new(None),
             total_pause_duration: Mutex::new(std::time::Duration::ZERO),
             defer_transcription: AtomicBool::new(false),
+            microphone_gain_db: AtomicU32::new(0.0f32.to_bits()),
+            noise_suppression: AtomicBool::new(false),
         }
     }
 }
@@ -463,5 +518,52 @@ impl Clone for RecordingStats {
             total_duration: self.total_duration,
             last_activity: self.last_activity,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gain_db_maps_to_linear_multiplier() {
+        let state = RecordingState::new();
+
+        state.set_microphone_gain_db(0.0);
+        assert!((state.mic_gain_linear() - 1.0).abs() < f32::EPSILON);
+
+        // +6 dB is a little under double; assert the value rather than a ratio so a
+        // misplaced 10x/20x logarithm shows up.
+        state.set_microphone_gain_db(6.0);
+        assert!((state.mic_gain_linear() - 1.995_262).abs() < 1e-5);
+    }
+
+    #[test]
+    fn gain_is_clamped_and_non_finite_falls_back_to_unity() {
+        let state = RecordingState::new();
+
+        state.set_microphone_gain_db(999.0);
+        assert_eq!(state.microphone_gain_db(), MICROPHONE_GAIN_MAX_DB);
+
+        state.set_microphone_gain_db(-999.0);
+        assert_eq!(state.microphone_gain_db(), MICROPHONE_GAIN_MIN_DB);
+
+        state.set_microphone_gain_db(f32::NAN);
+        assert_eq!(state.microphone_gain_db(), 0.0);
+
+        state.set_microphone_gain_db(f32::INFINITY);
+        assert_eq!(state.microphone_gain_db(), 0.0);
+    }
+
+    #[test]
+    fn gain_and_noise_suppression_round_trip_through_atomics() {
+        let state = RecordingState::new();
+        assert_eq!(state.microphone_gain_db(), 0.0);
+        assert!(!state.noise_suppression_enabled());
+
+        state.set_microphone_gain_db(3.5);
+        state.set_noise_suppression(true);
+        assert_eq!(state.microphone_gain_db(), 3.5);
+        assert!(state.noise_suppression_enabled());
     }
 }

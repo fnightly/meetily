@@ -31,9 +31,18 @@ pub struct RecordingEntry {
     pub duration_seconds: Option<f64>,
     /// File name of the audio inside the folder, when one was found.
     pub audio_file: Option<String>,
+    /// Absolute path of the audio file, when one was found.
+    ///
+    /// The UI needs the path rather than the name to transcribe a recording that
+    /// has no database row, and to play it without re-deriving the folder layout.
+    pub audio_path: Option<String>,
     /// Size of the audio file in bytes.
     pub audio_bytes: Option<u64>,
-    /// Whether a transcript file exists.
+    /// Whether the recording holds transcribed speech.
+    ///
+    /// The recorder writes `transcripts.json` on every stop, even when deferred
+    /// transcription captured nothing, so the file's presence is not evidence of a
+    /// transcript. See `transcript_has_segments`.
     pub has_transcript: bool,
     /// Whether a summary file exists.
     pub has_summary: bool,
@@ -80,6 +89,27 @@ pub fn find_audio_file(folder: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Whether a recording folder holds at least one transcribed segment.
+///
+/// A missing, unreadable, malformed or empty transcript all mean "nothing was
+/// transcribed". The recorder creates `transcripts.json` on every stop, so a
+/// file that merely exists would claim every recording is transcribed and hide
+/// the Transcribe button for audio that still needs it.
+fn transcript_has_segments(folder: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(folder.join(TRANSCRIPT_FILE)) else {
+        return false;
+    };
+
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+
+    value
+        .get("segments")
+        .and_then(|segments| segments.as_array())
+        .is_some_and(|segments| !segments.is_empty())
 }
 
 fn modified_time(path: &Path) -> Option<std::time::SystemTime> {
@@ -153,8 +183,11 @@ pub fn read_recording_entry(folder: &Path) -> Option<RecordingEntry> {
         created_at,
         duration_seconds,
         audio_file,
+        audio_path: audio_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
         audio_bytes,
-        has_transcript: folder.join(TRANSCRIPT_FILE).is_file(),
+        has_transcript: transcript_has_segments(folder),
         has_summary: folder.join(SUMMARY_FILE).is_file(),
         status,
         sort_key,
@@ -324,6 +357,56 @@ mod tests {
         assert!(read_recording_entry(&tmp.path().join("random")).is_none());
     }
 
+    /// A uniquely named scratch folder under the OS temp directory.
+    ///
+    /// Removed when it drops, including when an assertion fails, so the tests
+    /// leave nothing behind and need no fixture checked into the repository.
+    struct ScratchFolder {
+        path: PathBuf,
+    }
+
+    impl ScratchFolder {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let unique = format!(
+                "meetily-recordings-test-{}-{}-{}",
+                std::process::id(),
+                nanos,
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            );
+
+            let path = std::env::temp_dir().join(unique);
+            std::fs::create_dir_all(&path).expect("create scratch folder");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for ScratchFolder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn write_transcript(folder: &Path, segments: serde_json::Value) {
+        let json = serde_json::json!({
+            "version": "1.0",
+            "total_segments": segments.as_array().map(|a| a.len()).unwrap_or(0),
+            "segments": segments,
+        });
+        std::fs::write(folder.join(TRANSCRIPT_FILE), json.to_string()).expect("write transcripts");
+    }
+
     #[test]
     fn reads_the_basic_fields() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -337,6 +420,62 @@ mod tests {
         assert_eq!(entry.duration_seconds, Some(1800.0));
         assert_eq!(entry.audio_file.as_deref(), Some("audio.m4a"));
         assert_eq!(entry.audio_bytes, Some(11));
+        assert!(!entry.has_transcript);
+    }
+
+    #[test]
+    fn an_empty_transcript_does_not_count_as_transcribed() {
+        // The recorder writes transcripts.json on every stop, so a file with an
+        // empty segment list is the normal state of deferred transcription. If
+        // that counted, the UI would hide the Transcribe button for audio that
+        // was never transcribed — which is exactly the bug this fixes.
+        let scratch = ScratchFolder::new();
+        let folder = scratch.path().join("Deferred_2026-10-14_09-30");
+        write_metadata(&folder, "2026-10-14T09:30:00Z", "Deferred");
+        std::fs::write(folder.join("audio.mp3"), b"audio-bytes").expect("write audio");
+        write_transcript(&folder, serde_json::json!([]));
+
+        let entry = read_recording_entry(&folder).expect("entry");
+
+        assert!(!entry.has_transcript, "an empty segment list is not a transcript");
+
+        let expected_audio = folder.join("audio.mp3").to_string_lossy().to_string();
+        assert_eq!(entry.audio_path.as_deref(), Some(expected_audio.as_str()));
+    }
+
+    #[test]
+    fn a_transcript_with_a_segment_counts() {
+        let scratch = ScratchFolder::new();
+        let folder = scratch.path().join("Transcribed_2026-10-14_09-30");
+        write_metadata(&folder, "2026-10-14T09:30:00Z", "Transcribed");
+        std::fs::write(folder.join("audio.mp3"), b"audio-bytes").expect("write audio");
+        write_transcript(
+            &folder,
+            serde_json::json!([{ "text": "Hello world", "sequence_id": 0 }]),
+        );
+
+        let entry = read_recording_entry(&folder).expect("entry");
+
+        assert!(entry.has_transcript, "a stored segment must count as transcribed");
+    }
+
+    #[test]
+    fn a_malformed_transcript_does_not_count() {
+        // A half-written file must not claim the recording was transcribed; the
+        // audio still needs transcribing and the UI must offer it.
+        let scratch = ScratchFolder::new();
+        let folder = scratch.path().join("Broken_2026-10-14_09-30");
+        write_metadata(&folder, "2026-10-14T09:30:00Z", "Broken");
+        std::fs::write(folder.join("audio.mp3"), b"audio-bytes").expect("write audio");
+        std::fs::write(folder.join(TRANSCRIPT_FILE), b"{ not json").expect("write transcripts");
+
+        let entry = read_recording_entry(&folder).expect("entry");
+
+        assert!(!entry.has_transcript);
+
+        // Valid JSON without a segments array is equally not a transcript.
+        write_transcript(&folder, serde_json::Value::Null);
+        let entry = read_recording_entry(&folder).expect("entry still listed");
         assert!(!entry.has_transcript);
     }
 

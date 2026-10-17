@@ -131,7 +131,7 @@ pub use diagnostics::{
 };
 
 // Export FFmpeg mixer
-pub use ffmpeg_mixer::{FFmpegAudioMixer, BufferStats, RNNOISE_APPLY_ENABLED};
+pub use ffmpeg_mixer::{FFmpegAudioMixer, BufferStats};
 
 pub use vad::{extract_speech_16k};
 

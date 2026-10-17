@@ -16,6 +16,8 @@ use super::recordings::{
     find_audio_file, is_recording_folder, list_recordings, renamed_folder_name, RecordingEntry,
     METADATA_FILE,
 };
+use crate::database::repositories::transcript::TranscriptsRepository;
+use crate::state::AppState;
 
 /// What the recordings list UI needs.
 #[derive(Debug, Serialize)]
@@ -109,6 +111,39 @@ pub async fn list_saved_recordings<R: Runtime>(
         total_bytes,
         folder_missing,
     })
+}
+
+/// Find the meeting row for a recording folder, creating one when absent.
+///
+/// Streaming transcription can be retried — by the user, or by the UI after a
+/// failure — and each attempt would otherwise insert a fresh meeting row for the
+/// same folder, leaving duplicates in the meeting list. Looking the folder up
+/// first keeps one recording mapped to one meeting.
+///
+/// The created row has no transcript segments: the transcription that follows
+/// writes them through the usual transcript commands.
+#[tauri::command]
+pub async fn ensure_meeting_for_recording(
+    state: tauri::State<'_, AppState>,
+    folder_path: String,
+    meeting_title: String,
+) -> Result<String, String> {
+    let pool = state.db_manager.pool();
+
+    let existing: Option<String> =
+        sqlx::query_scalar("SELECT id FROM meetings WHERE folder_path = ? LIMIT 1")
+            .bind(&folder_path)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("Failed to look up the meeting for this recording: {}", e))?;
+
+    if let Some(meeting_id) = existing {
+        return Ok(meeting_id);
+    }
+
+    TranscriptsRepository::save_transcript(pool, &meeting_title, &[], Some(folder_path))
+        .await
+        .map_err(|e| format!("Failed to create a meeting for this recording: {}", e))
 }
 
 /// Open a recording folder in the OS file manager.

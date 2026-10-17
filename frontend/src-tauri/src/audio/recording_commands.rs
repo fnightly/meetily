@@ -341,36 +341,59 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // no engine is needed during capture, and model validation is by far the most
     // expensive part of starting a recording: it loads the whole model into
     // memory, which is seconds for `base` and tens of seconds for `large-v3`.
-    let (auto_save, defer_transcription, encoding, preferred_mic_name, preferred_system_name, recordings_folder) =
-        match super::recording_preferences::load_recording_preferences(&app).await {
-            Ok(prefs) => {
-                info!("📋 Loaded recording preferences: auto_save={}, defer_transcription={}, format={}, quality={}, preferred_mic={:?}, preferred_system={:?}",
-                      prefs.auto_save, prefs.defer_transcription, prefs.file_format, prefs.file_quality,
-                      prefs.preferred_mic_device, prefs.preferred_system_device);
-                (
-                    prefs.auto_save,
-                    prefs.defer_transcription,
-                    prefs.encoding_settings(),
-                    prefs.preferred_mic_device,
-                    prefs.preferred_system_device,
-                    Some(prefs.save_folder.clone()),
-                )
-            }
-            Err(e) => {
-                warn!("Failed to load recording preferences, using defaults: {}", e);
-                (
-                    true,
-                    false,
-                    super::formats::AudioEncodingSettings::default(),
-                    None,
-                    None,
-                    None,
-                )
-            }
-        };
+    let (
+        auto_save,
+        defer_transcription,
+        encoding,
+        preferred_mic_name,
+        preferred_system_name,
+        recordings_folder,
+        capture_system_audio,
+        microphone_gain_db,
+        noise_suppression,
+    ) = match super::recording_preferences::load_recording_preferences(&app).await {
+        Ok(prefs) => {
+            info!("📋 Loaded recording preferences: auto_save={}, defer_transcription={}, format={}, quality={}, preferred_mic={:?}, preferred_system={:?}, capture_system_audio={}, mic_gain_db={}, noise_suppression={}",
+                  prefs.auto_save, prefs.defer_transcription, prefs.file_format, prefs.file_quality,
+                  prefs.preferred_mic_device, prefs.preferred_system_device,
+                  prefs.capture_system_audio, prefs.microphone_gain_db, prefs.noise_suppression);
+            (
+                prefs.auto_save,
+                prefs.defer_transcription,
+                prefs.encoding_settings(),
+                prefs.preferred_mic_device,
+                prefs.preferred_system_device,
+                Some(prefs.save_folder.clone()),
+                prefs.capture_system_audio,
+                prefs.microphone_gain_db,
+                prefs.noise_suppression,
+            )
+        }
+        Err(e) => {
+            warn!("Failed to load recording preferences, using defaults: {}", e);
+            (
+                true,
+                false,
+                super::formats::AudioEncodingSettings::default(),
+                None,
+                None,
+                None,
+                true,
+                0.0,
+                false,
+            )
+        }
+    };
 
-    // Resolve the system device up front: the macOS audio-wake step needs it.
-    let system_device = resolve_system_or_default(preferred_system_name.as_deref());
+    // Microphone-only mode must not resolve a system device: that would open the
+    // whole system mix (and wake the output device on macOS) only to discard it.
+    let system_device = if capture_system_audio {
+        // Resolve the system device up front: the macOS audio-wake step needs it.
+        resolve_system_or_default(preferred_system_name.as_deref())
+    } else {
+        info!("🎙️ Microphone-only recording: no system or window audio will be captured");
+        None
+    };
 
     // Loading the speech model and preparing the audio hardware are independent,
     // so they run concurrently instead of back to back. With the model already
@@ -464,6 +487,11 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         let _ = app_for_levels.emit("audio-levels", update);
     });
 
+    // The capture pipeline reads these when it builds the microphone stream, so they
+    // have to be in place before recording starts.
+    manager.get_state().set_microphone_gain_db(microphone_gain_db);
+    manager.get_state().set_noise_suppression(noise_suppression);
+
     // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
     let transcription_receiver = manager
         .start_recording(microphone_device, system_device, auto_save, defer_transcription, encoding, recordings_folder.clone())
@@ -537,10 +565,16 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         info!("✅ Transcript-update event listener registered for history persistence");
     }
 
+    let device_labels: Vec<&str> = if capture_system_audio {
+        vec!["Default Microphone", "Default System Audio"]
+    } else {
+        vec!["Default Microphone"]
+    };
+
     // Emit success event
     app.emit("recording-started", serde_json::json!({
         "message": "Recording started successfully with parallel processing",
-        "devices": ["Default Microphone", "Default System Audio"],
+        "devices": device_labels,
         "workers": 3
     })).map_err(|e| e.to_string())?;
 
@@ -593,46 +627,75 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Load preferences before validating the model, so deferred-transcription mode
     // can skip loading an engine it will not use during capture. Model validation
     // loads the whole model into memory — the slowest step in starting a recording.
-    let (auto_save, defer_transcription, encoding, recordings_folder) =
-        match super::recording_preferences::load_recording_preferences(&app).await {
-            Ok(prefs) => {
-                info!(
-                    "📋 Loaded recording preferences: auto_save={}, defer_transcription={}, format={}, quality={}",
-                    prefs.auto_save, prefs.defer_transcription, prefs.file_format, prefs.file_quality
-                );
-                (
-                    prefs.auto_save,
-                    prefs.defer_transcription,
-                    prefs.encoding_settings(),
-                    Some(prefs.save_folder.clone()),
-                )
-            }
-            Err(e) => {
-                warn!("Failed to load recording preferences, defaulting to auto_save=true: {}", e);
-                (
-                    true,
-                    false,
-                    super::formats::AudioEncodingSettings::default(),
-                    None,
-                )
-            }
-        };
+    let (
+        auto_save,
+        defer_transcription,
+        encoding,
+        recordings_folder,
+        capture_system_audio,
+        microphone_gain_db,
+        noise_suppression,
+    ) = match super::recording_preferences::load_recording_preferences(&app).await {
+        Ok(prefs) => {
+            info!(
+                "📋 Loaded recording preferences: auto_save={}, defer_transcription={}, format={}, quality={}, capture_system_audio={}, mic_gain_db={}, noise_suppression={}",
+                prefs.auto_save, prefs.defer_transcription, prefs.file_format, prefs.file_quality,
+                prefs.capture_system_audio, prefs.microphone_gain_db, prefs.noise_suppression
+            );
+            (
+                prefs.auto_save,
+                prefs.defer_transcription,
+                prefs.encoding_settings(),
+                Some(prefs.save_folder.clone()),
+                prefs.capture_system_audio,
+                prefs.microphone_gain_db,
+                prefs.noise_suppression,
+            )
+        }
+        Err(e) => {
+            warn!("Failed to load recording preferences, defaulting to auto_save=true: {}", e);
+            (
+                true,
+                false,
+                super::formats::AudioEncodingSettings::default(),
+                None,
+                true,
+                0.0,
+                false,
+            )
+        }
+    };
+
+    // Microphone-only mode wins over every system-side source: a window target and
+    // the system device both feed the same `DeviceType::System` stream that this mode
+    // does not open. The target is dropped before anything can spawn a capture loop.
+    if !capture_system_audio {
+        info!("🎙️ Microphone-only recording: no system or window audio will be captured");
+        if target_process_id.is_some() {
+            info!("   Requested window target ignored in microphone-only mode");
+        }
+    }
+    let target_process_id = if capture_system_audio { target_process_id } else { None };
 
     // A chosen application replaces the system device rather than joining it:
     // both reach the mixer as `DeviceType::System`, so capturing the whole system
     // alongside the app would sum the app's audio against itself. This has to stay
     // a literal `None` — resolving it would quietly bring the default output back.
-    let system_device = match target_process_id {
-        Some(process_id) => {
-            info!(
-                "🎯 Application {} is the system-audio source; requested system device {:?} is not captured",
-                process_id, system_device_name
-            );
-            None
-        }
-        None => {
-            // Resolve the system device up front: the macOS audio-wake step needs it.
-            resolve_system_or_default(system_device_name.as_deref())
+    let system_device = if !capture_system_audio {
+        None
+    } else {
+        match target_process_id {
+            Some(process_id) => {
+                info!(
+                    "🎯 Application {} is the system-audio source; requested system device {:?} is not captured",
+                    process_id, system_device_name
+                );
+                None
+            }
+            None => {
+                // Resolve the system device up front: the macOS audio-wake step needs it.
+                resolve_system_or_default(system_device_name.as_deref())
+            }
         }
     };
 
@@ -728,6 +791,11 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         let _ = app_for_levels.emit("audio-levels", update);
     });
 
+    // The capture pipeline reads these when it builds the microphone stream, so they
+    // have to be in place before recording starts.
+    manager.get_state().set_microphone_gain_db(microphone_gain_db);
+    manager.get_state().set_noise_suppression(noise_suppression);
+
     // Start recording with specified devices and auto_save setting
     let transcription_receiver = manager
         .start_recording(mic_device, system_device, auto_save, defer_transcription, encoding, recordings_folder.clone())
@@ -822,16 +890,19 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         info!("✅ Transcript-update event listener registered for history persistence");
     }
 
+    let mut device_labels =
+        vec![mic_device_name.unwrap_or_else(|| "Default Microphone".to_string())];
+    if capture_system_audio {
+        device_labels.push(match target_process_id {
+            Some(process_id) => format!("Application {process_id}"),
+            None => system_device_name.unwrap_or_else(|| "Default System Audio".to_string()),
+        });
+    }
+
     // Emit success event
     app.emit("recording-started", serde_json::json!({
         "message": "Recording started with custom devices and parallel processing",
-        "devices": [
-            mic_device_name.unwrap_or_else(|| "Default Microphone".to_string()),
-            match target_process_id {
-                Some(process_id) => format!("Application {process_id}"),
-                None => system_device_name.unwrap_or_else(|| "Default System Audio".to_string()),
-            }
-        ],
+        "devices": device_labels,
         "workers": 3
     })).map_err(|e| e.to_string())?;
 

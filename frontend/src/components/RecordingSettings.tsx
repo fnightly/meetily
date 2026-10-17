@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Switch } from '@/components/ui/switch';
 import { FolderOpen } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
@@ -13,6 +13,16 @@ import { useI18n } from '@/contexts/I18nContext';
 import { Button } from '@/components/ui/button';
 import { formatDuration } from '@/hooks/useRecordingLevelMonitoring';
 import { ModelResidencySettings, type ModelResidency } from '@/components/ModelResidencySettings';
+import {
+  DEFAULT_MICROPHONE_GAIN_DB,
+  MAX_MICROPHONE_GAIN_DB,
+  MIN_MICROPHONE_GAIN_DB,
+  clampGainDb,
+  formatGainDb,
+  resolveCaptureSystemAudio,
+  resolveMicrophoneGainDb,
+  resolveNoiseSuppression,
+} from '@/lib/mic-settings';
 
 export interface RecordingPreferences {
   save_folder: string;
@@ -35,6 +45,12 @@ export interface RecordingPreferences {
   model_keep_warm_minutes?: number;
   preferred_mic_device: string | null;
   preferred_system_device: string | null;
+  /** Also capture the computer's own audio. False records the microphone only. */
+  capture_system_audio?: boolean;
+  /** Gain applied to the recorded microphone audio, in dB (-12..24). */
+  microphone_gain_db?: number;
+  /** Reduce steady background noise with RNNoise. */
+  noise_suppression?: boolean;
 }
 
 /** Silence durations offered in the UI. */
@@ -80,7 +96,10 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     model_residency: 'auto',
     model_keep_warm_minutes: 10,
     preferred_mic_device: null,
-    preferred_system_device: null
+    preferred_system_device: null,
+    capture_system_audio: true,
+    microphone_gain_db: DEFAULT_MICROPHONE_GAIN_DB,
+    noise_suppression: false
   });
   const [encodingOptions, setEncodingOptions] = useState<RecordingEncodingOptions | null>(null);
   const [purgePreview, setPurgePreview] = useState<string | null>(null);
@@ -89,7 +108,10 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   const [saving, setSaving] = useState(false);
   const [showRecordingNotification, setShowRecordingNotification] = useState(true);
   const { isRecording } = useRecordingState();
-  const { setSelectedDevices } = useConfig();
+  const { setSelectedDevices, setSelectedWindow, setCaptureSystemAudio } = useConfig();
+  // Last gain written to the backend, so releasing the slider (or blurring it)
+  // does not fire a second invoke when nothing changed.
+  const persistedGainRef = useRef(DEFAULT_MICROPHONE_GAIN_DB);
 
   // Format/quality lists come from the backend so the UI cannot offer a format
   // the encoder does not actually support.
@@ -108,7 +130,16 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     const loadPreferences = async () => {
       try {
         const prefs = await invoke<RecordingPreferences>('get_recording_preferences');
-        setPreferences(prefs);
+        // Normalise the fields older backends omit so every save round-trips
+        // concrete values instead of a mix of undefined and defaults.
+        const normalized: RecordingPreferences = {
+          ...prefs,
+          capture_system_audio: resolveCaptureSystemAudio(prefs.capture_system_audio),
+          microphone_gain_db: resolveMicrophoneGainDb(prefs.microphone_gain_db),
+          noise_suppression: resolveNoiseSuppression(prefs.noise_suppression),
+        };
+        setPreferences(normalized);
+        persistedGainRef.current = normalized.microphone_gain_db ?? DEFAULT_MICROPHONE_GAIN_DB;
       } catch (error) {
         console.error('Failed to load recording preferences:', error);
         // If loading fails, get default folder path
@@ -271,6 +302,59 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     });
   };
 
+  const handleCaptureSystemAudioChange = async (captureSystemAudio: boolean) => {
+    const newPreferences = { ...preferences, capture_system_audio: captureSystemAudio };
+    setPreferences(newPreferences);
+    // The home screen reads the capture mode from the config context, which is
+    // otherwise only loaded at startup; keep it in step with this change.
+    setCaptureSystemAudio(captureSystemAudio);
+    if (!captureSystemAudio) {
+      // A window target only narrows system audio; with system audio off it would
+      // keep the home screen pointing at a window that is never captured.
+      setSelectedWindow(null);
+    }
+    await savePreferences(newPreferences);
+
+    await Analytics.track('capture_system_audio_toggled', {
+      enabled: captureSystemAudio.toString()
+    });
+  };
+
+  // Dragging the slider only touches local state; the backend is written on
+  // release so one drag is one invoke rather than one per pixel.
+  const handleGainInput = (value: number) => {
+    setPreferences(prev => ({ ...prev, microphone_gain_db: clampGainDb(value) }));
+  };
+
+  const commitGain = async (value: number) => {
+    const gain = clampGainDb(value);
+    if (gain === persistedGainRef.current) return;
+    // Updated before the await so a blur immediately after pointerup is a no-op.
+    persistedGainRef.current = gain;
+    await savePreferences({ ...preferences, microphone_gain_db: gain });
+  };
+
+  const handleGainReset = async () => {
+    const newPreferences = { ...preferences, microphone_gain_db: DEFAULT_MICROPHONE_GAIN_DB };
+    setPreferences(newPreferences);
+    persistedGainRef.current = DEFAULT_MICROPHONE_GAIN_DB;
+    await savePreferences(newPreferences);
+
+    await Analytics.track('microphone_gain_changed', {
+      db: String(DEFAULT_MICROPHONE_GAIN_DB)
+    });
+  };
+
+  const handleNoiseSuppressionToggle = async (enabled: boolean) => {
+    const newPreferences = { ...preferences, noise_suppression: enabled };
+    setPreferences(newPreferences);
+    await savePreferences(newPreferences);
+
+    await Analytics.track('noise_suppression_toggled', {
+      enabled: enabled.toString()
+    });
+  };
+
   const handleOpenFolder = async () => {
     try {
       await invoke('open_recordings_folder');
@@ -327,6 +411,11 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       setSaving(false);
     }
   };
+
+  // Backend reads these when a recording starts, so they stay fixed while one runs.
+  const controlsLocked = saving || isRecording;
+  const captureSystemAudio = resolveCaptureSystemAudio(preferences.capture_system_audio);
+  const gainDb = resolveMicrophoneGainDb(preferences.microphone_gain_db);
 
   if (loading) {
     return (
@@ -655,6 +744,114 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
           checked={showRecordingNotification}
           onCheckedChange={handleNotificationToggle}
         />
+      </div>
+
+      {/* Recording source: what is captured, and how the microphone is treated.
+          The backend reads these when a recording starts, so they are locked
+          while one is in progress. */}
+      <div className="space-y-4">
+        <div className="border-t pt-6">
+          <h4 className="text-base font-medium text-gray-900 mb-1">{t('recording.sourceTitle')}</h4>
+          <p className="text-sm text-gray-600 mb-4">
+            {t('recording.sourceDescription')}
+          </p>
+
+          {isRecording && (
+            <p
+              role="status"
+              aria-live="polite"
+              className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-2 mb-4"
+            >
+              {t('recording.lockedWhileRecording')}
+            </p>
+          )}
+
+          <div className="surface-card p-5 space-y-5">
+            {/* Two visible options read better than a switch whose label flips. */}
+            <fieldset className="space-y-2" disabled={controlsLocked}>
+              <legend className="sr-only">{t('recording.sourceTitle')}</legend>
+              <label
+                className={`flex cursor-pointer items-start gap-2.5 rounded-lg border p-3 transition-colors ${
+                  captureSystemAudio ? 'border-blue-300 bg-blue-50/50' : 'border-slate-200 hover:bg-slate-50'
+                } ${controlsLocked ? 'cursor-not-allowed opacity-60' : ''}`}
+              >
+                <input
+                  type="radio"
+                  name="rec-capture-source"
+                  className="mt-0.5 h-4 w-4 accent-blue-600"
+                  checked={captureSystemAudio}
+                  onChange={() => void handleCaptureSystemAudioChange(true)}
+                />
+                <span className="text-sm text-slate-800">{t('recording.systemAndMic')}</span>
+              </label>
+              <label
+                className={`flex cursor-pointer items-start gap-2.5 rounded-lg border p-3 transition-colors ${
+                  !captureSystemAudio ? 'border-blue-300 bg-blue-50/50' : 'border-slate-200 hover:bg-slate-50'
+                } ${controlsLocked ? 'cursor-not-allowed opacity-60' : ''}`}
+              >
+                <input
+                  type="radio"
+                  name="rec-capture-source"
+                  className="mt-0.5 h-4 w-4 accent-blue-600"
+                  checked={!captureSystemAudio}
+                  onChange={() => void handleCaptureSystemAudioChange(false)}
+                />
+                <span className="flex min-w-0 flex-col">
+                  <span className="text-sm text-slate-800">{t('recording.micOnly')}</span>
+                  <span className="mt-0.5 text-xs text-slate-500">{t('recording.micOnlyHint')}</span>
+                </span>
+              </label>
+            </fieldset>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <Label htmlFor="rec-mic-gain">{t('recording.gainTitle')}</Label>
+                <span className="text-sm font-medium tabular-nums text-slate-700">
+                  {t('recording.gainValue', { db: formatGainDb(gainDb) })}
+                </span>
+              </div>
+              <div className="flex items-center gap-3">
+                <input
+                  id="rec-mic-gain"
+                  type="range"
+                  min={MIN_MICROPHONE_GAIN_DB}
+                  max={MAX_MICROPHONE_GAIN_DB}
+                  step={1}
+                  value={gainDb}
+                  onChange={(event) => handleGainInput(Number(event.target.value))}
+                  onPointerUp={(event) => void commitGain(Number(event.currentTarget.value))}
+                  onKeyUp={(event) => void commitGain(Number(event.currentTarget.value))}
+                  onBlur={(event) => void commitGain(Number(event.currentTarget.value))}
+                  disabled={controlsLocked}
+                  aria-valuetext={t('recording.gainValue', { db: formatGainDb(gainDb) })}
+                  className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-slate-200 accent-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void handleGainReset()}
+                  disabled={controlsLocked || gainDb === DEFAULT_MICROPHONE_GAIN_DB}
+                >
+                  {t('recording.gainReset')}
+                </Button>
+              </div>
+              <p className="text-xs text-slate-500">{t('recording.gainHint')}</p>
+            </div>
+
+            <div className="space-y-1">
+              <div className="flex items-center justify-between gap-4">
+                <Label htmlFor="rec-noise-suppression">{t('recording.noiseSuppression')}</Label>
+                <Switch
+                  id="rec-noise-suppression"
+                  checked={preferences.noise_suppression === true}
+                  onCheckedChange={handleNoiseSuppressionToggle}
+                  disabled={controlsLocked}
+                />
+              </div>
+              <p className="text-xs text-slate-500">{t('recording.noiseSuppressionHint')}</p>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Device Preferences */}
