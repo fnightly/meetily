@@ -92,15 +92,11 @@ export function useRecordingLevelMonitoring(
     let limitFired = false;
 
     (async () => {
-      try {
-        await invoke('start_audio_level_monitoring', { deviceNames: names });
-        if (!cancelled) {
-          startedRef.current = true;
-        }
-      } catch (error) {
-        // Non-fatal: recording itself is unaffected, only the meter and the
-        // silence-based limit are unavailable.
-        console.error('Failed to start recording level monitoring:', error);
+      // Levels now arrive from the capture pipeline itself, which measures the samples
+      // it is already handling. Starting the standalone monitor here would have it
+      // emit a second, synthetic stream for the same event.
+      if (!cancelled) {
+        startedRef.current = true;
       }
     })();
 

@@ -211,7 +211,6 @@ pub struct AudioCapture {
     channels: u16,
     chunk_counter: Arc<std::sync::atomic::AtomicU64>,
     device_type: DeviceType,
-    recording_sender: Option<mpsc::UnboundedSender<AudioChunk>>,
     needs_resampling: bool,  // Flag if resampling is required
     // CRITICAL FIX: Persistent resampler to preserve energy across chunks
     resampler: Arc<std::sync::Mutex<Option<SincFixedIn<f32>>>>,
@@ -223,6 +222,9 @@ pub struct AudioCapture {
     high_pass_filter: Arc<std::sync::Mutex<Option<HighPassFilter>>>,
     // EBU R128 normalizer for microphone audio (per-device, stateful)
     normalizer: Arc<std::sync::Mutex<Option<LoudnessNormalizer>>>,
+    /// Wall-clock time of the last level emit, so the meter is throttled rather than
+    /// emitting on every capture callback.
+    last_level_emit_ms: Arc<std::sync::atomic::AtomicU64>,
     // Note: Using global recording timestamp for synchronization
 }
 
@@ -233,7 +235,7 @@ impl AudioCapture {
         sample_rate: u32,
         channels: u16,
         device_type: DeviceType,
-        recording_sender: Option<mpsc::UnboundedSender<AudioChunk>>,
+        _recording_sender: Option<mpsc::UnboundedSender<AudioChunk>>,
     ) -> Self {
         // CRITICAL FIX: Detect if resampling is needed
         // Pipeline expects 48kHz, but Bluetooth devices often report 8kHz, 16kHz, or 44.1kHz
@@ -383,7 +385,6 @@ impl AudioCapture {
             channels,
             chunk_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             device_type,
-            recording_sender,
             needs_resampling,
             resampler: Arc::new(std::sync::Mutex::new(resampler)),
             resampler_input_buffer: Arc::new(std::sync::Mutex::new(Vec::with_capacity(RESAMPLER_CHUNK_SIZE * 2))),
@@ -391,8 +392,50 @@ impl AudioCapture {
             noise_suppressor: Arc::new(std::sync::Mutex::new(noise_suppressor)),
             high_pass_filter: Arc::new(std::sync::Mutex::new(high_pass_filter)),
             normalizer: Arc::new(std::sync::Mutex::new(normalizer)),
+            last_level_emit_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             // Using global recording time for sync
         }
+    }
+
+    /// Measure this device's level and hand it to the app.
+    ///
+    /// Throttled to [`LEVEL_EMIT_INTERVAL_MS`] because the capture callback runs far
+    /// more often than an eye can follow, and every emit crosses into the webview.
+    /// The level is taken before resampling and normalisation: it answers "is this
+    /// device delivering sound", and post-processing would flatter a quiet input.
+    fn report_level(&self, samples: &[f32]) {
+        const LEVEL_EMIT_INTERVAL_MS: u64 = 100;
+
+        if samples.is_empty() {
+            return;
+        }
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(0);
+
+        let last = self
+            .last_level_emit_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if now_ms.saturating_sub(last) < LEVEL_EMIT_INTERVAL_MS {
+            return;
+        }
+        self.last_level_emit_ms
+            .store(now_ms, std::sync::atomic::Ordering::Relaxed);
+
+        let mut peak: f32 = 0.0;
+        let mut sum_squares: f32 = 0.0;
+        for &sample in samples {
+            let magnitude = sample.abs();
+            if magnitude > peak {
+                peak = magnitude;
+            }
+            sum_squares += sample * sample;
+        }
+        let rms = (sum_squares / samples.len() as f32).sqrt();
+
+        self.state.report_level(&self.device.name, rms, peak);
     }
 
     /// Process audio data directly from callback
@@ -408,6 +451,10 @@ impl AudioCapture {
         } else {
             data.to_vec()
         };
+
+        // Report the device's level before resampling and normalisation, so the meter
+        // reflects what the device actually delivered.
+        self.report_level(&mono_data);
 
         // CRITICAL FIX: Resample to 48kHz if device uses different sample rate
         // This fixes Bluetooth devices (like Sony WH-1000XM4) that report 16kHz or 44.1kHz
@@ -693,7 +740,6 @@ impl AudioCapture {
 pub struct AudioPipeline {
     receiver: mpsc::UnboundedReceiver<AudioChunk>,
     transcription_sender: mpsc::UnboundedSender<AudioChunk>,
-    state: Arc<RecordingState>,
     vad_processor: ContinuousVadProcessor,
     sample_rate: u32,
     chunk_id_counter: u64,
@@ -713,7 +759,7 @@ impl AudioPipeline {
     pub fn new(
         receiver: mpsc::UnboundedReceiver<AudioChunk>,
         transcription_sender: mpsc::UnboundedSender<AudioChunk>,
-        state: Arc<RecordingState>,
+        _state: Arc<RecordingState>,
         target_chunk_duration_ms: u32,
         sample_rate: u32,
         mic_device_name: String,
@@ -772,7 +818,6 @@ impl AudioPipeline {
         Ok(Self {
             receiver,
             transcription_sender,
-            state,
             vad_processor,
             sample_rate,
             chunk_id_counter: 0,

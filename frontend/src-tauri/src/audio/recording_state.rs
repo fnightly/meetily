@@ -113,6 +113,15 @@ pub struct RecordingState {
     last_error: Mutex<Option<AudioError>>,
     error_callback: Mutex<Option<Box<dyn Fn(&AudioError) + Send + Sync>>>,
 
+    /// Receives the measured level of each captured device while recording.
+    ///
+    /// The interface used to learn this from `simple_level_monitor`, which emits a
+    /// sine wave rather than reading a device, so its meters moved whether or not
+    /// anything was being captured. The capture path already holds the samples, so
+    /// it measures them here instead and hands the result to the app, which turns it
+    /// into the `audio-levels` event the interface already listens for.
+    level_callback: Mutex<Option<Box<dyn Fn(&str, f32, f32) + Send + Sync>>>,
+
     // Statistics
     stats: Mutex<RecordingStats>,
 
@@ -141,6 +150,7 @@ impl RecordingState {
             recoverable_error_count: AtomicU32::new(0),
             last_error: Mutex::new(None),
             error_callback: Mutex::new(None),
+            level_callback: Mutex::new(None),
             stats: Mutex::new(RecordingStats::default()),
             recording_start: Mutex::new(None),
             pause_start: Mutex::new(None),
@@ -282,6 +292,24 @@ impl RecordingState {
         *self.error_callback.lock().unwrap() = Some(Box::new(callback));
     }
 
+    /// Install the sink that receives per-device levels while recording.
+    pub fn set_level_callback<F>(&self, callback: F)
+    where
+        F: Fn(&str, f32, f32) + Send + Sync + 'static,
+    {
+        *self.level_callback.lock().unwrap() = Some(Box::new(callback));
+    }
+
+    /// Hand a measured level to the installed sink, if there is one.
+    ///
+    /// Called from the capture callback on the audio thread, so it stays cheap: one
+    /// uncontended lock and a call out. Callers throttle before getting here.
+    pub fn report_level(&self, device_name: &str, rms: f32, peak: f32) {
+        if let Some(callback) = self.level_callback.lock().unwrap().as_ref() {
+            callback(device_name, rms, peak);
+        }
+    }
+
     pub fn report_error(&self, error: AudioError) {
         let count = self.error_count.fetch_add(1, Ordering::SeqCst) + 1;
 
@@ -417,6 +445,7 @@ impl Default for RecordingState {
             recoverable_error_count: AtomicU32::new(0),
             last_error: Mutex::new(None),
             error_callback: Mutex::new(None),
+            level_callback: Mutex::new(None),
             stats: Mutex::new(RecordingStats::default()),
             recording_start: Mutex::new(None),
             pause_start: Mutex::new(None),

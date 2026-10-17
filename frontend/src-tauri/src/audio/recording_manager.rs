@@ -529,6 +529,14 @@ impl RecordingManager {
         self.state.set_error_callback(callback);
     }
 
+    /// Set the sink that receives each captured device's level while recording.
+    pub fn set_level_callback<F>(&self, callback: F)
+    where
+        F: Fn(&str, f32, f32) + Send + Sync + 'static,
+    {
+        self.state.set_level_callback(callback);
+    }
+
     /// Check if there's a fatal error
     pub fn has_fatal_error(&self) -> bool {
         self.state.has_fatal_error()

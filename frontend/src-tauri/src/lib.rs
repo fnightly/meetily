@@ -341,6 +341,13 @@ async fn save_transcript(file_path: String, content: String) -> Result<(), Strin
 }
 
 // Audio level monitoring commands
+//
+// `simple_level_monitor` does not read a device — it emits a sine wave, so anything
+// drawn from it moves regardless of what is being captured. It is kept for the
+// device-selection preview, where no capture pipeline is running to measure the
+// real thing. While recording, the capture path reports each device's actual level
+// instead, and starting this on top of that would put synthetic values back on the
+// same event.
 #[tauri::command]
 async fn start_audio_level_monitoring<R: Runtime>(
     app: AppHandle<R>,
@@ -350,6 +357,11 @@ async fn start_audio_level_monitoring<R: Runtime>(
         "Starting audio level monitoring for devices: {:?}",
         device_names
     );
+
+    if audio::recording_commands::recording_live() {
+        log_info!("Ignoring: recording is live, capture reports real levels");
+        return Ok(());
+    }
 
     audio::simple_level_monitor::start_monitoring(app, device_names)
         .await

@@ -47,7 +47,7 @@ static IS_RECORDING_STOPPING: AtomicBool = AtomicBool::new(false);
 
 /// Recording is live and not being torn down — the only state in which the
 /// mic-disconnect fallback should run or report.
-fn recording_live() -> bool {
+pub fn recording_live() -> bool {
     IS_RECORDING.load(Ordering::SeqCst) && !IS_RECORDING_STOPPING.load(Ordering::SeqCst)
 }
 
@@ -440,6 +440,30 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         let _ = app_for_error.emit("recording-error", error.user_message());
     });
 
+    // Publish each device's measured level as the `audio-levels` event the interface
+    // already listens for. Devices report through this callback one at a time, so
+    // each is forwarded as its own update rather than being batched; the capture side
+    // throttles to something an eye can follow.
+    let app_for_levels = app.clone();
+    manager.set_level_callback(move |device_name, rms, peak| {
+        let update = super::level_monitor::AudioLevelUpdate {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or(0),
+            levels: vec![super::level_monitor::AudioLevelData {
+                device_name: device_name.to_string(),
+                device_type: "input".to_string(),
+                rms_level: rms,
+                peak_level: peak,
+                // Far below speech: this only has to separate a device that is
+                // delivering something from one that is muted or disconnected.
+                is_active: rms > 0.001,
+            }],
+        };
+        let _ = app_for_levels.emit("audio-levels", update);
+    });
+
     // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
     let transcription_receiver = manager
         .start_recording(microphone_device, system_device, auto_save, defer_transcription, encoding, recordings_folder.clone())
@@ -662,6 +686,30 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     let app_for_error = app.clone();
     manager.set_error_callback(move |error| {
         let _ = app_for_error.emit("recording-error", error.user_message());
+    });
+
+    // Publish each device's measured level as the `audio-levels` event the interface
+    // already listens for. Devices report through this callback one at a time, so
+    // each is forwarded as its own update rather than being batched; the capture side
+    // throttles to something an eye can follow.
+    let app_for_levels = app.clone();
+    manager.set_level_callback(move |device_name, rms, peak| {
+        let update = super::level_monitor::AudioLevelUpdate {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or(0),
+            levels: vec![super::level_monitor::AudioLevelData {
+                device_name: device_name.to_string(),
+                device_type: "input".to_string(),
+                rms_level: rms,
+                peak_level: peak,
+                // Far below speech: this only has to separate a device that is
+                // delivering something from one that is muted or disconnected.
+                is_active: rms > 0.001,
+            }],
+        };
+        let _ = app_for_levels.emit("audio-levels", update);
     });
 
     // Start recording with specified devices and auto_save setting
