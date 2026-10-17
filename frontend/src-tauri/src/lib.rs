@@ -341,6 +341,12 @@ async fn save_transcript(file_path: String, content: String) -> Result<(), Strin
     Ok(())
 }
 
+// Which applications are currently producing audio, for choosing a per-app source.
+#[tauri::command]
+async fn list_audio_apps() -> Result<Vec<audio::app_audio::AudioApp>, String> {
+    audio::app_audio::list_audio_apps()
+}
+
 // Audio level monitoring commands
 //
 // `simple_level_monitor` reads real devices, but it is a second capture path: it
@@ -754,7 +760,8 @@ pub fn run() {
             trigger_microphone_permission,
             start_recording_with_devices,
             start_recording_with_devices_and_meeting,
-            start_audio_level_monitoring,
+            list_audio_apps,
+        start_audio_level_monitoring,
             stop_audio_level_monitoring,
             is_audio_level_monitoring,
             // Recording pause/resume commands

@@ -193,6 +193,15 @@ futures-channel = "0.3.31"
 # `GetDiskFreeSpaceExW` for the pre-download disk-space check. `fsutil` was the
 # CLI alternative but requires elevation, so it cannot be used for this.
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
+# Process-level audio session enumeration, for per-app recording. `windows-sys` is
+# raw FFI — these COM interfaces need the higher-level wrappers and their vtables.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+] }
 
 # Linux-specific dependencies
 # Default: CPU-only build (no BLAS)
