@@ -14,6 +14,7 @@ import { TranscriptPanel } from './_components/TranscriptPanel';
 import { useModalState } from '@/hooks/useModalState';
 import { useRecordingStateSync } from '@/hooks/useRecordingStateSync';
 import { useRecordingStart } from '@/hooks/useRecordingStart';
+import { listen } from '@tauri-apps/api/event';
 import { useRecordingStop } from '@/hooks/useRecordingStop';
 import { useTranscriptRecovery } from '@/hooks/useTranscriptRecovery';
 import { TranscriptRecovery } from '@/components/TranscriptRecovery';
@@ -26,7 +27,10 @@ import { HomeDashboard } from '@/components/home/HomeDashboard';
 export default function Home() {
   // Local page state (not moved to contexts)
   const [isRecording, setIsRecordingState] = useState(false);
-  const [barHeights, setBarHeights] = useState(['58%', '76%', '58%']);
+  // Heard audio only: the three bars beside the stop button used to be random numbers
+  // on a timer, which read as a working meter and told the user nothing. They are now
+  // the loudest device's actual level, rolling left so movement is visible.
+  const [barHeights, setBarHeights] = useState(['6%', '6%', '6%']);
   const [showRecoveryDialog, setShowRecoveryDialog] = useState(false);
 
   // Use contexts for state management
@@ -177,19 +181,39 @@ export default function Home() {
   };
 
   useEffect(() => {
-    if (recordingState.isRecording) {
-      const interval = setInterval(() => {
-        setBarHeights(prev => {
-          const newHeights = [...prev];
-          newHeights[0] = Math.random() * 20 + 10 + 'px';
-          newHeights[1] = Math.random() * 20 + 10 + 'px';
-          newHeights[2] = Math.random() * 20 + 10 + 'px';
-          return newHeights;
-        });
-      }, 300);
-
-      return () => clearInterval(interval);
+    if (!recordingState.isRecording) {
+      setBarHeights(['6%', '6%', '6%']);
+      return;
     }
+
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+
+    listen<{ levels: Array<{ rms_level: number }> }>('audio-levels', event => {
+      const levels = event.payload?.levels ?? [];
+      if (levels.length === 0) return;
+
+      // The loudest device wins: during a meeting the interesting question is whether
+      // anything at all is being captured, not which device is marginally louder.
+      const loudest = Math.max(...levels.map(level => level.rms_level ?? 0));
+
+      // Square root, because perceived loudness is not linear in RMS: a linear bar
+      // spends most of its range near the bottom and looks broken.
+      const percent = Math.min(100, Math.round(Math.sqrt(Math.max(0, loudest)) * 140));
+
+      setBarHeights(previous => [previous[1], previous[2], `${Math.max(6, percent)}%`]);
+    })
+      .then(stop => {
+        // The listener may resolve after the effect was cleaned up.
+        if (cancelled) stop();
+        else unlisten = stop;
+      })
+      .catch(error => console.error('Failed to subscribe to input levels:', error));
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, [recordingState.isRecording]);
 
   // Computed values using global status
