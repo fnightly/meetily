@@ -122,7 +122,15 @@ impl Default for RecordingPreferences {
             auto_save: true,
             file_format: super::formats::RecordingFormat::default().id().to_string(),
             file_quality: default_file_quality(),
-            defer_transcription: false,
+            // Transcribe after the recording, not during it.
+            //
+            // Live transcription runs the speech model on the same machine that is
+            // capturing audio, and on a CPU-only setup the two compete: a slow decode
+            // can starve the capture callback and show up as glitches in the saved
+            // track. Deferring keeps the recording itself clean, which is the part that
+            // cannot be redone. The audio lands in the library and can be transcribed
+            // from there, so nothing is lost — only reordered.
+            defer_transcription: true,
             cleanup_after_recording: false,
             silence_stop_enabled_seconds: 0,
             max_recording_seconds: 0,
