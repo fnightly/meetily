@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { tr } from '@/lib/i18n';
 import { useRouter } from 'next/navigation';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -244,8 +245,8 @@ export function useRecordingStop(
         return kept;
       } catch (error) {
         console.error('Transcript cleanup failed; keeping the raw transcript:', error);
-        toast.warning('Transcript cleanup failed', {
-          description: 'The recording was saved with the original transcript.',
+        toast.warning(tr('toast.cleanupFailed'), {
+          description: tr('toast.cleanupFailedHint'),
         });
         return segments;
       }
@@ -427,8 +428,8 @@ export function useRecordingStop(
             shouldDetectSummaryLanguage = !(await applyPinnedSummaryLanguageToMeeting(meetingId));
           } catch (error) {
             console.warn('Failed to apply pinned summary language preference for new meeting:', error);
-            toast.warning('Could not apply default summary language', {
-              description: 'The meeting was saved, but the default summary language was not applied.',
+            toast.warning(tr('toast.defaultLangFailed'), {
+              description: tr('toast.defaultLangFailedHint'),
             });
           }
 
@@ -440,8 +441,8 @@ export function useRecordingStop(
               );
             } catch (error) {
               console.warn('Failed to detect summary language for new meeting:', error);
-              toast.warning('Could not detect summary language', {
-                description: 'The meeting was saved, but Auto could not detect the summary language.',
+              toast.warning(tr('toast.detectLangFailed'), {
+                description: tr('toast.detectLangFailedHint'),
               });
             }
           }
@@ -482,16 +483,16 @@ export function useRecordingStop(
           if (deferred) {
             // Deferred transcription has no live text, so the sensible next step is
             // a choice rather than a silent save. Ask, then act on the answer.
-            toast.success('Recording saved', {
-              description: 'Audio saved. Choose whether to transcribe it.',
+            toast.success(tr('toast.recordingSaved'), {
+              description: tr('toast.recordingSavedChoose'),
             });
             setPendingPostRecording({ meetingId });
           } else {
             // Show success toast with navigation option
-            toast.success('Recording saved successfully!', {
-              description: `${freshTranscripts.length} transcript segments saved.`,
+            toast.success(tr('toast.recordingSavedOk'), {
+              description: tr('toast.segmentsSaved', { count: freshTranscripts.length }),
               action: {
-                label: 'View Meeting',
+                label: tr('toast.viewMeeting'),
                 onClick: () => {
                   router.push(`/meeting-details?id=${meetingId}`);
                   Analytics.trackButtonClick('view_meeting_from_toast', 'recording_complete');
@@ -556,9 +557,9 @@ export function useRecordingStop(
 
         } catch (saveError) {
           console.error('Failed to save meeting to database:', saveError);
-          setStatus(RecordingStatus.ERROR, saveError instanceof Error ? saveError.message : 'Unknown error');
-          toast.error('Failed to save meeting', {
-            description: saveError instanceof Error ? saveError.message : 'Unknown error'
+          setStatus(RecordingStatus.ERROR, saveError instanceof Error ? saveError.message : tr('toast.unknownError'));
+          toast.error(tr('toast.saveMeetingFailed'), {
+            description: saveError instanceof Error ? saveError.message : tr('toast.unknownError')
           });
           throw saveError;
         }
@@ -572,7 +573,7 @@ export function useRecordingStop(
       setIsRecordingDisabled(false);
     } catch (error) {
       console.error('Error in handleRecordingStop:', error);
-      setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : 'Unknown error');
+      setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : tr('toast.unknownError'));
       // isRecording already set to false at function start
       setIsRecordingDisabled(false);
     } finally {
@@ -661,8 +662,8 @@ export function useRecordingStop(
 
       if (action !== 'keep' && actionNeedsTranscription(action) && folderPath) {
         try {
-          toast.info('Transcribing the recording…', {
-            description: 'You can keep using the app while this runs.',
+          toast.info(tr('toast.transcribing'), {
+            description: tr('toast.transcribingHint'),
           });
 
           await invoke('start_retranscription_command', {
@@ -674,10 +675,10 @@ export function useRecordingStop(
           });
 
           await waitForRetranscription(meetingId);
-          toast.success('Transcription complete');
+          toast.success(tr('toast.transcriptionComplete'));
         } catch (error) {
           console.error('Post-recording follow-up failed:', error);
-          toast.error('Transcription failed', {
+          toast.error(tr('toast.transcriptionFailed'), {
             description: error instanceof Error ? error.message : String(error),
           });
         }

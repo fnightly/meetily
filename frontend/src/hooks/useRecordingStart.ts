@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { tr } from '@/lib/i18n';
 import { invoke } from '@tauri-apps/api/core';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
@@ -89,6 +90,16 @@ export function useRecordingStart(
         return await invoke<boolean>(commands.hasAvailableModels);
       }
 
+      // Cloud providers have nothing to download: they are ready once the
+      // backend marks them selectable and an API key is stored.
+      const catalog = await invoke<Array<{ id: string; kind: string; selectable: boolean; has_api_key: boolean }>>(
+        'api_list_speech_providers',
+      );
+      const cloud = catalog?.find((p) => p.id === provider && p.kind === 'cloud');
+      if (cloud) {
+        return cloud.selectable && cloud.has_api_key;
+      }
+
       console.error(`Unsupported transcription provider: ${provider}`);
       return false;
     } catch (error) {
@@ -130,14 +141,14 @@ export function useRecordingStart(
       if (!modelReady) {
         const isDownloading = await checkIfModelDownloading();
         if (isDownloading) {
-          toast.info('Model download in progress', {
-            description: 'Please wait for the transcription model to finish downloading before recording.',
+          toast.info(tr('toast.modelDownloading'), {
+            description: tr('toast.modelDownloadingHint'),
             duration: 5000,
           });
           Analytics.trackButtonClick('start_recording_blocked_downloading', 'home_page');
         } else {
-          toast.error('Transcription model not ready', {
-            description: 'Please download a transcription model before recording.',
+          toast.error(tr('toast.modelNotReady'), {
+            description: tr('toast.modelNotReadyHint'),
             duration: 5000,
           });
           showModal?.('modelSelector', 'Transcription model setup required');
@@ -191,7 +202,7 @@ export function useRecordingStart(
 
       const isRuntimeError = isTranscriptionRuntimeStartError(error);
       if (errorMsg.includes('Recording start timed out')) {
-        toast.error('Recording start timed out — please try again');
+        toast.error(tr('toast.startTimeout'));
       }
 
       setStatus(RecordingStatus.ERROR, isRuntimeError
@@ -222,14 +233,14 @@ export function useRecordingStart(
           if (!modelReady) {
             const isDownloading = await checkIfModelDownloading();
             if (isDownloading) {
-              toast.info('Model download in progress', {
-                description: 'Please wait for the transcription model to finish downloading before recording.',
+              toast.info(tr('toast.modelDownloading'), {
+                description: tr('toast.modelDownloadingHint'),
                 duration: 5000,
               });
               Analytics.trackButtonClick('start_recording_blocked_downloading', 'sidebar_auto');
             } else {
-              toast.error('Transcription model not ready', {
-                description: 'Please download a transcription model before recording.',
+              toast.error(tr('toast.modelNotReady'), {
+                description: tr('toast.modelNotReadyHint'),
                 duration: 5000,
               });
               showModal?.('modelSelector', 'Transcription model setup required');
@@ -321,14 +332,14 @@ export function useRecordingStart(
       if (!modelReady) {
         const isDownloading = await checkIfModelDownloading();
         if (isDownloading) {
-          toast.info('Model download in progress', {
-            description: 'Please wait for the transcription model to finish downloading before recording.',
+          toast.info(tr('toast.modelDownloading'), {
+            description: tr('toast.modelDownloadingHint'),
             duration: 5000,
           });
           Analytics.trackButtonClick('start_recording_blocked_downloading', 'sidebar_direct');
         } else {
-          toast.error('Transcription model not ready', {
-            description: 'Please download a transcription model before recording.',
+          toast.error(tr('toast.modelNotReady'), {
+            description: tr('toast.modelNotReadyHint'),
             duration: 5000,
           });
           showModal?.('modelSelector', 'Transcription model setup required');

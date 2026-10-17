@@ -4,6 +4,7 @@ import { Suspense } from 'react';
 import { AudioLines } from 'lucide-react';
 import { RecordingsLibrary } from '@/components/RecordingsLibrary';
 import { useI18n } from '@/contexts/I18nContext';
+import { PageHeader } from '@/components/layout/PageHeader';
 
 /**
  * The recordings library as a top-level destination.
@@ -20,17 +21,16 @@ function RecordingsPageContent() {
   const { t } = useI18n();
 
   return (
-    <div className="h-full flex flex-col">
-      <div className="flex-shrink-0 px-6 pt-6 pb-4 border-b">
-        <div className="flex items-center gap-2">
-          <AudioLines className="w-5 h-5 text-gray-600" />
-          <h1 className="text-2xl font-bold text-gray-900">{t('recordingsPage.title')}</h1>
+    <div className="h-screen flex flex-col bg-background">
+      <PageHeader
+        icon={<AudioLines />}
+        title={t('recordingsPage.title')}
+        description={t('recordingsPage.description')}
+      />
+      <div className="flex-1 min-h-0 overflow-auto custom-scrollbar">
+        <div className="mx-auto w-full max-w-6xl px-8 py-6">
+          <RecordingsLibrary />
         </div>
-        <p className="text-sm text-gray-600 mt-1">{t('recordingsPage.description')}</p>
-      </div>
-
-      <div className="flex-1 min-h-0 overflow-auto px-6 py-4">
-        <RecordingsLibrary />
       </div>
     </div>
   );

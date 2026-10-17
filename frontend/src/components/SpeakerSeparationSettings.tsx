@@ -109,7 +109,7 @@ export function SpeakerSeparationSettings() {
           {t('common.loading')}
         </div>
       ) : status ? (
-        <div className="p-4 border rounded-lg space-y-3">
+        <div className="surface-card p-5 space-y-3">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-2 min-w-0">
               {status.ready ? (

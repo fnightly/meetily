@@ -471,8 +471,12 @@ impl SummaryService {
                 }
             }
         } else {
-            // Cloud providers (OpenAI, Claude, Groq, CustomOpenAI) handle large contexts automatically
-            100000  // Effectively unlimited for single-pass processing
+            // Hosted models are chunked against their own window (64k DeepSeek,
+            // 32k for unknown custom endpoints, …) instead of a flat 100k that
+            // silently overflowed smaller models on long meetings.
+            let threshold = crate::summary::processor::cloud_token_threshold(&provider, &model_name);
+            info!("Using cloud chunk threshold {} tokens for {}", threshold, model_name);
+            threshold
         };
 
         // Get app data directory for BuiltInAI provider

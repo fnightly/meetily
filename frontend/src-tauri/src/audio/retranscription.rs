@@ -102,11 +102,12 @@ pub async fn start_retranscription<R: Runtime>(
     // Reset cancellation flag
     RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
 
-    let use_parakeet = provider.as_deref() == Some("parakeet");
+    let model_use = crate::audio::transcription::residency::begin_use();
     let result = run_retranscription(app.clone(), meeting_id.clone(), meeting_folder_path, language, model, provider).await;
 
     // Unload the engine after the batch job (success, failure, or cancellation)
-    super::common::unload_engine_after_batch(use_parakeet).await;
+    drop(model_use);
+    super::common::unload_engine_after_batch(&app).await;
 
     // Guard will automatically clear flag on drop
     // No need for manual: RETRANSCRIPTION_IN_PROGRESS.store(false, Ordering::SeqCst);
@@ -181,8 +182,10 @@ async fn run_retranscription<R: Runtime>(
     let folder_path = PathBuf::from(&meeting_folder_path);
     let audio_path = find_audio_file(&folder_path)?;
 
-    // Determine which provider to use (default to whisper)
-    let use_parakeet = provider.as_deref() == Some("parakeet");
+    // Determine which provider to use: cloud (explicit or configured), else
+    // Parakeet when asked for, else Whisper.
+    let cloud_provider_id = super::common::resolve_batch_cloud_provider(&app, provider.as_deref()).await;
+    let use_parakeet = cloud_provider_id.is_none() && provider.as_deref() == Some("parakeet");
 
     info!(
         "Starting retranscription for meeting {} with language {:?}, model {:?}, provider {:?}",
@@ -300,12 +303,34 @@ async fn run_retranscription<R: Runtime>(
     emit_progress(&app, &meeting_id, "transcribing", 25, "Loading transcription engine...");
 
     // Initialize the appropriate engine once (not per-segment)
-    let whisper_engine = if !use_parakeet {
+    let cloud_engine = match cloud_provider_id.as_deref() {
+        Some(id) => {
+            info!("☁️ Retranscribing with cloud provider '{}'", id);
+            Some(
+                crate::audio::transcription::CloudSpeechProvider::from_settings(&app, id, model.as_deref(), None)
+                    .await
+                    .map_err(|e| anyhow!(e))?,
+            )
+        }
+        None => None,
+    };
+    // Only one local model in memory: release the other engine first, unless a
+    // recording or another batch job may be using it.
+    if cloud_engine.is_none()
+        && !crate::audio::recording_commands::is_recording().await
+        && crate::audio::transcription::residency::is_sole_user()
+    {
+        crate::audio::transcription::residency::release_engines_except(Some(
+            if use_parakeet { "parakeet" } else { "localWhisper" },
+        ))
+        .await;
+    }
+    let whisper_engine = if cloud_engine.is_none() && !use_parakeet {
         Some(get_or_init_whisper(&app, model.as_deref()).await?)
     } else {
         None
     };
-    let parakeet_engine = if use_parakeet {
+    let parakeet_engine = if cloud_engine.is_none() && use_parakeet {
         Some(get_or_init_parakeet(&app, model.as_deref()).await?)
     } else {
         None
@@ -369,7 +394,13 @@ async fn run_retranscription<R: Runtime>(
         }
 
         // Transcribe this segment
-        let (text, conf) = if use_parakeet {
+        let (text, conf) = if let Some(cloud) = cloud_engine.as_ref() {
+            let text = cloud
+                .transcribe_samples(&segment.samples, language.as_deref())
+                .await
+                .map_err(|e| anyhow!("Cloud transcription failed on segment {}: {}", i, e))?;
+            (text, 0.9f32)
+        } else if use_parakeet {
             let engine = parakeet_engine.as_ref().unwrap();
             let text = engine
                 .transcribe_audio(segment.samples.clone())
@@ -384,6 +415,9 @@ async fn run_retranscription<R: Runtime>(
                 .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
             (text, conf)
         };
+        // Local engines cannot take the cloud prompt, so dictionary
+        // corrections are applied to their output here.
+        let text = crate::dictionary::apply_active_corrections(&text);
 
         // Skip empty transcripts
         let trimmed = text.trim();

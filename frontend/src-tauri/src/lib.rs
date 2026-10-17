@@ -47,6 +47,8 @@ pub mod config;
 pub mod console_utils;
 pub mod database;
 pub mod dictionary;
+pub mod workspace;
+pub mod export;
 pub mod disk_space;
 pub mod notifications;
 pub mod ollama;
@@ -509,6 +511,9 @@ pub fn run() {
         .manage(audio::init_system_audio_state())
         .manage(summary::summary_engine::ModelManagerState(Arc::new(tokio::sync::Mutex::new(None))))
         .setup(|_app| {
+            // Mirror the custom dictionary for the local speech engines, which
+            // run without an AppHandle (Whisper prompt + text corrections).
+            let _ = dictionary::load_dictionary(_app.handle());
             #[cfg(target_os = "windows")]
             match _app.path().resolve(
                 "onnxruntime.dll",
@@ -621,6 +626,9 @@ pub fn run() {
                 database::setup::initialize_database_on_startup(&_app.handle()).await
             })
             .expect("Failed to initialize database");
+
+            // Model residency: idle reaper + optional preload (after the database is ready).
+            audio::transcription::residency::on_app_start(_app.handle().clone());
 
             // Initialize templates: the app-data dir is where user-authored
             // templates live (beside the database), the resource dir holds the
@@ -845,6 +853,12 @@ pub fn run() {
             audio::transcription::provider_commands::api_list_speech_providers,
             audio::transcription::provider_commands::api_get_active_speech_settings,
             audio::transcription::provider_commands::api_validate_speech_selection,
+            audio::transcription::cloud_provider::api_test_speech_provider,
+            audio::transcription::residency::transcription_prewarm,
+            audio::transcription::residency::get_model_residency_status,
+            audio::transcription::residency::release_speech_models,
+            export::export_save_files,
+            export::reveal_export_path,
             audio::transcription::provider_commands::api_get_provider_languages,
             // Unified storage location commands (database / models / notes / recordings)
             storage::commands::get_storage_config,
@@ -904,6 +918,24 @@ pub fn run() {
             // model would otherwise mangle.
             dictionary::get_dictionary,
             dictionary::set_dictionary,
+            // Workspace: speaker names, tags/projects, action items, search, Q&A, backup.
+            workspace::speakers::api_get_speaker_names,
+            workspace::speakers::api_set_speaker_name,
+            workspace::speakers::api_list_known_speaker_names,
+            workspace::labels::api_get_meeting_labels,
+            workspace::labels::api_set_meeting_tags,
+            workspace::labels::api_set_meeting_project,
+            workspace::labels::api_list_meeting_labels,
+            workspace::labels::api_list_workspace_labels,
+            workspace::action_items::api_list_action_items,
+            workspace::action_items::api_create_action_item,
+            workspace::action_items::api_update_action_item,
+            workspace::action_items::api_delete_action_item,
+            workspace::action_items::api_import_action_items,
+            workspace::search::api_search_meetings,
+            workspace::ask::api_ask_meetings,
+            workspace::backup::api_create_backup,
+            workspace::backup::api_restore_backup,
             // Transcript cleanup. Local models only: it sends the whole transcript.
             summary::cleanup_commands::cleanup_transcript,
             // Speaker separation models, fetched on demand rather than bundled.

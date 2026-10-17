@@ -47,6 +47,7 @@ module.exports = {
   				foreground: 'hsl(var(--secondary-foreground))'
   			},
   			tertiary: '#64748b',
+  			record: 'hsl(var(--record))',
   			card: {
   				DEFAULT: 'hsl(var(--card))',
   				foreground: 'hsl(var(--card-foreground))'

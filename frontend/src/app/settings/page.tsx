@@ -1,10 +1,8 @@
 'use client';
 
-import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
-import { ArrowLeft, Settings2, Mic, Database as DatabaseIcon, SparkleIcon, FlaskConical, BookA } from 'lucide-react';
-import { useRouter } from 'next/navigation';
+import React, { useState, useEffect } from 'react';
+import { Settings2, Mic, Database as DatabaseIcon, SparkleIcon, FlaskConical, BookA, Archive } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
-import { motion } from 'framer-motion';
 import { TranscriptSettings } from '@/components/TranscriptSettings';
 import { RecordingSettings } from '@/components/RecordingSettings';
 import { PreferenceSettings } from '@/components/PreferenceSettings';
@@ -12,10 +10,12 @@ import { SummaryModelSettings } from '@/components/SummaryModelSettings';
 import { BetaSettings } from '@/components/BetaSettings';
 import { useConfig } from '@/contexts/ConfigContext';
 import { DictionarySettings } from '@/components/DictionarySettings';
+import { BackupSettings } from '@/components/BackupSettings';
 import { SpeakerSeparationSettings } from '@/components/SpeakerSeparationSettings';
 import { useI18n } from '@/contexts/I18nContext';
 import { LOCALES, LOCALE_LABELS, type Locale } from '@/lib/i18n';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { PageHeader } from '@/components/layout/PageHeader';
 
 // Tabs configuration (constant). Labels are translation keys, resolved at render
 // so the tab bar follows the chosen interface language.
@@ -25,18 +25,16 @@ const TABS = [
   { value: 'dictionary', labelKey: 'settings.tabs.dictionary', icon: BookA },
   { value: 'Transcriptionmodels', labelKey: 'settings.tabs.transcription', icon: DatabaseIcon },
   { value: 'summaryModels', labelKey: 'settings.tabs.summary', icon: SparkleIcon },
+  { value: 'data', labelKey: 'settings.tabs.data', icon: Archive },
   { value: 'beta', labelKey: 'settings.tabs.beta', icon: FlaskConical }
 ] as const;
 
 export default function SettingsPage() {
-  const router = useRouter();
   const { transcriptModelConfig, setTranscriptModelConfig } = useConfig();
   const { t, locale, setLocale } = useI18n();
 
   // Animation state for tabs
   const [activeTab, setActiveTab] = useState('general');
-  const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
-  const [underlineStyle, setUnderlineStyle] = useState({ left: 0, width: 0 });
 
   // Load saved transcript configuration on mount
   useEffect(() => {
@@ -58,73 +56,45 @@ export default function SettingsPage() {
     loadTranscriptConfig();
   }, [setTranscriptModelConfig]);
 
-  // Update underline position when active tab changes
-  useLayoutEffect(() => {
-    const activeIndex = TABS.findIndex(tab => tab.value === activeTab);
-    const activeTabElement = tabRefs.current[activeIndex];
-
-    if (activeTabElement) {
-      const { offsetLeft, offsetWidth } = activeTabElement;
-      setUnderlineStyle({ left: offsetLeft, width: offsetWidth });
-    }
-  }, [activeTab]);
+  const activeMeta = TABS.find((tab) => tab.value === activeTab) ?? TABS[0];
 
   return (
-    <div className="h-screen bg-gray-50 flex flex-col">
-      {/* Fixed Header */}
-      <div className="sticky top-0 z-10 bg-gray-50 border-b border-gray-200">
-        <div className="max-w-6xl mx-auto px-8 py-6">
-          <div className="flex items-center gap-4">
-            <button
-              onClick={() => router.back()}
-              className="flex items-center gap-2 text-gray-600 hover:text-gray-900 transition-colors"
-            >
-              <ArrowLeft className="w-5 h-5" />
-              <span>{t('common.back')}</span>
-            </button>
-            <h1 className="text-3xl font-bold">{t('settings.title')}</h1>
-          </div>
-        </div>
-      </div>
+    <div className="h-screen bg-background flex flex-col">
+      <PageHeader icon={<Settings2 />} title={t('settings.title')} description={t('settings.subtitle')} />
 
-      {/* Scrollable Content */}
-      <div className="flex-1 overflow-y-auto">
-        <div className="max-w-6xl mx-auto p-8 pt-6">
-          {/* Tabs */}
-          <Tabs value={activeTab} onValueChange={setActiveTab}>
-            <TabsList className="bg-transparent relative rounded-none border-b border-gray-200 p-0 h-auto">
-              {TABS.map((tab, index) => {
+      <div className="flex-1 overflow-y-auto custom-scrollbar">
+        <div className="mx-auto max-w-6xl px-8 py-6">
+          <Tabs value={activeTab} onValueChange={setActiveTab} orientation="vertical" className="flex gap-8 items-start">
+            <TabsList className="sticky top-0 flex h-auto w-52 flex-shrink-0 flex-col items-stretch gap-0.5 rounded-none bg-transparent p-0">
+              {TABS.map((tab) => {
                 const Icon = tab.icon;
                 return (
                   <TabsTrigger
                     key={tab.value}
                     value={tab.value}
-                    ref={el => { tabRefs.current[index] = el }}
-                    className="flex items-center gap-2 px-6 py-4 bg-transparent rounded-none border-0 data-[state=active]:bg-transparent data-[state=active]:text-blue-600 data-[state=active]:shadow-none text-gray-600 hover:text-gray-900 relative z-10"
+                    className="nav-item justify-start rounded-lg data-[state=active]:bg-white data-[state=active]:text-blue-700 data-[state=active]:shadow-[0_1px_2px_rgba(15,23,42,0.06)] data-[state=active]:ring-1 data-[state=active]:ring-slate-200"
                   >
                     <Icon className="w-4 h-4" />
                     {t(tab.labelKey)}
                   </TabsTrigger>
                 );
               })}
-
-              <motion.div
-                className="absolute bottom-0 z-20 h-0.5 bg-blue-600"
-                layoutId="underline"
-                style={{ left: underlineStyle.left, width: underlineStyle.width }}
-                transition={{ type: 'spring', stiffness: 400, damping: 40 }}
-              />
             </TabsList>
 
-            <TabsContent value="general">
+            <div className="min-w-0 flex-1 max-w-3xl">
+              <div className="mb-5">
+                <h2 className="text-lg font-semibold text-slate-900">{t(activeMeta.labelKey)}</h2>
+                <p className="mt-0.5 text-sm text-slate-500">{t(`settings.tabDesc.${activeMeta.value}`)}</p>
+              </div>
+            <TabsContent value="general" className="mt-0">
               {/* Interface language first: it changes how everything below reads,
                   and it is the one setting a user who cannot read the current
                   language needs to find immediately. */}
-              <div className="p-4 border rounded-lg mb-4">
+              <div className="surface-card p-5 mb-4">
                 <div className="flex items-center justify-between gap-4">
                   <div>
-                    <div className="font-medium">{t('settings.language')}</div>
-                    <div className="text-sm text-gray-600 mt-1">
+                    <div className="font-semibold text-slate-900">{t('settings.language')}</div>
+                    <div className="text-sm text-slate-500 mt-1">
                       {t('settings.language.description')}
                     </div>
                   </div>
@@ -132,7 +102,7 @@ export default function SettingsPage() {
                     aria-label={t('settings.language')}
                     value={locale}
                     onChange={(event) => setLocale(event.target.value as Locale)}
-                    className="shrink-0 px-3 py-2 text-sm border border-gray-300 rounded-md bg-white"
+                    className="shrink-0 h-9 px-3 text-sm border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/30"
                   >
                     {LOCALES.map((value) => (
                       <option key={value} value={value}>
@@ -145,13 +115,13 @@ export default function SettingsPage() {
 
               <PreferenceSettings />
             </TabsContent>
-            <TabsContent value="recording">
+            <TabsContent value="recording" className="mt-0">
               <RecordingSettings />
             </TabsContent>
-            <TabsContent value="dictionary" className="mt-6">
+            <TabsContent value="dictionary" className="mt-0">
               <DictionarySettings />
             </TabsContent>
-            <TabsContent value="Transcriptionmodels">
+            <TabsContent value="Transcriptionmodels" className="mt-0">
               <TranscriptSettings
                 transcriptModelConfig={transcriptModelConfig}
                 setTranscriptModelConfig={setTranscriptModelConfig}
@@ -162,12 +132,16 @@ export default function SettingsPage() {
                 <SpeakerSeparationSettings />
               </div>
             </TabsContent>
-            <TabsContent value="summaryModels">
+            <TabsContent value="summaryModels" className="mt-0">
               <SummaryModelSettings />
             </TabsContent>
-            <TabsContent value="beta" className="mt-6">
+            <TabsContent value="data" className="mt-0">
+              <BackupSettings />
+            </TabsContent>
+            <TabsContent value="beta" className="mt-0">
               <BetaSettings />
             </TabsContent>
+            </div>
           </Tabs>
         </div>
       </div>

@@ -2,8 +2,7 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
-import { ButtonGroup } from '@/components/ui/button-group';
-import { Copy, FolderOpen, RefreshCw, Download, Users } from 'lucide-react';
+import { Copy, FolderOpen, RefreshCw, Users } from 'lucide-react';
 import Analytics from '@/lib/analytics';
 import { RetranscribeDialog } from './RetranscribeDialog';
 import { useConfig } from '@/contexts/ConfigContext';
@@ -134,57 +133,46 @@ export function TranscriptButtonGroup({
   }, [onRefetchTranscripts]);
 
   return (
-    <div className="flex items-center justify-center w-full gap-2">
-      <ButtonGroup>
+    <div className="flex items-center justify-between w-full gap-2 min-w-0">
+      <div className="flex items-baseline gap-2 min-w-0">
+        <h2 className="text-sm font-semibold text-slate-900 whitespace-nowrap">{t('meeting.transcriptPane')}</h2>
+        <span className="text-xs text-slate-400 tabular-nums">{transcriptCount}</span>
+      </div>
+      <div className="flex items-center gap-0.5 flex-shrink-0">
         <Button
-          variant="outline"
+          variant="ghost"
           size="sm"
-          className="px-2 @[22rem]:px-3"
+          className="px-2 @[34rem]:px-3"
           onClick={() => {
             Analytics.trackButtonClick('copy_transcript', 'meeting_details');
             onCopyTranscript();
           }}
           disabled={transcriptCount === 0}
-          title={transcriptCount === 0 ? 'No transcript available' : 'Copy Transcript'}
+          title={transcriptCount === 0 ? t('transcriptActions.noTranscript') : t('transcriptActions.copy')}
         >
           <Copy />
-          <span className="hidden @[22rem]:inline">Copy</span>
-        </Button>
-
-        <Button
-          variant="outline"
-          size="sm"
-          className="px-2 @[22rem]:px-3"
-          onClick={() => {
-            Analytics.trackButtonClick('export_markdown', 'meeting_details');
-            onExportMarkdown?.();
-          }}
-          disabled={isExporting}
-          title="Export this meeting as Markdown (summary + transcript)"
-        >
-          <Download />
-          <span className="hidden @[22rem]:inline">{isExporting ? 'Exporting…' : 'Export'}</span>
+          <span className="hidden @[34rem]:inline">{t('transcriptActions.copyShort')}</span>
         </Button>
 
         <Button
           size="sm"
-          variant="outline"
-          className="px-2 @[22rem]:px-4"
+          variant="ghost"
+          className="px-2 @[34rem]:px-3"
           onClick={() => {
             Analytics.trackButtonClick('open_recording_folder', 'meeting_details');
             onOpenMeetingFolder();
           }}
-          title="Open Recording Folder"
+          title={t('transcriptActions.openFolder')}
         >
-          <FolderOpen className="@[22rem]:mr-2" size={18} />
-          <span className="hidden @[22rem]:inline">Recording</span>
+          <FolderOpen className="@[34rem]:mr-1" size={16} />
+          <span className="hidden @[34rem]:inline">{t('transcriptActions.folderShort')}</span>
         </Button>
 
         {meetingId && meetingFolderPath && (
           <Button
             size="sm"
-            variant="outline"
-            className="px-2 @[22rem]:px-4"
+            variant="ghost"
+            className="px-2 @[34rem]:px-3"
             onClick={() => void handleIdentifySpeakers()}
             disabled={identifying || transcriptCount === 0}
             // Say why it is unavailable. Separation labels transcript segments, so with
@@ -193,11 +181,11 @@ export function TranscriptButtonGroup({
             title={transcriptCount === 0 ? t('speakers.runNeedsTranscript') : t('speakers.runHint')}
           >
             {identifying ? (
-              <RefreshCw className="animate-spin @[22rem]:mr-2" size={18} />
+              <RefreshCw className="animate-spin @[34rem]:mr-1" size={16} />
             ) : (
-              <Users className="@[22rem]:mr-2" size={18} />
+              <Users className="@[34rem]:mr-1" size={16} />
             )}
-            <span className="hidden @[22rem]:inline">
+            <span className="hidden @[34rem]:inline">
               {identifying
                 ? progress
                   ? `${phaseCaption(progress.phase)} ${progress.percent}%`
@@ -210,19 +198,19 @@ export function TranscriptButtonGroup({
         {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
           <Button
             size="sm"
-            variant="outline"
-            className="bg-gradient-to-r from-blue-50 to-purple-50 hover:from-blue-100 hover:to-purple-100 border-blue-200 px-2 @[22rem]:px-4"
+            variant="ghost"
+            className="px-2 @[34rem]:px-3 text-blue-700 hover:bg-blue-50"
             onClick={() => {
               Analytics.trackButtonClick('enhance_transcript', 'meeting_details');
               setShowRetranscribeDialog(true);
             }}
-            title="Retranscribe to enhance your recorded audio"
+            title={t('transcriptActions.retranscribeHint')}
           >
-            <RefreshCw className="@[22rem]:mr-2" size={18} />
-            <span className="hidden @[22rem]:inline">Enhance</span>
+            <RefreshCw className="@[34rem]:mr-1" size={16} />
+            <span className="hidden @[34rem]:inline">{t('transcriptActions.retranscribe')}</span>
           </Button>
         )}
-      </ButtonGroup>
+      </div>
 
       {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
         <RetranscribeDialog

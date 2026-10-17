@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { MeetingSummary, SummaryProcessResponse } from '@/types';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
@@ -10,14 +10,13 @@ import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
 import { SummaryPanel } from '@/components/MeetingDetails/SummaryPanel';
 import { MeetingDetailsSplitView, type MeetingDetailsTab } from '@/components/MeetingDetails/MeetingDetailsSplitView';
 import { ModelConfig } from '@/components/ModelSettingsModal';
-import {
-  buildMeetingMarkdown,
-  downloadMarkdown,
-  exportFileName,
-  type ExportScope,
-} from '@/lib/meeting-export';
+import { ExportDialog } from '@/components/ExportDialog';
+import { MeetingHeader } from '@/components/MeetingDetails/MeetingHeader';
+import { hasVisibleSummaryContent } from '@/lib/summary-content';
 import { useI18n } from '@/contexts/I18nContext';
-import { formatSpeakerLabel } from '@/lib/speaker-labels';
+import { MeetingSidePane } from '@/components/workspace/MeetingSidePane';
+import { summaryToMarkdown } from '@/lib/meeting-export';
+import { syncActionItemsFromMarkdown } from '@/lib/action-items-sync';
 
 /** Shape returned by the `api_get_meeting` command (complete, unpaginated). */
 interface MeetingDetailsResponse {
@@ -58,6 +57,8 @@ export default function PageContent({
   totalCount,
   loadedCount,
   onLoadMore,
+  focusTime = null,
+  highlightQuery = null,
 }: {
   meeting: any;
   summaryData: MeetingSummary | null;
@@ -73,6 +74,9 @@ export default function PageContent({
   totalCount?: number;
   loadedCount?: number;
   onLoadMore?: () => void;
+  /** Deep link from search / Q&A: second to scroll to and term to mark. */
+  focusTime?: number | null;
+  highlightQuery?: string | null;
 }) {
   console.log('📄 PAGE CONTENT: Initializing with data:', {
     meetingId: meeting.id,
@@ -84,7 +88,9 @@ export default function PageContent({
   const [customPrompt, setCustomPrompt] = useState<string>('');
   const isRecording = false;
   const [activeTab, setActiveTab] = useState<MeetingDetailsTab>('transcript');
-  const [exporting, setExporting] = useState(false);
+  const actionItemsSyncedRef = useRef<string | null>(null);
+  const previousSummaryStatusRef = useRef<string | null>(null);
+  const templateRecommendedRef = useRef(false);
 
   // Ref to store the modal open function from SummaryGeneratorButtonGroup
   const openModelSettingsRef = useRef<(() => void) | null>(null);
@@ -168,50 +174,42 @@ export default function PageContent({
   });
 
   /**
-   * Export the meeting as Markdown.
-   *
-   * The complete transcript is re-read from the backend rather than taken from
-   * `meetingData.transcripts`, because the meeting-details view loads transcripts
-   * with pagination — exporting the in-memory list would silently truncate long
-   * meetings to whatever pages the user had scrolled through.
+   * Export opens the multi-format dialog. The complete transcript is re-read
+   * from the backend there (this view paginates transcripts), while the
+   * summary on screen — which may hold unsaved edits — is passed in.
    */
-  const handleExportMarkdown = async (scope: ExportScope) => {
-    setExporting(true);
-    try {
-      const details = await invoke<MeetingDetailsResponse>('api_get_meeting', {
-        meetingId: meeting.id,
-      });
+  const [exportOpen, setExportOpen] = useState(false);
 
-      const markdown = buildMeetingMarkdown(
-        {
-          meeting: {
-            id: details.id,
-            title: details.title,
-            created_at: details.created_at,
-            updated_at: details.updated_at,
-          },
-          summary: meetingData.aiSummary,
-          transcripts: details.transcripts,
-          // Written in the interface language, matching what the transcript list shows.
-          speakerLabel: (raw: string) => formatSpeakerLabel(raw, t),
-        },
-        scope,
-      );
+  const summaryMarkdown = useMemo(() => {
+    const md = summaryToMarkdown(meetingData.aiSummary);
+    return md.trim() ? md : null;
+  }, [meetingData.aiSummary]);
 
-      downloadMarkdown(markdown, exportFileName(details, scope));
-      toast.success('Exported Markdown', {
-        description: `${details.transcripts.length} transcript segment(s) included.`,
-      });
-      await Analytics.track('meeting_exported_markdown', { scope });
-    } catch (error) {
-      console.error('Failed to export Markdown:', error);
-      toast.error('Failed to export Markdown', {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setExporting(false);
+  // Follow-ups: import once from an existing summary, and again (forced) after
+  // a generation finishes so a regenerated summary's new items appear.
+  useEffect(() => {
+    const status = summaryGeneration.summaryStatus;
+    const previous = previousSummaryStatusRef.current;
+    previousSummaryStatusRef.current = status;
+    if (!summaryMarkdown) return;
+    const justGenerated = status === 'completed' && previous !== null && previous !== 'completed';
+    if (justGenerated) {
+      void syncActionItemsFromMarkdown(meeting.id, summaryMarkdown, true).catch(() => {});
+      actionItemsSyncedRef.current = meeting.id;
+    } else if (actionItemsSyncedRef.current !== meeting.id) {
+      actionItemsSyncedRef.current = meeting.id;
+      void syncActionItemsFromMarkdown(meeting.id, summaryMarkdown, false).catch(() => {});
     }
-  };
+  }, [meeting.id, summaryMarkdown, summaryGeneration.summaryStatus]);
+
+  // Suggest a template from the title and the opening of the transcript.
+  useEffect(() => {
+    if (templateRecommendedRef.current || templates.availableTemplates.length === 0) return;
+    const sample = meetingData.transcripts.slice(0, 40).map((seg: { text: string }) => seg.text).join(' ');
+    if (!sample && !(meetingData.meetingTitle || meeting.title)) return;
+    templateRecommendedRef.current = true;
+    templates.recommendFor(meetingData.meetingTitle || meeting.title, sample);
+  }, [templates.availableTemplates.length, templates.recommendFor, meetingData.transcripts, meetingData.meetingTitle, meeting.title]);
 
   // Track page view
   useEffect(() => {
@@ -257,13 +255,35 @@ export default function PageContent({
     onAutoGenerateComplete,
   ]);
 
+  // Only trusted once every segment is loaded; a partial page would understate it.
+  const meetingDurationSeconds = (() => {
+    if (hasMore) return null;
+    const list: any[] = segments ?? meetingData.transcripts ?? [];
+    let max = 0;
+    for (const seg of list) {
+      const end = Number(seg?.endTime ?? seg?.audio_end_time ?? seg?.timestamp ?? seg?.audio_start_time ?? 0);
+      if (Number.isFinite(end) && end > max) max = end;
+    }
+    return max > 0 ? max : null;
+  })();
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, ease: 'easeOut' }}
-      className="flex flex-col h-screen min-w-0 bg-gray-50"
+      className="flex flex-col h-screen min-w-0 bg-background"
     >
+      <MeetingHeader
+        meetingId={meeting.id}
+        title={meetingData.meetingTitle || meeting.title || t('live.untitled')}
+        createdAt={meeting.created_at}
+        segmentCount={totalCount ?? meetingData.transcripts.length}
+        durationSeconds={meetingDurationSeconds}
+        hasSummary={hasVisibleSummaryContent(meetingData.aiSummary)}
+        onTitleSaved={meetingData.updateMeetingTitle}
+        onExport={() => setExportOpen(true)}
+      />
       <div className="flex flex-1 min-w-0 overflow-hidden">
         <MeetingDetailsSplitView
           activeTab={activeTab}
@@ -290,11 +310,17 @@ export default function PageContent({
               meetingId={meeting.id}
               meetingFolderPath={meeting.folder_path}
               onRefetchTranscripts={onRefetchTranscripts}
-              onExportMarkdown={() => handleExportMarkdown('both')}
-              isExporting={exporting}
+              onExportMarkdown={() => setExportOpen(true)}
+              isExporting={exportOpen}
+              focusTime={focusTime}
+              highlightQuery={highlightQuery}
             />
           }
           summary={
+            <MeetingSidePane
+              meetingId={meeting.id}
+              summaryMarkdown={summaryMarkdown}
+              summary={
             <SummaryPanel
               meeting={meeting}
               meetingTitle={meetingData.meetingTitle}
@@ -330,10 +356,21 @@ export default function PageContent({
               }}
               isModelConfigLoading={isModelConfigLoading}
               onOpenModelSettings={handleRegisterModalOpen}
+              recommendedTemplate={templates.recommendedTemplate}
+            />
+              }
             />
           }
         />
       </div>
+      <ExportDialog
+        open={exportOpen}
+        onOpenChange={setExportOpen}
+        meetingIds={[meeting.id]}
+        title={meetingData.meetingTitle || meeting.title}
+        summaryOverride={meetingData.aiSummary}
+        onExported={() => void Analytics.track('meeting_exported', {})}
+      />
     </motion.div>
   );
 }

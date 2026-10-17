@@ -1,0 +1,37 @@
+{
+  "name": "投决会纪要",
+  "description": "投资决策会：项目要点、投资亮点与风险、讨论分歧、表决结论和交割条件。",
+  "sections": [
+    {
+      "title": "项目概况",
+      "instruction": "概括项目名称、所处行业、阶段、本轮融资金额、估值和拟投金额。",
+      "format": "paragraph"
+    },
+    {
+      "title": "投资亮点",
+      "instruction": "列出会上认可的核心投资逻辑和亮点。",
+      "format": "list"
+    },
+    {
+      "title": "主要风险",
+      "instruction": "列出提出的业务、财务、法律、团队、市场等风险，以及对应的缓释措施。",
+      "format": "list"
+    },
+    {
+      "title": "讨论与分歧",
+      "instruction": "记录委员的主要观点和分歧，注明发言人（如有）。",
+      "format": "list"
+    },
+    {
+      "title": "表决结论",
+      "instruction": "写明表决结果（通过/有条件通过/否决/暂缓）及理由。",
+      "format": "paragraph"
+    },
+    {
+      "title": "投资条件与待办",
+      "instruction": "列出交割前提条件、需补充的尽调事项和负责人、时间。",
+      "format": "list",
+      "item_format": "| 负责人 | 事项 | 截止时间 |\n| --- | --- | --- |"
+    }
+  ]
+}

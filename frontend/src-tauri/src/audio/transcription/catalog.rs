@@ -108,25 +108,36 @@ pub const PROVIDERS: &[SpeechProviderDescriptor] = &[
         api_key_url: Some("https://elevenlabs.io/app/settings/api-keys"),
     },
     SpeechProviderDescriptor {
-        id: "groq",
-        display_name: "Groq",
+        id: "siliconflow",
+        display_name: "SiliconFlow · SenseVoice",
         kind: ProviderKind::Cloud,
-        status: ProviderStatus::NotImplemented,
+        status: ProviderStatus::Available,
         supported_languages: None,
         requires_api_key: true,
-        models: &["whisper-large-v3", "whisper-large-v3-turbo"],
-        notes: "Cloud provider. Not wired up yet — selecting it does not upload audio.",
+        models: &["FunAudioLLM/SenseVoiceSmall", "TeleAI/TeleSpeechASR"],
+        notes: "Cloud transcription via SiliconFlow (api.siliconflow.cn). Strong on Chinese and mixed Chinese/English; audio segments are uploaded.",
+        api_key_url: Some("https://cloud.siliconflow.cn/account/ak"),
+    },
+    SpeechProviderDescriptor {
+        id: "groq",
+        display_name: "Groq Whisper",
+        kind: ProviderKind::Cloud,
+        status: ProviderStatus::Available,
+        supported_languages: None,
+        requires_api_key: true,
+        models: &["whisper-large-v3-turbo", "whisper-large-v3"],
+        notes: "Cloud Whisper large-v3 on Groq. Very fast and multilingual; audio segments are uploaded.",
         api_key_url: Some("https://console.groq.com/keys"),
     },
     SpeechProviderDescriptor {
         id: "openai",
         display_name: "OpenAI",
         kind: ProviderKind::Cloud,
-        status: ProviderStatus::NotImplemented,
+        status: ProviderStatus::Available,
         supported_languages: None,
         requires_api_key: true,
-        models: &["whisper-1", "gpt-4o-transcribe"],
-        notes: "Cloud provider. Not wired up yet — selecting it does not upload audio.",
+        models: &["gpt-4o-mini-transcribe", "gpt-4o-transcribe", "whisper-1"],
+        notes: "Cloud transcription via OpenAI. Multilingual; audio segments are uploaded.",
         api_key_url: Some("https://platform.openai.com/api-keys"),
     },
 ];
@@ -219,8 +230,8 @@ pub fn validate_language(provider_id: &str, language: Option<&str>) -> Result<()
 
 /// Whether switching to this provider is allowed.
 ///
-/// Cloud providers stay selectable in the UI but are refused here, which is the
-/// single chokepoint that guarantees no audio is uploaded while their
+/// Reserved providers stay visible in the UI but are refused here, which is the
+/// single chokepoint that guarantees no audio is uploaded to a provider whose
 /// implementation is marked `NotImplemented`.
 pub fn ensure_selectable(provider_id: &str) -> Result<(), String> {
     let Some(provider) = find_provider(provider_id) else {
@@ -283,8 +294,13 @@ where
 
     // Fallback: first usable provider that accepts this language. Catalog order
     // puts Parakeet first, so a multilingual request naturally lands on Whisper.
+    //
+    // Only local providers are eligible: switching to a cloud provider would
+    // upload audio the user never agreed to send. Cloud is used only when the
+    // user configured it explicitly (handled above).
     PROVIDERS
         .iter()
+        .filter(|p| p.kind == ProviderKind::Local)
         .find(|p| is_usable(p) && validate_language(p.id, language).is_ok())
         .map(|p| p.id)
 }
@@ -301,24 +317,41 @@ mod tests {
     }
 
     #[test]
-    fn every_cloud_provider_is_marked_not_implemented() {
-        // The safety property: while cloud ASR is unimplemented, none of them
-        // may be selectable, so no audio can leave the machine.
+    fn every_cloud_provider_needs_a_key_and_is_either_wired_or_refused() {
         for provider in PROVIDERS.iter().filter(|p| p.kind == ProviderKind::Cloud) {
-            assert_eq!(
-                provider.status,
-                ProviderStatus::NotImplemented,
-                "{} is cloud but selectable",
-                provider.id
-            );
-            assert!(
-                ensure_selectable(provider.id).is_err(),
-                "{} must be refused",
-                provider.id
-            );
             assert!(provider.requires_api_key, "{} needs a key", provider.id);
             assert!(provider.api_key_url.is_some(), "{} needs a key URL", provider.id);
+            let wired = crate::audio::transcription::cloud_provider::endpoint_for(provider.id).is_some();
+            match provider.status {
+                // Available cloud providers must have a real implementation.
+                ProviderStatus::Available => assert!(wired, "{} is selectable but not wired", provider.id),
+                ProviderStatus::NotImplemented => {
+                    assert!(ensure_selectable(provider.id).is_err(), "{} must be refused", provider.id)
+                }
+            }
         }
+    }
+
+    #[test]
+    fn language_fallback_never_switches_to_a_cloud_provider() {
+        // Even if every provider is "ready", an automatic switch must stay local.
+        for configured in ["parakeet", "localWhisper", "deepgram", "nope"] {
+            for lang in [Some("zh"), Some("en"), Some("ja"), None] {
+                if let Some(chosen) = select_provider_for_language(configured, lang, |_| true) {
+                    if chosen != configured {
+                        assert!(!is_cloud(chosen), "{configured}/{lang:?} fell back to cloud {chosen}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn explicitly_configured_cloud_provider_is_kept() {
+        assert_eq!(
+            select_provider_for_language("siliconflow", Some("zh"), |_| true),
+            Some("siliconflow")
+        );
     }
 
     #[test]

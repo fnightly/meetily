@@ -1,22 +1,19 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { toast } from 'sonner';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
 import { Label } from './ui/label';
-import { Eye, EyeOff, Lock, Unlock } from 'lucide-react';
+import { CheckCircle2, ExternalLink, Eye, EyeOff, Loader2, ShieldCheck, CloudUpload } from 'lucide-react';
 import { ModelManager } from './WhisperModelManager';
 import { ParakeetModelManager } from './ParakeetModelManager';
 import { useSpeechProviders, type SpeechProviderView } from '@/hooks/useSpeechProviders';
-
-/** Prefix for the provider list, by where the audio goes. */
-function providerIcon(provider: SpeechProviderView): string {
-    return provider.kind === 'cloud' ? '☁️ ' : '🏠 ';
-}
-
+import { useI18n } from '@/contexts/I18nContext';
+import { cn } from '@/lib/utils';
 
 export interface TranscriptModelProps {
-    provider: 'localWhisper' | 'parakeet' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
+    provider: 'localWhisper' | 'parakeet' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai' | 'siliconflow';
     model: string;
     apiKey?: string | null;
 }
@@ -27,18 +24,41 @@ export interface TranscriptSettingsProps {
     onModelSelect?: () => void;
 }
 
+/** Used before the backend catalog arrives (and if it fails), so the panel is never blank. */
+const FALLBACK_PROVIDERS: SpeechProviderView[] = [
+    {
+        id: 'parakeet', display_name: 'Parakeet', kind: 'local', status: 'available',
+        supported_languages: ['en'], requires_api_key: false, has_api_key: false,
+        models: [], notes: '', api_key_url: null, selectable: true,
+    },
+    {
+        id: 'localWhisper', display_name: 'Local Whisper', kind: 'local', status: 'available',
+        supported_languages: null, requires_api_key: false, has_api_key: false,
+        models: [], notes: '', api_key_url: null, selectable: true,
+    },
+];
+
+function isLocalId(id: string) {
+    return id === 'localWhisper' || id === 'parakeet';
+}
+
 export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelConfig, onModelSelect }: TranscriptSettingsProps) {
-    const [apiKey, setApiKey] = useState<string | null>(transcriptModelConfig.apiKey || null);
-    const [showApiKey, setShowApiKey] = useState<boolean>(false);
-    const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(true);
-    const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
+    const { t } = useI18n();
     const [uiProvider, setUiProvider] = useState<TranscriptModelProps['provider']>(transcriptModelConfig.provider);
 
     // Provider capabilities come from the backend catalog (single source of
     // truth); the UI must not hardcode which providers exist or what they support.
-    const { providers, active, validateSelection } = useSpeechProviders();
-
+    const { providers: catalog, active, validateSelection, refresh } = useSpeechProviders();
+    const providers = catalog && catalog.length > 0 ? catalog : FALLBACK_PROVIDERS;
     const selectedProvider = providers.find((p) => p.id === uiProvider);
+
+    // Cloud draft state
+    const [cloudModel, setCloudModel] = useState('');
+    const [apiKey, setApiKey] = useState('');
+    const [showApiKey, setShowApiKey] = useState(false);
+    const [isTesting, setIsTesting] = useState(false);
+    const [isSaving, setIsSaving] = useState(false);
+    const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
 
     // Surface a provider/language mismatch as soon as the user opens settings,
     // rather than letting the failure appear when they hit record.
@@ -62,228 +82,267 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         setUiProvider(transcriptModelConfig.provider);
     }, [transcriptModelConfig.provider]);
 
+    // Reset the cloud draft whenever the selected cloud provider changes.
     useEffect(() => {
-        if (transcriptModelConfig.provider === 'localWhisper' || transcriptModelConfig.provider === 'parakeet') {
-            setApiKey(null);
-        }
-    }, [transcriptModelConfig.provider]);
+        setTestResult(null);
+        setApiKey('');
+        setShowApiKey(false);
+        if (!selectedProvider || isLocalId(selectedProvider.id)) return;
+        const savedModel =
+            transcriptModelConfig.provider === selectedProvider.id ? transcriptModelConfig.model : '';
+        setCloudModel(savedModel || selectedProvider.models[0] || '');
+    }, [selectedProvider?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const fetchApiKey = async (provider: string) => {
-        try {
-
-            const data = await invoke('api_get_transcript_api_key', { provider }) as string;
-
-            setApiKey(data || '');
-        } catch (err) {
-            console.error('Error fetching API key:', err);
-            setApiKey(null);
-        }
-    };
-    const configuredProvider = providers.find((p) => p.id === transcriptModelConfig.provider);
-    const requiresApiKey = configuredProvider?.requires_api_key ?? false;
-
-    const handleInputClick = () => {
-        if (isApiKeyLocked) {
-            setIsLockButtonVibrating(true);
-            setTimeout(() => setIsLockButtonVibrating(false), 500);
-        }
+    const noteFor = (p: SpeechProviderView) => {
+        const key = `speech.note.${p.id}`;
+        const translated = t(key);
+        return translated === key ? p.notes : translated;
     };
 
     const handleWhisperModelSelect = (modelName: string) => {
-        // Always update config when model is selected, regardless of current provider
-        // This ensures the model is set when user switches back
-        setTranscriptModelConfig({
-            ...transcriptModelConfig,
-            provider: 'localWhisper', // Ensure provider is set correctly
-            model: modelName
-        });
-        // Close modal after selection
-        if (onModelSelect) {
-            onModelSelect();
-        }
+        setTranscriptModelConfig({ ...transcriptModelConfig, provider: 'localWhisper', model: modelName });
+        onModelSelect?.();
     };
 
     const handleParakeetModelSelect = (modelName: string) => {
-        // Always update config when model is selected, regardless of current provider
-        // This ensures the model is set when user switches back
-        setTranscriptModelConfig({
-            ...transcriptModelConfig,
-            provider: 'parakeet', // Ensure provider is set correctly
-            model: modelName
-        });
-        // Close modal after selection
-        if (onModelSelect) {
-            onModelSelect();
+        setTranscriptModelConfig({ ...transcriptModelConfig, provider: 'parakeet', model: modelName });
+        onModelSelect?.();
+    };
+
+    const hasUsableKey = !!apiKey.trim() || !!selectedProvider?.has_api_key;
+
+    const handleTest = async () => {
+        if (!selectedProvider) return;
+        setIsTesting(true);
+        setTestResult(null);
+        try {
+            const label = await invoke<string>('api_test_speech_provider', {
+                provider: selectedProvider.id,
+                model: cloudModel || null,
+                apiKey: apiKey.trim() || null,
+            });
+            setTestResult({ ok: true, message: t('speech.testOk', { target: label }) });
+        } catch (e) {
+            setTestResult({ ok: false, message: e instanceof Error ? e.message : String(e) });
+        } finally {
+            setIsTesting(false);
         }
     };
 
+    const handleSaveCloud = async () => {
+        if (!selectedProvider) return;
+        if (!hasUsableKey) {
+            toast.error(t('speech.needKey'));
+            return;
+        }
+        setIsSaving(true);
+        try {
+            await invoke('api_save_transcript_config', {
+                provider: selectedProvider.id,
+                model: cloudModel,
+                apiKey: apiKey.trim() || null,
+            });
+            setTranscriptModelConfig({
+                provider: selectedProvider.id as TranscriptModelProps['provider'],
+                model: cloudModel,
+                apiKey: null,
+            });
+            setApiKey('');
+            await refresh();
+            toast.success(t('speech.saved', { name: selectedProvider.display_name }));
+            onModelSelect?.();
+        } catch (e) {
+            toast.error(t('speech.saveFailed'), { description: e instanceof Error ? e.message : String(e) });
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    const groups: { kind: 'local' | 'cloud'; title: string; hint: string }[] = [
+        { kind: 'local', title: t('speech.group.local'), hint: t('speech.group.localHint') },
+        { kind: 'cloud', title: t('speech.group.cloud'), hint: t('speech.group.cloudHint') },
+    ];
+
+    const isActive = (p: SpeechProviderView) => transcriptModelConfig.provider === p.id;
+
     return (
-        <div>
-            <div>
-                {/* <div className="flex justify-between items-center mb-4">
-                    <h3 className="text-lg font-semibold text-gray-900">Transcript Settings</h3>
-                </div> */}
-                <div className="space-y-4 pb-6">
+        <div className="space-y-6 pb-6">
+            {groups.map((group) => {
+                // Usable providers first; reserved ones sink to the end of their group.
+                const items = providers
+                    .filter((p) => p.kind === group.kind)
+                    .sort((a, b) => Number(b.selectable) - Number(a.selectable));
+                if (items.length === 0) return null;
+                return (
+                    <section key={group.kind} aria-label={group.title}>
+                        <div className="mb-2 flex items-baseline justify-between">
+                            <h4 className="flex items-center gap-1.5 text-sm font-semibold text-gray-900">
+                                {group.kind === 'local' ? (
+                                    <ShieldCheck className="h-4 w-4 text-emerald-600" />
+                                ) : (
+                                    <CloudUpload className="h-4 w-4 text-sky-600" />
+                                )}
+                                {group.title}
+                            </h4>
+                            <span className="text-xs text-gray-500">{group.hint}</span>
+                        </div>
+                        <div role="radiogroup" aria-label={group.title} className="grid gap-2 sm:grid-cols-2">
+                            {items.map((p) => {
+                                const selected = uiProvider === p.id;
+                                return (
+                                    <button
+                                        key={p.id}
+                                        type="button"
+                                        role="radio"
+                                        aria-checked={selected}
+                                        disabled={!p.selectable}
+                                        onClick={() => setUiProvider(p.id as TranscriptModelProps['provider'])}
+                                        className={cn(
+                                            'rounded-lg border p-3 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500',
+                                            selected ? 'border-blue-500 bg-blue-50/60' : 'border-gray-200 bg-white hover:bg-gray-50',
+                                            !p.selectable && 'cursor-not-allowed opacity-50 hover:bg-white',
+                                        )}
+                                    >
+                                        <div className="flex items-center justify-between gap-2">
+                                            <span className="text-sm font-medium text-gray-900">{p.display_name}</span>
+                                            <span className="flex shrink-0 gap-1">
+                                                {isActive(p) && (
+                                                    <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">
+                                                        {t('speech.badge.inUse')}
+                                                    </span>
+                                                )}
+                                                {p.supported_languages?.length === 1 && p.supported_languages[0] === 'en' && (
+                                                    <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-600">
+                                                        {t('speech.badge.englishOnly')}
+                                                    </span>
+                                                )}
+                                                {p.kind === 'cloud' && p.selectable && p.has_api_key && (
+                                                    <span className="rounded bg-sky-100 px-1.5 py-0.5 text-[10px] text-sky-700">
+                                                        {t('speech.badge.keySaved')}
+                                                    </span>
+                                                )}
+                                                {!p.selectable && (
+                                                    <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">
+                                                        {t('speech.badge.comingSoon')}
+                                                    </span>
+                                                )}
+                                            </span>
+                                        </div>
+                                        <p className="mt-1 line-clamp-2 text-xs text-gray-500">{noteFor(p)}</p>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </section>
+                );
+            })}
+
+            {selectionWarning && (
+                <p role="status" className="rounded border border-red-200 bg-red-50 p-2 text-xs text-red-700">
+                    {selectionWarning}
+                </p>
+            )}
+
+            {uiProvider === 'localWhisper' && (
+                <ModelManager
+                    selectedModel={transcriptModelConfig.provider === 'localWhisper' ? transcriptModelConfig.model : undefined}
+                    onModelSelect={handleWhisperModelSelect}
+                    autoSave={true}
+                />
+            )}
+
+            {uiProvider === 'parakeet' && (
+                <ParakeetModelManager
+                    selectedModel={transcriptModelConfig.provider === 'parakeet' ? transcriptModelConfig.model : undefined}
+                    onModelSelect={handleParakeetModelSelect}
+                    autoSave={true}
+                />
+            )}
+
+            {selectedProvider && selectedProvider.kind === 'cloud' && selectedProvider.selectable && (
+                <section className="space-y-4 rounded-lg border border-gray-200 bg-white p-4" aria-label={selectedProvider.display_name}>
+                    <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                        {t('speech.cloudPrivacy', { name: selectedProvider.display_name })}
+                    </div>
+
                     <div>
-                        <Label className="block text-sm font-medium text-gray-700 mb-1">
-                            Transcript Model
+                        <Label htmlFor="cloud-stt-model" className="mb-1 block text-sm font-medium text-gray-700">
+                            {t('speech.model')}
                         </Label>
-                        <div className="flex space-x-2 mx-1">
-                            <Select
-                                value={uiProvider}
-                                onValueChange={(value) => {
-                                    const provider = value as TranscriptModelProps['provider'];
-                                    setUiProvider(provider);
-                                    if (provider !== 'localWhisper' && provider !== 'parakeet') {
-                                        fetchApiKey(provider);
-                                    }
-                                }}
+                        <Select value={cloudModel} onValueChange={setCloudModel}>
+                            <SelectTrigger id="cloud-stt-model">
+                                <SelectValue placeholder={t('speech.selectModel')} />
+                            </SelectTrigger>
+                            <SelectContent>
+                                {selectedProvider.models.map((model) => (
+                                    <SelectItem key={model} value={model}>{model}</SelectItem>
+                                ))}
+                            </SelectContent>
+                        </Select>
+                    </div>
+
+                    <div>
+                        <div className="mb-1 flex items-center justify-between">
+                            <Label htmlFor="cloud-stt-key" className="text-sm font-medium text-gray-700">API Key</Label>
+                            {selectedProvider.api_key_url && (
+                                <a
+                                    href={selectedProvider.api_key_url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline"
+                                >
+                                    {t('speech.getKey')} <ExternalLink className="h-3 w-3" />
+                                </a>
+                            )}
+                        </div>
+                        <div className="relative">
+                            <Input
+                                id="cloud-stt-key"
+                                type={showApiKey ? 'text' : 'password'}
+                                autoComplete="off"
+                                className="pr-10"
+                                value={apiKey}
+                                onChange={(e) => setApiKey(e.target.value)}
+                                placeholder={selectedProvider.has_api_key ? t('speech.keyStoredPlaceholder') : t('speech.keyPlaceholder')}
+                            />
+                            <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                className="absolute inset-y-0 right-0"
+                                onClick={() => setShowApiKey(!showApiKey)}
+                                aria-label={showApiKey ? t('speech.hideKey') : t('speech.showKey')}
                             >
-                                <SelectTrigger className='focus:ring-1 focus:ring-blue-500 focus:border-blue-500'>
-                                    <SelectValue placeholder="Select provider" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    {providers.length === 0 && (
-                                        <>
-                                            <SelectItem value="parakeet">⚡ Parakeet</SelectItem>
-                                            <SelectItem value="localWhisper">🏠 Local Whisper</SelectItem>
-                                        </>
-                                    )}
-                                    {providers.map((provider) => (
-                                        <SelectItem
-                                            key={provider.id}
-                                            value={provider.id}
-                                            disabled={!provider.selectable}
-                                            title={provider.notes}
-                                        >
-                                            {providerIcon(provider)}
-                                            {provider.display_name}
-                                            {!provider.selectable && ' — not available yet'}
-                                            {provider.selectable && provider.requires_api_key && ' (Cloud)'}
-                                        </SelectItem>
-                                    ))}
-                                </SelectContent>
-                            </Select>
-
-                            {/* Explain the selected provider's limits inline, so a
-                                mismatch is visible before recording starts. */}
-                            {selectedProvider?.notes && (
-                                <p className="text-xs text-gray-500 mt-2">{selectedProvider.notes}</p>
-                            )}
-                            {selectedProvider && !selectedProvider.selectable && (
-                                <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2 mt-2">
-                                    Reserved but not implemented: selecting this provider does not upload your
-                                    audio anywhere. Use a local provider to transcribe.
-                                </p>
-                            )}
-                            {selectionWarning && (
-                                <p
-                                    role="status"
-                                    className="text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2 mt-2"
-                                >
-                                    {selectionWarning}
-                                </p>
-                            )}
-
-                            {uiProvider !== 'localWhisper' && uiProvider !== 'parakeet' && (
-                                <Select
-                                    value={transcriptModelConfig.model}
-                                    onValueChange={(value) => {
-                                        const model = value as TranscriptModelProps['model'];
-                                        setTranscriptModelConfig({ ...transcriptModelConfig, provider: uiProvider, model });
-                                    }}
-                                >
-                                    <SelectTrigger className='focus:ring-1 focus:ring-blue-500 focus:border-blue-500'>
-                                        <SelectValue placeholder="Select model" />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                        {(selectedProvider?.models ?? []).map((model) => (
-                                            <SelectItem key={model} value={model}>{model}</SelectItem>
-                                        ))}
-                                    </SelectContent>
-                                </Select>
-                            )}
-
+                                {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                            </Button>
                         </div>
                     </div>
 
-                    {uiProvider === 'localWhisper' && (
-                        <div className="mt-6">
-                            <ModelManager
-                                selectedModel={transcriptModelConfig.provider === 'localWhisper' ? transcriptModelConfig.model : undefined}
-                                onModelSelect={handleWhisperModelSelect}
-                                autoSave={true}
-                            />
-                        </div>
+                    {testResult && (
+                        <p
+                            role="status"
+                            className={cn(
+                                'rounded border p-2 text-xs',
+                                testResult.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-700',
+                            )}
+                        >
+                            {testResult.message}
+                        </p>
                     )}
 
-                    {uiProvider === 'parakeet' && (
-                        <div className="mt-6">
-                            <ParakeetModelManager
-                                selectedModel={transcriptModelConfig.provider === 'parakeet' ? transcriptModelConfig.model : undefined}
-                                onModelSelect={handleParakeetModelSelect}
-                                autoSave={true}
-                            />
-                        </div>
-                    )}
-
-
-                    {requiresApiKey && (
-                        <div>
-                            <Label className="block text-sm font-medium text-gray-700 mb-1">
-                                API Key
-                            </Label>
-                            <div className="relative mx-1">
-                                <Input
-                                    type={showApiKey ? "text" : "password"}
-                                    className={`pr-24 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 ${isApiKeyLocked ? 'bg-gray-100 cursor-not-allowed' : ''
-                                        }`}
-                                    value={apiKey || ''}
-                                    onChange={(e) => setApiKey(e.target.value)}
-                                    disabled={isApiKeyLocked}
-                                    onClick={handleInputClick}
-                                    placeholder="Enter your API key"
-                                />
-                                {isApiKeyLocked && (
-                                    <div
-                                        onClick={handleInputClick}
-                                        className="absolute inset-0 flex items-center justify-center bg-gray-100 bg-opacity-50 rounded-md cursor-not-allowed"
-                                    />
-                                )}
-                                <div className="absolute inset-y-0 right-0 pr-1 flex items-center">
-                                    <Button
-                                        type="button"
-                                        variant="ghost"
-                                        size="icon"
-                                        onClick={() => setIsApiKeyLocked(!isApiKeyLocked)}
-                                        className={`transition-colors duration-200 ${isLockButtonVibrating ? 'animate-vibrate text-red-500' : ''
-                                            }`}
-                                        title={isApiKeyLocked ? "Unlock to edit" : "Lock to prevent editing"}
-                                    >
-                                        {isApiKeyLocked ? <Lock className="h-4 w-4" /> : <Unlock className="h-4 w-4" />}
-                                    </Button>
-                                    <Button
-                                        type="button"
-                                        variant="ghost"
-                                        size="icon"
-                                        onClick={() => setShowApiKey(!showApiKey)}
-                                    >
-                                        {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                                    </Button>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-                </div>
-            </div>
-        </div >
-    )
+                    <div className="flex flex-wrap gap-2">
+                        <Button type="button" variant="outline" onClick={handleTest} disabled={isTesting || !hasUsableKey || !cloudModel}>
+                            {isTesting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
+                            {isTesting ? t('speech.testing') : t('speech.test')}
+                        </Button>
+                        <Button type="button" onClick={handleSaveCloud} disabled={isSaving || !hasUsableKey || !cloudModel}>
+                            {isSaving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                            {isActive(selectedProvider) ? t('speech.saveChanges') : t('speech.useThis')}
+                        </Button>
+                    </div>
+                    <p className="text-xs text-gray-500">{t('speech.cloudBatchHint')}</p>
+                </section>
+            )}
+        </div>
+    );
 }
-
-
-
-
-
-
-
-

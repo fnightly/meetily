@@ -14,6 +14,7 @@ describe('empty summary state', () => {
 
     expect(html).toContain('role="alert"');
     expect(html).toContain('Summary request failed');
-    expect(html).toContain('Retry summary');
+    // Default locale is Chinese; the retry label replaces the generate label.
+    expect(html).toContain('重新生成');
   });
 });

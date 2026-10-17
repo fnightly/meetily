@@ -163,6 +163,89 @@ use tauri_plugin_store::StoreExt;
 const DICTIONARY_STORE: &str = "dictionary.json";
 const DICTIONARY_KEY: &str = "dictionary";
 
+// ---------------------------------------------------------------------------
+// Active vocabulary for the local engines.
+//
+// Cloud transcription and summaries read the dictionary through the AppHandle,
+// but the Whisper/Parakeet engines run without one. The last loaded or saved
+// dictionary is mirrored here so local transcription benefits too: Whisper gets
+// the terms as its initial prompt, and every local engine (Parakeet has no
+// prompt input) gets the "misheard as → term" corrections applied to its text.
+// ---------------------------------------------------------------------------
+
+static ACTIVE_DICTIONARY: once_cell::sync::Lazy<std::sync::RwLock<UserDictionary>> =
+    once_cell::sync::Lazy::new(|| std::sync::RwLock::new(UserDictionary::default()));
+
+/// Replace the dictionary the local engines use.
+pub fn set_active_dictionary(dictionary: &UserDictionary) {
+    if let Ok(mut guard) = ACTIVE_DICTIONARY.write() {
+        *guard = dictionary.clone();
+    }
+}
+
+/// Terms as a Whisper initial prompt, bounded so it stays well inside the
+/// decoder's prompt budget (~224 tokens; CJK terms cost about one per char).
+pub fn active_vocabulary_prompt() -> Option<String> {
+    let guard = ACTIVE_DICTIONARY.read().ok()?;
+    vocabulary_prompt(&guard, 160)
+}
+
+pub(crate) fn vocabulary_prompt(dictionary: &UserDictionary, max_chars: usize) -> Option<String> {
+    let mut prompt = String::new();
+    for entry in &dictionary.entries {
+        let term = entry.term.trim();
+        if term.is_empty() {
+            continue;
+        }
+        let extra = term.chars().count() + if prompt.is_empty() { 0 } else { 1 };
+        if prompt.chars().count() + extra > max_chars {
+            break;
+        }
+        if !prompt.is_empty() {
+            // An ideographic comma reads as natural context for Chinese and is
+            // harmless for Latin terms.
+            prompt.push('、');
+        }
+        prompt.push_str(term);
+    }
+    (!prompt.is_empty()).then_some(prompt)
+}
+
+/// Apply the active dictionary's corrections to engine output.
+pub fn apply_active_corrections(text: &str) -> String {
+    match ACTIVE_DICTIONARY.read() {
+        Ok(guard) => apply_corrections(&guard, text),
+        Err(_) => text.to_string(),
+    }
+}
+
+/// Replace every "misheard as" variant with its exact term.
+///
+/// Latin variants match case-insensitively on word boundaries so "meetly" fixes
+/// "Meetly" but not "meetlyness"; CJK variants match as plain substrings since
+/// Chinese has no word spacing.
+pub fn apply_corrections(dictionary: &UserDictionary, text: &str) -> String {
+    let mut out = text.to_string();
+    for entry in &dictionary.entries {
+        let Some(misheard) = entry.misheard_as.as_deref().map(str::trim) else {
+            continue;
+        };
+        if misheard.is_empty() || misheard == entry.term {
+            continue;
+        }
+        if misheard.chars().all(|c| c.is_ascii()) {
+            let pattern = format!(r"(?i)\b{}\b", regex::escape(misheard));
+            if let Ok(re) = regex::Regex::new(&pattern) {
+                out = re.replace_all(&out, regex::NoExpand(entry.term.as_str())).into_owned();
+            }
+        } else {
+            out = out.replace(misheard, &entry.term);
+        }
+    }
+    out
+}
+
+
 /// Read the persisted vocabulary, falling back to empty on any problem.
 ///
 /// Infallible on purpose, matching the storage config: a missing or corrupt
@@ -179,7 +262,11 @@ pub fn load_dictionary<R: Runtime>(app: &AppHandle<R>) -> UserDictionary {
 
     match store.get(DICTIONARY_KEY) {
         Some(value) => match serde_json::from_value::<UserDictionary>(value.clone()) {
-            Ok(dictionary) => dictionary.sanitized(),
+            Ok(dictionary) => {
+                let dictionary = dictionary.sanitized();
+                set_active_dictionary(&dictionary);
+                dictionary
+            }
             Err(e) => {
                 log::warn!("Failed to deserialize dictionary: {e}; using an empty dictionary");
                 UserDictionary::default()
@@ -210,6 +297,7 @@ pub fn save_dictionary<R: Runtime>(
         .map_err(|e| format!("Failed to save dictionary: {e}"))?;
 
     log::info!("Saved dictionary with {} entries", cleaned.len());
+    set_active_dictionary(&cleaned);
 
     Ok(cleaned)
 }

@@ -48,11 +48,31 @@ async function withRecordingFolders(meetings: CurrentMeeting[]): Promise<Current
 }
 
 // Search result type for transcript search
+export interface SearchHit {
+  source: 'title' | 'label' | 'summary' | 'notes' | 'transcript' | string;
+  snippet: string;
+  transcript_id: string | null;
+  audio_start_time: number | null;
+  speaker: string | null;
+}
+
+/** One meeting's grouped search hits (`api_search_meetings`). */
 interface TranscriptSearchResult {
   id: string;
   title: string;
   matchContext: string;
   timestamp: string;
+  hits: SearchHit[];
+  totalHits: number;
+}
+
+interface MeetingSearchResponse {
+  meeting_id: string;
+  title: string;
+  created_at: string;
+  hits: SearchHit[];
+  total_hits: number;
+  score: number;
 }
 
 interface SummaryPoll {
@@ -121,7 +141,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const [recordingsLoading, setRecordingsLoading] = useState(true);
   const [recordingsError, setRecordingsError] = useState<string | null>(null);
   const [isMeetingActive, setIsMeetingActive] = useState(false);
-  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [searchResults, setSearchResults] = useState<TranscriptSearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [serverAddress, setServerAddress] = useState('');
   const [transcriptServerAddress, setTranscriptServerAddress] = useState('');
@@ -227,7 +247,9 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   };
 
   // Function to search through meeting transcripts
+  const latestSearchRef = React.useRef('');
   const searchTranscripts = async (query: string) => {
+    latestSearchRef.current = query;
     if (!query.trim()) {
       setSearchResults([]);
       return;
@@ -237,8 +259,17 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       setIsSearching(true);
 
 
-      const results = await invoke('api_search_transcripts', { query }) as TranscriptSearchResult[];
-      setSearchResults(results);
+      const results = await invoke<MeetingSearchResponse[]>('api_search_meetings', { query, limit: 60 });
+      // A newer query may have started while this one ran.
+      if (latestSearchRef.current !== query) return;
+      setSearchResults(results.map((r): TranscriptSearchResult => ({
+        id: r.meeting_id,
+        title: r.title,
+        matchContext: r.hits[0]?.snippet ?? '',
+        timestamp: r.created_at,
+        hits: r.hits,
+        totalHits: r.total_hits,
+      })));
     } catch (error) {
       console.error('Error searching transcripts:', error);
       setSearchResults([]);

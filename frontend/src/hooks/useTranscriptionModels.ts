@@ -8,7 +8,8 @@ export interface RawModelInfo {
 }
 
 export interface ModelOption {
-  provider: 'whisper' | 'parakeet';
+  /** `whisper` / `parakeet` run locally; any other id is a cloud provider. */
+  provider: 'whisper' | 'parakeet' | 'openai' | 'groq' | 'siliconflow' | (string & {});
   name: string;
   displayName: string;
   size_mb: number;
@@ -77,6 +78,31 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
       console.error('Failed to fetch Parakeet models:', err);
     }
 
+    // Cloud providers the user has configured (selectable + key stored). Listed
+    // after local models so the default never silently becomes an upload.
+    try {
+      const providers = await invoke<Array<{
+        id: string; display_name: string; kind: string; selectable: boolean;
+        has_api_key: boolean; models: string[];
+      }>>('api_list_speech_providers');
+      for (const p of providers ?? []) {
+        if (p.kind !== 'cloud' || !p.selectable || !p.has_api_key) continue;
+        const model =
+          transcriptModelConfig?.provider === p.id && transcriptModelConfig?.model
+            ? transcriptModelConfig.model
+            : p.models[0];
+        if (!model) continue;
+        allModels.push({
+          provider: p.id,
+          name: model,
+          displayName: `☁️ ${p.display_name}: ${model}`,
+          size_mb: 0,
+        });
+      }
+    } catch (err) {
+      console.error('Failed to fetch cloud speech providers:', err);
+    }
+
     setAvailableModels(allModels);
 
     // Set default model based on user's saved configuration
@@ -88,7 +114,8 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
     const configuredMatch = allModels.find(
       (m) =>
         (configuredProvider === 'localWhisper' && m.provider === 'whisper' && m.name === configuredModel) ||
-        (configuredProvider === 'parakeet' && m.provider === 'parakeet' && m.name === configuredModel)
+        (configuredProvider === 'parakeet' && m.provider === 'parakeet' && m.name === configuredModel) ||
+        (m.provider === configuredProvider && m.name === configuredModel)
     );
 
     // Only set default model if user hasn't manually selected one

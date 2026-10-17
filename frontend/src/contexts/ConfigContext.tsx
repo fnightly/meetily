@@ -387,11 +387,44 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     window.dispatchEvent(new CustomEvent('confidenceIndicatorChanged', { detail: checked }));
   }, []);
 
+  // The app store is the source of truth (it survives WebView storage resets
+  // and is readable by the backend); localStorage remains a fast first paint.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const { load } = await import('@tauri-apps/plugin-store');
+        const store = await load('preferences.json', { autoSave: true, defaults: {} });
+        const stored = await store.get<boolean>('isAutoSummary');
+        if (!alive) return;
+        if (typeof stored === 'boolean') {
+          setisAutoSummary(stored);
+          localStorage.setItem('isAutoSummary', String(stored));
+        } else {
+          const legacy = localStorage.getItem('isAutoSummary');
+          if (legacy !== null) await store.set('isAutoSummary', legacy === 'true');
+        }
+      } catch {
+        // Outside Tauri (tests, web preview): localStorage only.
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
   const toggleIsAutoSummary = useCallback((checked: boolean) => {
     setisAutoSummary(checked);
     if (typeof window !== 'undefined') {
       localStorage.setItem('isAutoSummary', checked.toString());
     }
+    void (async () => {
+      try {
+        const { load } = await import('@tauri-apps/plugin-store');
+        const store = await load('preferences.json', { autoSave: true, defaults: {} });
+        await store.set('isAutoSummary', checked);
+      } catch {
+        // localStorage already holds the value.
+      }
+    })();
   }, [])
 
   // Toggle beta feature with localStorage persistence and analytics

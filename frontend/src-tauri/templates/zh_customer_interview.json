@@ -1,0 +1,37 @@
+{
+  "name": "客户访谈",
+  "description": "客户/用户访谈：背景、痛点、需求、对产品的反馈与后续跟进。",
+  "sections": [
+    {
+      "title": "受访者背景",
+      "instruction": "总结受访者的公司、角色、团队规模、当前使用的方案等背景信息。",
+      "format": "paragraph"
+    },
+    {
+      "title": "核心痛点",
+      "instruction": "列出受访者明确表达的问题和痛点，尽量引用原话要点。",
+      "format": "list"
+    },
+    {
+      "title": "需求与期望",
+      "instruction": "列出受访者提出的需求、功能期望和优先级。",
+      "format": "list"
+    },
+    {
+      "title": "对产品/方案的反馈",
+      "instruction": "总结对我方产品或方案的正面评价、疑虑和反对意见。",
+      "format": "list"
+    },
+    {
+      "title": "采购与决策信息",
+      "instruction": "记录预算、决策人、采购流程、时间表、竞品等信息；没有提到则写“未提及”。",
+      "format": "list"
+    },
+    {
+      "title": "后续跟进",
+      "instruction": "列出约定的下一步动作、负责人和时间。",
+      "format": "list",
+      "item_format": "| 负责人 | 事项 | 截止时间 |\n| --- | --- | --- |"
+    }
+  ]
+}

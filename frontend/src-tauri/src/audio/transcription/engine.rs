@@ -100,6 +100,18 @@ pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) 
         return Err(e);
     }
 
+    // Keep a single local model resident: switching engine (or moving to a cloud
+    // provider) releases the other one instead of holding both in memory.
+    // Batch jobs may still be using it, so only when nothing else is running.
+    if super::residency::no_active_jobs() {
+        let keep = match config.provider.as_str() {
+            "localWhisper" => Some("localWhisper"),
+            "parakeet" => Some("parakeet"),
+            _ => None,
+        };
+        super::residency::release_engines_except(keep).await;
+    }
+
     // Validate based on provider
     match config.provider.as_str() {
         "localWhisper" => {
@@ -148,6 +160,16 @@ pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) 
                     Err(e)
                 }
             }
+        }
+        id if super::cloud_provider::is_cloud_transcription_provider(id) => {
+            // Cloud: nothing to load, but the key and model must be present so
+            // the recording does not start only to fail on the first segment.
+            info!("☁️ Validating cloud transcription provider '{}'", id);
+            super::cloud_provider::CloudSpeechProvider::from_settings(app, id, None, None)
+                .await
+                .map(|provider| {
+                    info!("✅ Cloud transcription ready: {} / {}", id, provider.model());
+                })
         }
         other => {
             // Reserved providers (cloud) land here: they are listed in settings
@@ -270,6 +292,12 @@ pub async fn get_or_init_transcription_engine_for<R: Runtime>(
                     Err("Parakeet engine not initialized. This should not happen after validation.".to_string())
                 }
             }
+        }
+        id if super::cloud_provider::is_cloud_transcription_provider(id) => {
+            info!("☁️ Initializing cloud transcription provider '{}'", id);
+            let provider =
+                super::cloud_provider::CloudSpeechProvider::from_settings(app, id, None, None).await?;
+            Ok(TranscriptionEngine::Provider(Arc::new(provider)))
         }
         "localWhisper" | _ => {
             // `localWhisper` is the fallback arm, so an unrecognised provider id

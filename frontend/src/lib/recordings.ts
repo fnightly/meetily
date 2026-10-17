@@ -1,3 +1,4 @@
+import { readStoredLocale } from '@/lib/i18n';
 /**
  * Types and formatting for the recordings library.
  *
@@ -79,7 +80,9 @@ export function formatRecordedAt(createdAt: string | null | undefined): string {
   const date = new Date(createdAt);
   if (Number.isNaN(date.getTime())) return createdAt;
 
-  return date.toLocaleString(undefined, {
+  // Follow the interface language rather than the OS, so a Chinese UI on an English
+  // system does not mix "Oct 16" into Chinese labels.
+  return date.toLocaleString(readStoredLocale(), {
     year: 'numeric',
     month: 'short',
     day: 'numeric',

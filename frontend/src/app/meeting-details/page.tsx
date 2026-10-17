@@ -24,6 +24,9 @@ function MeetingDetailsContent() {
   const searchParams = useSearchParams();
   const meetingId = searchParams.get('id');
   const source = searchParams.get('source'); // Check if navigated from recording
+  const focusParam = searchParams.get('t');
+  const focusTime = focusParam !== null && focusParam !== '' && Number.isFinite(Number(focusParam)) ? Number(focusParam) : null;
+  const highlightQuery = searchParams.get('q');
   const { setCurrentMeeting, refetchMeetings } = useSidebar();
   const { isAutoSummary } = useConfig(); // Get auto-summary toggle state
   const router = useRouter();
@@ -291,6 +294,8 @@ function MeetingDetailsContent() {
     totalCount={totalCount}
     loadedCount={loadedCount}
     onLoadMore={loadMore}
+    focusTime={focusTime}
+    highlightQuery={highlightQuery}
   />;
 }
 

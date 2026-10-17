@@ -1,4 +1,5 @@
 import { useCallback, RefObject } from 'react';
+import { tr } from '@/lib/i18n';
 import { MeetingSummary, Transcript } from '@/types';
 import { BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
 import { toast } from 'sonner';
@@ -6,7 +7,7 @@ import Analytics from '@/lib/analytics';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { hasVisibleSummaryContent } from '@/lib/summary-content';
 import { useI18n } from '@/contexts/I18nContext';
-import { formatSpeakerLabel } from '@/lib/speaker-labels';
+import { displaySpeaker, fetchSpeakerNames } from '@/lib/speaker-names';
 
 interface UseCopyOperationsProps {
   meeting: any;
@@ -56,7 +57,7 @@ export function useCopyOperations({
       return allData.transcripts;
     } catch (error) {
       console.error('❌ Error fetching all transcripts:', error);
-      toast.error('Failed to fetch transcripts for copying');
+      toast.error(tr('toast.copyFetchFailed'));
       return [];
     }
   }, []);
@@ -90,18 +91,19 @@ export function useCopyOperations({
 
     const header = `# Transcript of the Meeting: ${meeting.id} - ${meetingTitle ?? meeting.title}\n\n`;
     const date = `## Date: ${new Date(meeting.created_at).toLocaleDateString()}\n\n`;
+    const speakerNames = await fetchSpeakerNames(meeting.id);
     const fullTranscript = allTranscripts
       .map(t => {
         // The speaker is written on every line, for the same reason as the exported
         // document: pasted text is quoted and reordered, so a label that depended on the
         // line above it would be lost.
-        const who = t.speaker ? `${formatSpeakerLabel(t.speaker, t18n)} ` : '';
+        const who = t.speaker ? `${displaySpeaker(t.speaker, t18n, speakerNames)} ` : '';
         return `${who}${formatTime(t.audio_start_time, t.timestamp)} ${t.text}  `;
       })
       .join('\n');
 
     await navigator.clipboard.writeText(header + date + fullTranscript);
-    toast.success("Transcript copied to clipboard");
+    toast.success(tr('toast.transcriptCopied'));
 
     // Track copy analytics
     const wordCount = allTranscripts
@@ -118,7 +120,7 @@ export function useCopyOperations({
   // Copy summary to clipboard
   const handleCopySummary = useCallback(async () => {
     if (!hasVisibleSummaryContent(aiSummary)) {
-      toast.error('No summary content available to copy');
+      toast.error(tr('toast.noSummaryToCopy'));
       return;
     }
     try {
@@ -167,7 +169,7 @@ export function useCopyOperations({
       // If still no summary content, show message
       if (!summaryMarkdown.trim()) {
         console.error('❌ No summary content available to copy');
-        toast.error('No summary content available to copy');
+        toast.error(tr('toast.noSummaryToCopy'));
         return;
       }
 
@@ -191,7 +193,7 @@ export function useCopyOperations({
       await navigator.clipboard.writeText(fullMarkdown);
 
       console.log('✅ Successfully copied to clipboard!');
-      toast.success("Summary copied to clipboard");
+      toast.success(tr('toast.summaryCopied'));
 
       // Track copy analytics
       await Analytics.trackCopy('summary', {
@@ -200,7 +202,7 @@ export function useCopyOperations({
       });
     } catch (error) {
       console.error('❌ Failed to copy summary:', error);
-      toast.error("Failed to copy summary");
+      toast.error(tr('toast.copySummaryFailed'));
     }
   }, [aiSummary, meetingTitle, meeting, blockNoteSummaryRef]);
 

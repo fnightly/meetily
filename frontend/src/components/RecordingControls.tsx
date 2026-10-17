@@ -1,4 +1,5 @@
 'use client';
+import { useI18n } from '@/contexts/I18nContext';
 
 import { invoke } from '@tauri-apps/api/core';
 import { appDataDir } from '@tauri-apps/api/path';
@@ -13,6 +14,7 @@ import { toast } from 'sonner';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import type { TranscriptionErrorPayload } from '@/services/transcriptService';
 import { RecordingLevelMonitor } from '@/components/RecordingLevelMonitor';
+import { usePrewarmSpeechModel } from '@/hooks/usePrewarmSpeechModel';
 import {
   useRecordingLevelMonitoring,
   formatDuration,
@@ -49,6 +51,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   selectedDevices,
   meetingName,
 }) => {
+  const { t } = useI18n();
   // Use global recording state context for pause state (syncs with tray operations)
   const recordingState = useRecordingState();
   const isPaused = recordingState.isPaused;
@@ -149,6 +152,8 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     };
     checkTauri();
   }, []);
+
+  const prewarmHandlers = usePrewarmSpeechModel();
 
   const handleStartRecording = useCallback(async () => {
     if (isStarting || isValidatingModel || isStartingRecording) return;
@@ -476,6 +481,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <button
+                          {...prewarmHandlers}
                           onClick={() => {
                             Analytics.trackButtonClick('start_recording', 'recording_controls');
                             handleStartRecording();
@@ -492,7 +498,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                         </button>
                       </TooltipTrigger>
                       <TooltipContent>
-                        <p>Start recording</p>
+                        <p>{t('nav.startRecording')}</p>
                       </TooltipContent>
                     </Tooltip>
                   ) : (
@@ -519,13 +525,13 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                             {isPaused ? <Play size={16} /> : <Pause size={16} />}
                             {(isPausing || isResuming) && (
                               <div className="absolute -top-8 text-gray-600 font-medium text-xs">
-                                {isPausing ? 'Pausing...' : 'Resuming...'}
+                                {isPausing ? t('live.pausing') : t('live.resuming')}
                               </div>
                             )}
                           </button>
                         </TooltipTrigger>
                         <TooltipContent>
-                          <p>{isPaused ? 'Resume recording' : 'Pause recording'}</p>
+                          <p>{isPaused ? t('live.resume') : t('live.pause')}</p>
                         </TooltipContent>
                       </Tooltip>
 
@@ -549,7 +555,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                           </button>
                         </TooltipTrigger>
                         <TooltipContent>
-                          <p>Stop recording</p>
+                          <p>{t('live.stop')}</p>
                         </TooltipContent>
                       </Tooltip>
                     </>

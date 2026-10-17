@@ -1,0 +1,37 @@
+{
+  "name": "周会纪要",
+  "description": "团队周会：上周进展、本周计划、风险与需要协调的事项。",
+  "sections": [
+    {
+      "title": "会议概要",
+      "instruction": "用一段话概括本次周会的核心结论和整体进展。",
+      "format": "paragraph"
+    },
+    {
+      "title": "上周进展",
+      "instruction": "按负责人或工作模块列出上周已完成和推进中的事项，注明完成度。",
+      "format": "list"
+    },
+    {
+      "title": "本周计划",
+      "instruction": "列出本周要做的重点工作及负责人。",
+      "format": "list"
+    },
+    {
+      "title": "风险与阻塞",
+      "instruction": "列出会上提到的风险、延期和需要他人支持的问题，说明影响。",
+      "format": "list"
+    },
+    {
+      "title": "决议",
+      "instruction": "列出会上达成的明确决定。",
+      "format": "list"
+    },
+    {
+      "title": "待办事项",
+      "instruction": "列出所有分配的任务，包含负责人和截止时间；没有明确时间写“待定”。",
+      "format": "list",
+      "item_format": "| 负责人 | 事项 | 截止时间 |\n| --- | --- | --- |"
+    }
+  ]
+}

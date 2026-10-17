@@ -10,7 +10,8 @@ import { SummaryUpdaterButtonGroup } from './SummaryUpdaterButtonGroup';
 import Analytics from '@/lib/analytics';
 import { useEffect, useRef, useState, RefObject } from 'react';
 import { toast } from 'sonner';
-import { Languages, ChevronDown } from 'lucide-react';
+import { Languages, ChevronDown, Sparkles } from 'lucide-react';
+import { useI18n } from '@/contexts/I18nContext';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { LanguagePickerPopover } from '@/components/LanguagePickerPopover';
@@ -57,6 +58,8 @@ interface SummaryPanelProps {
   onOpenModelSettings?: (openFn: () => void) => void;
   /** Template management actions, forwarded to the selector. */
   templateActions?: SummaryGeneratorButtonGroupProps['templateActions'];
+  /** Template suggested for this meeting, marked in the selector. */
+  recommendedTemplate?: string | null;
 }
 
 export function SummaryPanel({
@@ -88,7 +91,9 @@ export function SummaryPanel({
   isModelConfigLoading = false,
   onOpenModelSettings,
   templateActions,
+  recommendedTemplate = null,
 }: SummaryPanelProps) {
+  const { t } = useI18n();
   const [summaryLang, setSummaryLang] = useState<string | null>(null);
   const [summaryLangStorage, setSummaryLangStorage] = useState<SummaryLanguageStorage>('metadata');
   const [langPickerOpen, setLangPickerOpen] = useState(false);
@@ -248,8 +253,12 @@ export function SummaryPanel({
   return (
     <div className="flex-1 min-w-0 flex flex-col bg-white overflow-hidden h-full w-full @container">
       {/* Top-level actions — always visible, same pattern as TranscriptPanel */}
-      <div className="p-4 border-b border-gray-200">
-        <div className="flex items-center justify-center w-full min-w-0 gap-2 flex-wrap">
+      <div className="px-4 py-2.5 border-b border-slate-200">
+        <div className="flex items-center justify-between w-full min-w-0 gap-2 flex-wrap">
+          <h2 className="text-sm font-semibold text-slate-900 whitespace-nowrap flex items-center gap-1.5">
+            <Sparkles className="h-4 w-4 text-violet-500" />{t('meeting.summaryPane')}
+          </h2>
+          <div className="flex items-center gap-2 flex-wrap justify-end min-w-0">
           <div className="flex-shrink-0 min-w-0">
             <SummaryGeneratorButtonGroup
               modelConfig={modelConfig}
@@ -267,6 +276,7 @@ export function SummaryPanel({
               isModelConfigLoading={isModelConfigLoading}
               onOpenModelSettings={onOpenModelSettings}
               templateActions={templateActions}
+              recommendedTemplate={recommendedTemplate}
               languageSlot={transcripts.length > 0 || hasSummary ? languageSlot : undefined}
             />
           </div>
@@ -281,14 +291,16 @@ export function SummaryPanel({
               />
             </div>
           )}
+          </div>
         </div>
       </div>
 
       {isSummaryLoading ? (
         <div className="flex items-center justify-center flex-1">
           <div className="text-center">
-            <div className="inline-block animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500 mb-4"></div>
-            <p className="text-gray-600">Generating AI Summary...</p>
+            <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-2 border-violet-100 border-t-violet-500"></div>
+            <p className="text-sm font-medium text-slate-700">{t('summaryEmpty.generatingLong')}</p>
+            <p className="mt-1 text-xs text-slate-400">{t('summaryEmpty.generatingHint')}</p>
           </div>
         </div>
       ) : !hasSummary ? (

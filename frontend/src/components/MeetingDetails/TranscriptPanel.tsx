@@ -4,7 +4,11 @@ import { Transcript, TranscriptSegmentData } from '@/types';
 import { TranscriptView } from '@/components/TranscriptView';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
-import { useMemo } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+import { SpeakerNamesProvider } from '@/lib/speaker-names';
+import { SpeakerRenameDialog } from '@/components/workspace/SpeakerRenameDialog';
+import { Sparkles } from 'lucide-react';
+import { useI18n } from '@/contexts/I18nContext';
 
 interface TranscriptPanelProps {
   transcripts: Transcript[];
@@ -32,6 +36,10 @@ interface TranscriptPanelProps {
   // Markdown export
   onExportMarkdown?: () => void | Promise<void>;
   isExporting?: boolean;
+
+  /** Deep-link target (seconds) and search term to mark. */
+  focusTime?: number | null;
+  highlightQuery?: string | null;
 }
 
 export function TranscriptPanel({
@@ -54,7 +62,12 @@ export function TranscriptPanel({
   onRefetchTranscripts,
   onExportMarkdown,
   isExporting = false,
+  focusTime = null,
+  highlightQuery = null,
 }: TranscriptPanelProps) {
+  const { t } = useI18n();
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const requestRename = useCallback((label: string) => setRenaming(label), []);
   // Convert transcripts to segments if pagination is not used but we want virtualization
   const convertedSegments = useMemo(() => {
     if (usePagination && segments) {
@@ -72,10 +85,17 @@ export function TranscriptPanel({
     }));
   }, [transcripts, usePagination, segments]);
 
+  const renameSample = useMemo(() => {
+    if (!renaming) return null;
+    const lines = convertedSegments.filter((s) => s.speaker === renaming && s.text.trim().length > 6);
+    return lines.length ? lines.reduce((a, b) => (b.text.length > a.text.length && b.text.length < 140 ? b : a)).text : null;
+  }, [renaming, convertedSegments]);
+
   return (
+    <SpeakerNamesProvider meetingId={meetingId ?? null} onRequestRename={meetingId ? requestRename : undefined}>
     <div className="flex h-full min-w-0 w-full bg-white flex-col relative @container">
       {/* Title area */}
-      <div className="p-4 border-b border-gray-200">
+      <div className="px-4 py-2.5 border-b border-slate-200">
         <TranscriptButtonGroup
           transcriptCount={usePagination ? (totalCount ?? convertedSegments.length) : (transcripts?.length || 0)}
           onCopyTranscript={onCopyTranscript}
@@ -104,20 +124,27 @@ export function TranscriptPanel({
           totalCount={totalCount}
           loadedCount={loadedCount}
           onLoadMore={onLoadMore}
+          focusTime={focusTime}
+          highlightQuery={highlightQuery}
         />
       </div>
 
       {/* Custom prompt input at bottom of transcript section */}
       {!isRecording && convertedSegments.length > 0 && (
-        <div className="p-1 border-t border-gray-200">
+        <div className="p-3 border-t border-slate-200 bg-slate-50/60">
+          <label className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-slate-600">
+            <Sparkles className="h-3.5 w-3.5 text-violet-500" />{t('meeting.contextLabel')}
+          </label>
           <textarea
-            placeholder="Add context for AI summary. For example people involved, meeting overview, objective etc..."
-            className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 bg-white shadow-sm min-h-[80px] resize-y"
+            placeholder={t('meeting.contextPlaceholder')}
+            className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400 bg-white min-h-[64px] resize-y"
             value={customPrompt}
             onChange={(e) => onPromptChange(e.target.value)}
           />
         </div>
       )}
+      <SpeakerRenameDialog label={renaming} sample={renameSample} onClose={() => setRenaming(null)} />
     </div>
+    </SpeakerNamesProvider>
   );
 }

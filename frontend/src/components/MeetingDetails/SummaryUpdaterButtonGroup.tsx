@@ -1,4 +1,5 @@
 "use client";
+import { useI18n } from '@/contexts/I18nContext';
 
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
@@ -18,14 +19,15 @@ export function SummaryUpdaterButtonGroup({
   onSave,
   onCopy,
 }: SummaryUpdaterButtonGroupProps) {
+  const { t } = useI18n();
   return (
     <ButtonGroup>
       {/* Save button */}
       <Button
         variant="outline"
         size="sm"
-        className={`${isDirty ? 'bg-green-200' : ""}`}
-        title={isSaving ? "Saving" : "Save Changes"}
+        className={isDirty ? 'border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100' : ''}
+        title={isSaving ? t('sumBtn.saving') : t('sumBtn.saveHint')}
         onClick={() => {
           Analytics.trackButtonClick('save_changes', 'meeting_details');
           onSave();
@@ -35,12 +37,12 @@ export function SummaryUpdaterButtonGroup({
         {isSaving ? (
           <>
             <Loader2 className="animate-spin" />
-            <span className="hidden @[40rem]:inline">Saving...</span>
+            <span className="hidden @[40rem]:inline">{t('sumBtn.saving')}</span>
           </>
         ) : (
           <>
             <Save />
-            <span className="hidden @[40rem]:inline">Save</span>
+            <span className="hidden @[40rem]:inline">{t('common.save')}</span>
           </>
         )}
       </Button>
@@ -49,7 +51,7 @@ export function SummaryUpdaterButtonGroup({
       <Button
         variant="outline"
         size="sm"
-        title="Copy Summary"
+        title={t('sumBtn.copyHint')}
         onClick={() => {
           Analytics.trackButtonClick('copy_summary', 'meeting_details');
           onCopy();
@@ -57,7 +59,7 @@ export function SummaryUpdaterButtonGroup({
         className="cursor-pointer"
       >
         <Copy />
-        <span className="hidden @[40rem]:inline">Copy</span>
+        <span className="hidden @[40rem]:inline">{t('transcriptActions.copyShort')}</span>
       </Button>
 
     </ButtonGroup>

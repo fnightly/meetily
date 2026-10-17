@@ -66,6 +66,15 @@ pub struct RecordingPreferences {
     #[serde(default = "default_low_disk_warning_mb")]
     pub low_disk_warning_mb: u32,
 
+    /// How long the local speech model stays loaded after use:
+    /// `auto` (default), `onDemand`, `keepWarm`, `always`.
+    /// See `audio::transcription::residency`.
+    #[serde(default = "default_model_residency")]
+    pub model_residency: String,
+    /// Idle minutes before a warm model is released (`keepWarm` / `auto`).
+    #[serde(default = "default_keep_warm_minutes")]
+    pub model_keep_warm_minutes: u32,
+
     #[serde(default)]
     pub preferred_mic_device: Option<String>,
     #[serde(default)]
@@ -84,6 +93,14 @@ fn default_file_quality() -> String {
 ///
 /// A one-hour lossy recording is tens of MB, but a WAV recording is ~330 MB, so
 /// 1 GB leaves room for a long session before the disk is actually a problem.
+fn default_model_residency() -> String {
+    "auto".to_string()
+}
+
+fn default_keep_warm_minutes() -> u32 {
+    super::transcription::residency::DEFAULT_KEEP_WARM_MINUTES
+}
+
 fn default_low_disk_warning_mb() -> u32 {
     1024
 }
@@ -111,6 +128,8 @@ impl Default for RecordingPreferences {
             max_recording_seconds: 0,
             recordings_retention_days: 0,
             low_disk_warning_mb: default_low_disk_warning_mb(),
+            model_residency: default_model_residency(),
+            model_keep_warm_minutes: default_keep_warm_minutes(),
             preferred_mic_device: None,
             preferred_system_device: None,
             #[cfg(target_os = "macos")]

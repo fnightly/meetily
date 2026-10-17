@@ -68,7 +68,7 @@ afterEach(async () => {
   renderer = undefined;
 });
 
-async function copyWith(transcripts: unknown[]) {
+async function copyWith(transcripts: unknown[], speakerNames: Record<string, string> = {}) {
   await act(async () => {
     renderer = create(<View />);
   });
@@ -97,6 +97,13 @@ async function copyWith(transcripts: unknown[]) {
 
   await act(async () => {
     allRequest.resolve({ transcripts, total_count: transcripts.length, has_more: false });
+  });
+
+  // Names given to speakers in this meeting are read last.
+  const namesRequest = pending.find(entry => entry.command === 'api_get_speaker_names');
+  expect(namesRequest).toBeDefined();
+  await act(async () => {
+    namesRequest!.resolve(speakerNames);
   });
 
   return written.join('');
@@ -140,5 +147,15 @@ describe('copying a transcript', () => {
 
     expect(text).toContain('说话人 1');
     expect(text).toContain('说话人 2');
+  });
+
+  test('a speaker the user named is copied under that name', async () => {
+    const text = await copyWith([
+      { id: 'a', text: '甲', timestamp: '00:00', audio_start_time: 0, speaker: 'speaker_1' },
+      { id: 'b', text: '乙', timestamp: '00:05', audio_start_time: 5, speaker: 'speaker_2' },
+    ], { speaker_1: '张总' });
+
+    expect(text).toContain('张总 [00:00] 甲');
+    expect(text).toContain('说话人 2 [00:05] 乙');
   });
 });

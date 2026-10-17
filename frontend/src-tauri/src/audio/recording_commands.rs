@@ -294,6 +294,14 @@ async fn prepare_audio_for_recording(
     Ok(())
 }
 
+/// Nothing to prepare outside macOS; kept so the start path is the same everywhere.
+#[cfg(not(target_os = "macos"))]
+async fn prepare_audio_for_recording(
+    _system_device: Option<&super::AudioDevice>,
+) -> Result<(), String> {
+    Ok(())
+}
+
 // ============================================================================
 // RECORDING COMMANDS
 // ============================================================================
@@ -361,45 +369,52 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
             }
         };
 
-    if defer_transcription {
-        // Audio-only capture: transcription runs afterwards on the saved file, so
-        // starting the engine now would delay recording for no benefit.
-        info!("⏩ Deferred transcription is on; skipping transcription model validation for a faster start");
-    } else {
-        // Validate that transcription models are available before starting recording
-        info!("🔍 Validating transcription model availability before starting recording...");
-        if let Err(validation_error) = transcription::validate_transcription_model_ready(&app).await {
-            error!("Model validation failed: {}", validation_error);
+    // Resolve the system device up front: the macOS audio-wake step needs it.
+    let system_device = resolve_system_or_default(preferred_system_name.as_deref());
 
-            // Emit error event for frontend - actionable: false to show toast instead of modal
-            // (download progress is already shown in top-right toast)
-            let _ = app.emit("transcription-error", serde_json::json!({
-                "error": validation_error,
-                "userMessage": format!("Recording cannot start: {}", validation_error),
-                "actionable": false,
-                "phase": "startup"
-            }));
-
-            return Err(validation_error);
+    // Loading the speech model and preparing the audio hardware are independent,
+    // so they run concurrently instead of back to back. With the model already
+    // warm (see `transcription::residency`) validation returns immediately.
+    let validation = async {
+        if defer_transcription {
+            // Audio-only capture: transcription runs afterwards on the saved file,
+            // so loading the engine now would delay recording for no benefit.
+            info!("⏩ Deferred transcription is on; skipping transcription model validation for a faster start");
+            Ok(())
+        } else {
+            info!("🔍 Validating transcription model availability before starting recording...");
+            transcription::validate_transcription_model_ready(&app).await
         }
-        info!("✅ Transcription model validation passed");
+    };
+    let start_prep = std::time::Instant::now();
+    let (validation_result, audio_ready) =
+        tokio::join!(validation, prepare_audio_for_recording(system_device.as_deref()));
+    info!("⏱️ Recording start preparation took {} ms", start_prep.elapsed().as_millis());
+
+    if let Err(validation_error) = validation_result {
+        error!("Model validation failed: {}", validation_error);
+
+        // Emit error event for frontend - actionable: false to show toast instead of modal
+        // (download progress is already shown in top-right toast)
+        let _ = app.emit("transcription-error", serde_json::json!({
+            "error": validation_error,
+            "userMessage": format!("Recording cannot start: {}", validation_error),
+            "actionable": false,
+            "phase": "startup"
+        }));
+
+        return Err(validation_error);
     }
+    audio_ready?;
+    crate::audio::transcription::residency::touch();
+    info!("✅ Transcription model validation passed");
 
     // Notify frontend that startup has begun (surfaces STARTING state)
     app.emit("recording-starting", serde_json::json!({
         "message": "Recording initialization started"
     })).map_err(|e| e.to_string())?;
 
-    // Preferences were loaded above, before model validation.
-    #[cfg(not(target_os = "macos"))]
-    let microphone_device = resolve_mic_or_default(&app, preferred_mic_name.as_deref());
-
-    let system_device = resolve_system_or_default(preferred_system_name.as_deref());
-
-    #[cfg(target_os = "macos")]
-    prepare_audio_for_recording(system_device.as_deref()).await?;
-
-    #[cfg(target_os = "macos")]
+    // The microphone is resolved after the audio hardware was woken (macOS).
     let microphone_device = resolve_mic_or_default(&app, preferred_mic_name.as_deref());
 
     // Async-first approach - no more blocking operations!
@@ -578,15 +593,29 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
             }
         };
 
-    if defer_transcription {
-        // Audio-only capture: the engine is not needed until the recording is later
-        // transcribed, so skip loading it and start capturing sooner.
-        info!("⏩ Deferred transcription is on; skipping transcription model validation for a faster start");
-    } else {
+    // Resolve the system device up front: the macOS audio-wake step needs it.
+    let system_device = resolve_system_or_default(system_device_name.as_deref());
 
-    // Validate that transcription models are available before starting recording
-    info!("🔍 Validating transcription model availability before starting recording...");
-    if let Err(validation_error) = transcription::validate_transcription_model_ready(&app).await {
+    // Loading the speech model and preparing the audio hardware are independent,
+    // so they run concurrently instead of back to back. With the model already
+    // warm (see `transcription::residency`) validation returns immediately.
+    let validation = async {
+        if defer_transcription {
+            // Audio-only capture: transcription runs afterwards on the saved file,
+            // so loading the engine now would delay recording for no benefit.
+            info!("⏩ Deferred transcription is on; skipping transcription model validation for a faster start");
+            Ok(())
+        } else {
+            info!("🔍 Validating transcription model availability before starting recording...");
+            transcription::validate_transcription_model_ready(&app).await
+        }
+    };
+    let start_prep = std::time::Instant::now();
+    let (validation_result, audio_ready) =
+        tokio::join!(validation, prepare_audio_for_recording(system_device.as_deref()));
+    info!("⏱️ Recording start preparation took {} ms", start_prep.elapsed().as_millis());
+
+    if let Err(validation_error) = validation_result {
         error!("Model validation failed: {}", validation_error);
 
         // Emit error event for frontend - actionable: false to show toast instead of modal
@@ -600,24 +629,16 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
         return Err(validation_error);
     }
+    audio_ready?;
+    crate::audio::transcription::residency::touch();
     info!("✅ Transcription model validation passed");
-
-    }
 
     // Notify frontend that startup has begun (surfaces STARTING state)
     app.emit("recording-starting", serde_json::json!({
         "message": "Recording initialization started"
     })).map_err(|e| e.to_string())?;
 
-    #[cfg(not(target_os = "macos"))]
-    let mic_device = resolve_mic_or_default(&app, mic_device_name.as_deref());
-
-    let system_device = resolve_system_or_default(system_device_name.as_deref());
-
-    #[cfg(target_os = "macos")]
-    prepare_audio_for_recording(system_device.as_deref()).await?;
-
-    #[cfg(target_os = "macos")]
+    // The microphone is resolved after the audio hardware was woken (macOS).
     let mic_device = resolve_mic_or_default(&app, mic_device_name.as_deref());
 
     // Async-first approach for custom devices - no more blocking operations!
@@ -882,84 +903,11 @@ pub async fn stop_recording<R: Runtime>(
         }),
     );
 
-    info!("🧠 All transcript chunks processed. Now safely unloading transcription model...");
+    info!("🧠 All transcript chunks processed. Applying model residency policy...");
 
-    // Determine which provider was used and unload the appropriate model (with timeout)
-    let config = match tokio::time::timeout(
-        tokio::time::Duration::from_secs(30), // 30 seconds max for DB operation
-        crate::api::api::api_get_transcript_config(
-            app.clone(),
-            app.clone().state(),
-            None,
-        )
-    )
-    .await
-    {
-        Ok(Ok(Some(config))) => Some(config.provider),
-        Ok(Ok(None)) => None,
-        Ok(Err(e)) => {
-            warn!("⚠️ Failed to get transcript config: {:?}", e);
-            None
-        }
-        Err(_) => {
-            warn!("⏱️ Transcript config timeout (30s), continuing shutdown");
-            None
-        }
-    };
-
-    match config.as_deref() {
-        Some("parakeet") => {
-            info!("🦜 Unloading Parakeet model...");
-            let engine_clone = {
-                let engine_guard = crate::parakeet_engine::commands::PARAKEET_ENGINE
-                    .lock()
-                    .unwrap();
-                engine_guard.as_ref().cloned()
-            };
-
-            if let Some(engine) = engine_clone {
-                let current_model = engine
-                    .get_current_model()
-                    .await
-                    .unwrap_or_else(|| "unknown".to_string());
-                info!("Current Parakeet model before unload: '{}'", current_model);
-
-                if engine.unload_model().await {
-                    info!("✅ Parakeet model '{}' unloaded successfully", current_model);
-                } else {
-                    warn!("⚠️ Failed to unload Parakeet model '{}'", current_model);
-                }
-            } else {
-                warn!("⚠️ No Parakeet engine found to unload model");
-            }
-        }
-        _ => {
-            // Default to Whisper
-            info!("🎤 Unloading Whisper model...");
-            let engine_clone = {
-                let engine_guard = crate::whisper_engine::commands::WHISPER_ENGINE
-                    .lock()
-                    .unwrap();
-                engine_guard.as_ref().cloned()
-            };
-
-            if let Some(engine) = engine_clone {
-                let current_model = engine
-                    .get_current_model()
-                    .await
-                    .unwrap_or_else(|| "unknown".to_string());
-                info!("Current Whisper model before unload: '{}'", current_model);
-
-                if engine.unload_model().await {
-                    info!("✅ Whisper model '{}' unloaded successfully", current_model);
-                } else {
-                    warn!("⚠️ Failed to unload Whisper model '{}'", current_model);
-                }
-            } else {
-                warn!("⚠️ No Whisper engine found to unload model");
-            }
-        }
-    }
+    // Unload now (onDemand) or keep the model warm so the next recording starts
+    // without reloading it; the idle reaper frees it later. See `residency`.
+    crate::audio::transcription::residency::release_after_use(&app).await;
 
     // Step 3.5: Track meeting ended analytics with privacy-safe metadata
     // Extract all data from manager BEFORE any async operations to avoid Send issues

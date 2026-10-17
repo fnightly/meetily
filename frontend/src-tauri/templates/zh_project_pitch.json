@@ -1,0 +1,42 @@
+{
+  "name": "项目路演 / 尽调访谈",
+  "description": "与创始团队的沟通：业务、数据、团队、融资需求，以及投资人关注点和后续尽调计划。",
+  "sections": [
+    {
+      "title": "公司与业务",
+      "instruction": "概括公司做什么、目标客户、商业模式和当前阶段。",
+      "format": "paragraph"
+    },
+    {
+      "title": "关键数据",
+      "instruction": "列出会上提到的收入、增速、毛利、客户数、留存、现金流等具体数据，保留原始数字和口径。",
+      "format": "list"
+    },
+    {
+      "title": "团队",
+      "instruction": "总结创始人和核心团队的背景及分工。",
+      "format": "list"
+    },
+    {
+      "title": "竞争与壁垒",
+      "instruction": "记录对竞争格局、竞品和公司护城河的描述。",
+      "format": "list"
+    },
+    {
+      "title": "融资需求",
+      "instruction": "记录本轮融资金额、估值预期、资金用途、时间表和已有意向投资方。",
+      "format": "list"
+    },
+    {
+      "title": "关注点与疑问",
+      "instruction": "列出投资人提出的问题、团队回答以及仍待核实的疑点。",
+      "format": "list"
+    },
+    {
+      "title": "后续尽调计划",
+      "instruction": "列出约定的资料清单、下次沟通安排、负责人和时间。",
+      "format": "list",
+      "item_format": "| 负责人 | 事项 | 截止时间 |\n| --- | --- | --- |"
+    }
+  ]
+}

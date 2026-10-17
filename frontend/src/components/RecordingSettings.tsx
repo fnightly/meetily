@@ -12,6 +12,7 @@ import { Label } from '@/components/ui/label';
 import { useI18n } from '@/contexts/I18nContext';
 import { Button } from '@/components/ui/button';
 import { formatDuration } from '@/hooks/useRecordingLevelMonitoring';
+import { ModelResidencySettings, type ModelResidency } from '@/components/ModelResidencySettings';
 
 export interface RecordingPreferences {
   save_folder: string;
@@ -29,6 +30,9 @@ export interface RecordingPreferences {
   recordings_retention_days: number;
   /** Warn below this many MB free. 0 disables. */
   low_disk_warning_mb: number;
+  /** How long the speech model stays loaded after use (speed vs memory). */
+  model_residency?: ModelResidency;
+  model_keep_warm_minutes?: number;
   preferred_mic_device: string | null;
   preferred_system_device: string | null;
 }
@@ -73,6 +77,8 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     max_recording_seconds: 0,
     recordings_retention_days: 0,
     low_disk_warning_mb: 1024,
+    model_residency: 'auto',
+    model_keep_warm_minutes: 10,
     preferred_mic_device: null,
     preferred_system_device: null
   });
@@ -311,15 +317,10 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       await invoke('set_recording_preferences', { preferences: prefs });
       onSave?.(prefs);
 
-      // Show success toast with device details
-      const micDevice = prefs.preferred_mic_device || 'Default';
-      const systemDevice = prefs.preferred_system_device || 'Default';
-      toast.success("Device preferences saved", {
-        description: `Microphone: ${micDevice}, System Audio: ${systemDevice}`
-      });
+      toast.success(t('recordingSettings.saved'));
     } catch (error) {
       console.error('Failed to save recording preferences:', error);
-      toast.error("Failed to save device preferences", {
+      toast.error(t('recordingSettings.saveFailed'), {
         description: error instanceof Error ? error.message : String(error)
       });
     } finally {
@@ -338,19 +339,12 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h3 className="text-lg font-semibold mb-4">Recording Settings</h3>
-        <p className="text-sm text-gray-600 mb-6">
-          Configure how your audio recordings are saved during meetings.
-        </p>
-      </div>
-
       {/* Auto Save Toggle */}
-      <div className="flex items-center justify-between p-4 border rounded-lg">
+      <div className="flex items-center justify-between surface-card p-5">
         <div className="flex-1">
-          <div className="font-medium">Save Audio Recordings</div>
+          <div className="font-medium">{t('recordingSettings.autoSave')}</div>
           <div className="text-sm text-gray-600">
-            Automatically save audio files when recording stops
+            {t('recordingSettings.autoSaveHint')}
           </div>
         </div>
         <Switch
@@ -361,17 +355,15 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       </div>
 
       {/* Deferred Transcription Toggle */}
-      <div className="flex items-center justify-between p-4 border rounded-lg">
+      <div className="flex items-center justify-between surface-card p-5">
         <div className="flex-1 pr-4">
-          <div className="font-medium">Record only, transcribe afterwards</div>
+          <div className="font-medium">{t('recordingSettings.defer')}</div>
           <div className="text-sm text-gray-600">
-            Skip live transcription while recording to reduce CPU/GPU load. The audio is transcribed
-            later, from the saved recording.
+            {t('recordingSettings.deferHint')}
           </div>
           {preferences.defer_transcription && !preferences.auto_save && (
             <div className="text-xs text-amber-700 mt-2">
-              Requires &ldquo;Save Audio Recordings&rdquo; to be enabled — without a saved file there
-              is nothing to transcribe later.
+              {t('recordingSettings.deferNeedsSave')}
             </div>
           )}
         </div>
@@ -382,36 +374,51 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
         />
       </div>
 
+      {/* Speed vs memory: speech model residency */}
+      <ModelResidencySettings
+        value={preferences.model_residency ?? 'auto'}
+        minutes={preferences.model_keep_warm_minutes ?? 10}
+        disabled={saving}
+        onChange={(value, minutes) => {
+          const next = { ...preferences, model_residency: value, model_keep_warm_minutes: minutes };
+          setPreferences(next);
+          void savePreferences(next);
+          void Analytics.track('model_residency_changed', { value, minutes: String(minutes) });
+        }}
+      />
+
       {/* Folder Location - Only shown when auto_save is enabled */}
       {preferences.auto_save && (
         <div className="space-y-4">
-          <div className="p-4 border rounded-lg bg-gray-50">
-            <div className="font-medium mb-2">Save Location</div>
-            <div className="text-sm text-gray-600 mb-3 break-all">
-              {preferences.save_folder || 'Default folder'}
+          <div className="surface-card p-5">
+            <div className="font-semibold text-slate-900 mb-1">{t('recSet.saveLocation')}</div>
+            <div className="text-xs text-slate-500 mb-3 break-all font-mono">
+              {preferences.save_folder || t('recSet.defaultFolder')}
             </div>
+            <div className="flex flex-wrap gap-2">
             <button
               onClick={handleOpenFolder}
-              className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-50 transition-colors"
+              className="flex items-center gap-2 px-3 h-8 text-sm border border-slate-300 bg-white rounded-lg hover:bg-slate-50 transition-colors"
             >
               <FolderOpen className="w-4 h-4" />
-              Open Folder
+              {t('storage.open')}
             </button>
             <button
               onClick={handleChangeFolder}
               disabled={saving || isRecording}
-              className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-50 transition-colors disabled:opacity-50 ml-2"
+              className="flex items-center gap-2 px-3 h-8 text-sm border border-slate-300 bg-white rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50"
             >
-              Change Folder…
+              {t('storage.change')}
             </button>
-            <div className="text-xs text-gray-500 mt-2">
-              You can also set this under <strong>Data Storage Locations</strong> in Preferences.
+            </div>
+            <div className="text-xs text-slate-400 mt-2">
+              {t('recSet.alsoInGeneral')}
             </div>
           </div>
 
           {/* Output format and quality. These were previously display-only: the
               format was saved but the encoder always wrote AAC/MP4. */}
-          <div className="p-4 border rounded-lg space-y-4">
+          <div className="surface-card p-5 space-y-4">
             <div className="space-y-2">
               <Label htmlFor="rec-format">{t('recording.recordingFormat')}</Label>
               <Select
@@ -431,8 +438,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
                 </SelectContent>
               </Select>
               <p className="text-xs text-gray-500">
-                Recordings are saved as <span className="font-mono">audio.{preferences.file_format}</span> inside
-                each meeting folder.
+                {t('recSet.savedAs', { file: `audio.${preferences.file_format}` })}
               </p>
             </div>
 
@@ -479,9 +485,9 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
 
       {/* Info when auto_save is disabled */}
       {!preferences.auto_save && (
-        <div className="p-4 border rounded-lg bg-yellow-50">
-          <div className="text-sm text-yellow-800">
-            Audio recording is disabled. Enable "Save Audio Recordings" to automatically save your meeting audio.
+        <div className="p-4 border border-amber-200 rounded-xl bg-amber-50">
+          <div className="text-sm text-amber-800">
+            {t('recSet.disabled')}
           </div>
         </div>
       )}
@@ -490,7 +496,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
           saved transcript contains, which is more consequential than a guard. */}
       <div className="border-t pt-6">
         <h4 className="text-base font-medium text-gray-900 mb-1">{t('recording.cleanupTitle')}</h4>
-        <div className="p-4 border rounded-lg space-y-3">
+        <div className="surface-card p-5 space-y-3">
           <div className="flex items-center justify-between gap-4">
             <Label htmlFor="rec-cleanup">{t('recording.cleanupToggle')}</Label>
             <Switch
@@ -514,7 +520,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
             {t('recording.limitsDescription')}
           </p>
 
-          <div className="p-4 border rounded-lg space-y-4">
+          <div className="surface-card p-5 space-y-4">
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <Label htmlFor="rec-silence-stop">{t('recording.silenceStop')}</Label>
@@ -590,7 +596,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
             {t('recording.retentionDescription')}
           </p>
 
-          <div className="p-4 border rounded-lg space-y-3">
+          <div className="surface-card p-5 space-y-3">
             <div className="flex items-center gap-3">
               <Label htmlFor="rec-retention" className="shrink-0">
                 {t('recording.keepFor')}
@@ -638,7 +644,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       </div>
 
       {/* Recording Notification Toggle */}
-      <div className="flex items-center justify-between p-4 border rounded-lg">
+      <div className="flex items-center justify-between surface-card p-5">
         <div className="flex-1">
           <div className="font-medium">Recording Start Notification</div>
           <div className="text-sm text-gray-600">

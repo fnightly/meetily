@@ -1,0 +1,5 @@
+# Migration files are read at build time and hashed byte for byte. `sqlx` records those
+# hashes in the database and refuses to start when a file it already applied now hashes
+# differently, so git must never rewrite their line endings — normalising CRLF to LF is
+# enough to make an unchanged migration look modified and take the app down on launch.
+frontend/src-tauri/migrations/*.sql -text

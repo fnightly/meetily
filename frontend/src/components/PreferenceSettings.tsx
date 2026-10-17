@@ -1,4 +1,5 @@
 "use client"
+import { tr } from '@/lib/i18n'
 
 import { useEffect, useState, useRef } from "react"
 import { Switch } from "./ui/switch"
@@ -112,12 +113,12 @@ export function PreferenceSettings() {
 
   // Show loading only if we're actually loading and don't have cached data
   if (isLoadingPreferences && !notificationSettings && !storageLocations) {
-    return <div className="max-w-2xl mx-auto p-6">Loading Preferences...</div>
+    return <div className="p-6 text-sm text-slate-500">{tr('common.loading')}</div>
   }
 
   // Show loading if notificationsEnabled hasn't been determined yet
   if (notificationsEnabled === null && !isLoadingPreferences) {
-    return <div className="max-w-2xl mx-auto p-6">Loading Preferences...</div>
+    return <div className="p-6 text-sm text-slate-500">{tr('common.loading')}</div>
   }
 
   // Ensure we have a boolean value for the Switch component
@@ -126,11 +127,11 @@ export function PreferenceSettings() {
   return (
     <div className="space-y-6">
       {/* Notifications Section */}
-      <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
+      <div className="surface-card p-6">
         <div className="flex items-center justify-between">
           <div>
-            <h3 className="text-lg font-semibold text-gray-900 mb-2">Notifications</h3>
-            <p className="text-sm text-gray-600">Enable or disable notifications of start and end of meeting</p>
+            <h3 className="text-base font-semibold text-slate-900 mb-1">{tr('prefs.notifications')}</h3>
+            <p className="text-sm text-slate-500">{tr('prefs.notificationsHint')}</p>
           </div>
           <Switch checked={notificationsEnabledValue} onCheckedChange={setNotificationsEnabled} />
         </div>
@@ -140,7 +141,7 @@ export function PreferenceSettings() {
       <StorageLocationsPanel />
 
       {/* Analytics Section */}
-      <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
+      <div className="surface-card p-6">
         <AnalyticsConsentSwitch />
       </div>
     </div>

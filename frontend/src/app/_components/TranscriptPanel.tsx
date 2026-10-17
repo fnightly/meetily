@@ -1,7 +1,6 @@
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { PermissionWarning } from '@/components/PermissionWarning';
 import { Button } from '@/components/ui/button';
-import { ButtonGroup } from '@/components/ui/button-group';
 import { Copy, GlobeIcon } from 'lucide-react';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useConfig } from '@/contexts/ConfigContext';
@@ -10,6 +9,8 @@ import { usePermissionCheck } from '@/hooks/usePermissionCheck';
 import { ModalType } from '@/hooks/useModalState';
 import { useIsLinux } from '@/hooks/usePlatform';
 import { useMemo } from 'react';
+import { useI18n } from '@/contexts/I18nContext';
+import { RecordingStatusBar } from '@/components/RecordingStatusBar';
 
 /**
  * TranscriptPanel Component
@@ -31,7 +32,8 @@ export function TranscriptPanel({
   showModal
 }: TranscriptPanelProps) {
   // Contexts
-  const { transcripts, transcriptContainerRef, copyTranscript } = useTranscripts();
+  const { transcripts, transcriptContainerRef, copyTranscript, meetingTitle } = useTranscripts();
+  const { t } = useI18n();
   const { transcriptModelConfig } = useConfig();
   const { isRecording, isPaused } = useRecordingState();
   const { checkPermissions, isChecking, hasSystemAudio, hasMicrophone } = usePermissionCheck();
@@ -54,41 +56,36 @@ export function TranscriptPanel({
   );
 
   return (
-    <div ref={transcriptContainerRef} className="w-full border-r border-gray-200 bg-white flex flex-col overflow-y-auto">
-      {/* Title area - Sticky header */}
-      <div className="sticky top-0 z-10 bg-white p-4 border-gray-200">
-        <div className="flex flex-col space-y-3">
-          <div className="flex  flex-col space-y-2">
-            <div className="flex justify-center  items-center space-x-2">
-              <ButtonGroup>
-                {transcripts?.length > 0 && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={copyTranscript}
-                    title="Copy Transcript"
-                  >
-                    <Copy />
-                    <span className='hidden md:inline'>
-                      Copy
-                    </span>
-                  </Button>
-                )}
-                {transcriptModelConfig.provider === "localWhisper" &&
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => showModal('languageSettings')}
-                    title="Language"
-                  >
-                    <GlobeIcon />
-                    <span className='hidden md:inline'>
-                      Language
-                    </span>
-                  </Button>
-                }
-              </ButtonGroup>
+    <div ref={transcriptContainerRef} className="w-full bg-white flex flex-col overflow-y-auto custom-scrollbar">
+      {/* Sticky header: what is being recorded, its state, and the two live tools */}
+      <div className="sticky top-0 z-10 border-b border-slate-100 bg-white/90 backdrop-blur">
+        <div className="mx-auto flex w-full max-w-[860px] items-center gap-3 px-6 py-3">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              {isRecording ? (
+                <RecordingStatusBar isPaused={isPaused} />
+              ) : (isProcessingStop || isStopping) ? (
+                <span className="chip bg-blue-50 text-blue-700">{t('live.finishing')}</span>
+              ) : (
+                <span className="chip bg-slate-100 text-slate-600">{t('live.lastSession')}</span>
+              )}
+              <span className="text-xs text-slate-400 tabular-nums">{t('live.segments', { count: transcripts.length })}</span>
             </div>
+            <h1 className="mt-1 truncate text-base font-semibold text-slate-900">{meetingTitle && meetingTitle !== '+ New Call' ? meetingTitle : t('live.untitled')}</h1>
+          </div>
+          <div className="flex items-center gap-1.5">
+            {transcriptModelConfig.provider === "localWhisper" && (
+              <Button variant="ghost" size="sm" onClick={() => showModal('languageSettings')} title={t('live.language')}>
+                <GlobeIcon />
+                <span className="hidden md:inline">{t('live.language')}</span>
+              </Button>
+            )}
+            {transcripts?.length > 0 && (
+              <Button variant="outline" size="sm" onClick={copyTranscript} title={t('transcriptActions.copy')}>
+                <Copy />
+                <span className="hidden md:inline">{t('transcriptActions.copyShort')}</span>
+              </Button>
+            )}
           </div>
         </div>
       </div>
@@ -106,9 +103,9 @@ export function TranscriptPanel({
       )}
 
       {/* Transcript content */}
-      <div className="pb-20">
+      <div className="pb-32">
         <div className="flex justify-center">
-          <div className="w-2/3 max-w-[750px]">
+          <div className="w-full max-w-[860px] px-6">
             <VirtualizedTranscriptView
               segments={segments}
               isRecording={isRecording}

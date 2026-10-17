@@ -1,4 +1,5 @@
 "use client"
+import { tr } from '@/lib/i18n'
 
 import { useCallback, useEffect, useState } from "react"
 import { invoke } from "@tauri-apps/api/core"
@@ -54,8 +55,8 @@ type StorageKind = 'database' | 'models' | 'notes' | 'recordings'
 
 interface RowSpec {
   kind: StorageKind
-  label: string
-  description: string
+  labelKey: string
+  descKey: string
   /** Which resolved field to display. */
   resolvedKey: keyof ResolvedStoragePaths
   /** Which config field determines whether the value is customised. */
@@ -65,29 +66,29 @@ interface RowSpec {
 const ROWS: RowSpec[] = [
   {
     kind: 'database',
-    label: 'Database',
-    description: 'Meeting, transcript and summary records (SQLite).',
+    labelKey: 'storage.db',
+    descKey: 'storage.dbDesc',
     resolvedKey: 'database_file',
     configKey: 'database_folder',
   },
   {
     kind: 'models',
-    label: 'Models',
-    description: 'Downloaded Whisper / Parakeet / built-in summary models.',
+    labelKey: 'storage.models',
+    descKey: 'storage.modelsDesc',
     resolvedKey: 'models_folder',
     configKey: 'models_folder',
   },
   {
     kind: 'notes',
-    label: 'Meeting Notes',
-    description: 'Where user-written meeting notes are kept.',
+    labelKey: 'storage.notes',
+    descKey: 'storage.notesDesc',
     resolvedKey: 'notes_folder',
     configKey: 'notes_folder',
   },
   {
     kind: 'recordings',
-    label: 'Meeting Recordings',
-    description: 'Recorded audio files.',
+    labelKey: 'storage.recordings',
+    descKey: 'storage.recordingsDesc',
     resolvedKey: 'recordings_folder',
     configKey: 'recordings_folder',
   },
@@ -162,7 +163,7 @@ export function StorageLocationsPanel() {
       try {
         const next = await invoke<StorageSettingsView>('reset_storage_location', { kind })
         setView(next)
-        setNotice('Reset to the default location.')
+        setNotice(tr('storage.resetDone'))
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e))
       } finally {
@@ -182,28 +183,25 @@ export function StorageLocationsPanel() {
 
   if (loading) {
     return (
-      <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">Data Storage Locations</h3>
-        <p className="text-sm text-gray-600">Loading storage locations…</p>
+      <div className="surface-card p-6">
+        <h3 className="text-base font-semibold text-slate-900 mb-4">{tr('storage.title')}</h3>
+        <p className="text-sm text-slate-500">{tr('common.loading')}</p>
       </div>
     )
   }
 
   return (
-    <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
+    <div className="surface-card p-6">
       <div className="flex items-start justify-between mb-4">
         <div>
-          <h3 className="text-lg font-semibold text-gray-900">Data Storage Locations</h3>
-          <p className="text-sm text-gray-600 mt-1">
-            Choose where Meetily keeps each kind of data. Leave a location at its default to keep
-            everything under the application data directory.
-          </p>
+          <h3 className="text-base font-semibold text-slate-900">{tr('storage.title')}</h3>
+          <p className="text-sm text-slate-500 mt-1">{tr('storage.description')}</p>
         </div>
         <button
           onClick={refresh}
-          title="Reload from disk"
-          aria-label="Reload storage locations"
-          className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-100 transition-colors shrink-0"
+          title={tr('common.reload')}
+          aria-label={tr('common.reload')}
+          className="flex items-center gap-2 px-3 h-8 text-sm border border-slate-300 bg-white rounded-lg hover:bg-slate-50 transition-colors shrink-0"
         >
           <RefreshCw className="w-4 h-4" />
         </button>
@@ -216,10 +214,9 @@ export function StorageLocationsPanel() {
         >
           <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
           <p className="text-xs text-amber-900">
-            The database location changed but the running app still has the old file open. Your data
-            has been copied to the new location — <strong>restart Meetily</strong> to start using it.
+            {tr('storage.restartNeeded')}
             <br />
-            <span className="font-mono break-all">In use now: {view.active_database_file}</span>
+            <span className="font-mono break-all">{tr('storage.inUse')} {view.active_database_file}</span>
           </p>
         </div>
       )}
@@ -244,20 +241,20 @@ export function StorageLocationsPanel() {
           const busy = busyKind === row.kind
 
           return (
-            <div key={row.kind} className="p-4 border rounded-lg bg-gray-50">
+            <div key={row.kind} className="p-4 border border-slate-200 rounded-lg bg-slate-50/70">
               <div className="flex items-center gap-2 mb-1">
-                <span className="font-medium">{row.label}</span>
+                <span className="font-medium text-slate-900">{tr(row.labelKey)}</span>
                 {isCustom ? (
                   <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-blue-100 text-blue-800">
-                    Custom
+                    {tr('storage.custom')}
                   </span>
                 ) : (
                   <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-gray-200 text-gray-700">
-                    Default
+                    {tr('storage.default')}
                   </span>
                 )}
               </div>
-              <p className="text-xs text-gray-500 mb-2">{row.description}</p>
+              <p className="text-xs text-slate-500 mb-2">{tr(row.descKey)}</p>
               <div className="text-xs text-gray-700 mb-3 break-all font-mono">{current || '—'}</div>
 
               {/* The configured models folder can be empty while models sit in
@@ -268,9 +265,8 @@ export function StorageLocationsPanel() {
                 <div className="mb-3 p-2 bg-amber-50 border border-amber-200 rounded flex gap-2">
                   <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
                   <p className="text-xs text-amber-900">
-                    This folder has no models, so Meetily is loading them from{' '}
-                    <span className="font-mono break-all">{view.effective_models_folder}</span>.
-                    Move your models into the folder above (or re-download them) to use it.
+                    {tr('storage.modelsFallback')}{' '}
+                    <span className="font-mono break-all">{view.effective_models_folder}</span>
                   </p>
                 </div>
               )}
@@ -279,25 +275,25 @@ export function StorageLocationsPanel() {
                 <button
                   onClick={() => handleChange(row.kind)}
                   disabled={busy}
-                  className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-100 transition-colors disabled:opacity-50"
+                  className="flex items-center gap-2 px-3 h-8 text-sm border border-slate-300 bg-white rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50"
                 >
                   <FolderOpen className="w-4 h-4" />
-                  {busy ? 'Working…' : 'Change…'}
+                  {busy ? tr('storage.working') : tr('storage.change')}
                 </button>
                 <button
                   onClick={() => handleOpen(row.kind)}
-                  className="px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-100 transition-colors"
+                  className="px-3 h-8 text-sm border border-slate-300 bg-white rounded-lg hover:bg-slate-50 transition-colors"
                 >
-                  Open Folder
+                  {tr('storage.open')}
                 </button>
                 {isCustom && (
                   <button
                     onClick={() => handleReset(row.kind)}
                     disabled={busy}
-                    className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-100 transition-colors disabled:opacity-50"
+                    className="flex items-center gap-2 px-3 h-8 text-sm border border-slate-300 bg-white rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50"
                   >
                     <RotateCcw className="w-4 h-4" />
-                    Reset
+                    {tr('storage.reset')}
                   </button>
                 )}
               </div>
@@ -308,9 +304,7 @@ export function StorageLocationsPanel() {
 
       <div className="mt-4 p-3 bg-blue-50 rounded-md">
         <p className="text-xs text-blue-800">
-          <strong>Note:</strong> Changing the models location does not move models that were already
-          downloaded — move the files yourself or re-download them. Changing the database location
-          copies your data and requires a restart.
+          {tr('storage.note')}
         </p>
       </div>
     </div>

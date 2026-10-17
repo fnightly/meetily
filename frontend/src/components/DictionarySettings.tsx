@@ -129,7 +129,7 @@ export function DictionarySettings() {
       </div>
 
       {/* Adding */}
-      <div className="p-4 border rounded-lg space-y-3">
+      <div className="surface-card p-5 space-y-3">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div className="space-y-1">
             <label htmlFor="dict-term" className="text-xs font-medium text-gray-700">

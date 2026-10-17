@@ -1,4 +1,5 @@
 "use client";
+import { useI18n } from '@/contexts/I18nContext';
 
 import { ModelConfig, ModelSettingsModal } from '@/components/ModelSettingsModal';
 import {
@@ -34,6 +35,8 @@ export interface SummaryGeneratorButtonGroupProps {
   summaryStatus: 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
   availableTemplates: TemplateInfo[];
   selectedTemplate: string;
+  /** Suggested for this meeting; badged in the list. */
+  recommendedTemplate?: string | null;
   onTemplateSelect: (templateId: string, templateName: string) => void;
   hasTranscripts?: boolean;
   hasSummary?: boolean;
@@ -71,8 +74,10 @@ export function SummaryGeneratorButtonGroup({
   isModelConfigLoading = false,
   onOpenModelSettings,
   templateActions,
+  recommendedTemplate = null,
   languageSlot
 }: SummaryGeneratorButtonGroupProps) {
+  const { t } = useI18n();
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [templateManagerOpen, setTemplateManagerOpen] = useState(false);
 
@@ -106,21 +111,21 @@ export function SummaryGeneratorButtonGroup({
         <Button
           variant="outline"
           size="sm"
-          className="bg-gradient-to-r from-red-50 to-orange-50 hover:from-red-100 hover:to-orange-100 border-red-200 px-3 gap-2"
+          className="bg-red-50 text-red-700 hover:bg-red-100 border-red-200 px-3 gap-2"
           onClick={() => {
             Analytics.trackButtonClick('stop_summary_generation', 'meeting_details');
             onStopGeneration();
           }}
-          title="Stop summary generation"
+          title={t('sumBtn.stopHint')}
         >
           <Square size={18} fill="currentColor" />
-          <span className="hidden @[24rem]:inline">Stop</span>
+          <span className="hidden @[24rem]:inline">{t('sumBtn.stop')}</span>
         </Button>
       ) : (
         <Button
           variant="outline"
           size="sm"
-          className="bg-gradient-to-r from-blue-50 to-purple-50 hover:from-blue-100 hover:to-purple-100 border-blue-200 px-3 gap-2"
+          className="bg-violet-600 text-white hover:bg-violet-700 hover:text-white border-violet-600 px-3 gap-2"
           onClick={() => {
             Analytics.trackButtonClick('generate_summary', 'meeting_details');
             void onGenerateSummary(customPrompt);
@@ -128,19 +133,19 @@ export function SummaryGeneratorButtonGroup({
           disabled={isModelConfigLoading}
           title={
             isModelConfigLoading
-              ? 'Loading model configuration...'
-              : hasSummary ? 'Regenerate AI Summary' : 'Generate AI Summary'
+              ? t('sumBtn.loadingModel')
+              : hasSummary ? t('sumBtn.regenerate') : t('sumBtn.generate')
           }
         >
           {isModelConfigLoading ? (
             <>
               <Loader2 className="animate-spin" size={18} />
-              <span className="hidden @[24rem]:inline">Processing...</span>
+              <span className="hidden @[24rem]:inline">{t('sumBtn.processing')}</span>
             </>
           ) : (
             <>
               <Sparkles size={18} />
-              <span className="hidden @[24rem]:inline">{hasSummary ? 'Regenerate Summary' : 'Generate Summary'}</span>
+              <span className="hidden @[24rem]:inline">{hasSummary ? t('sumBtn.regenerate') : t('sumBtn.generate')}</span>
             </>
           )}
         </Button>
@@ -154,17 +159,17 @@ export function SummaryGeneratorButtonGroup({
           <Button
             variant="outline"
             size="sm"
-            title="Summary Settings"
+            title={t('sumBtn.model')}
           >
             <Settings />
-            <span className="hidden @[40rem]:inline">AI Model</span>
+            <span className="hidden @[40rem]:inline">{t('sumBtn.model')}</span>
           </Button>
         </DialogTrigger>
         <DialogContent
           aria-describedby={undefined}
         >
           <VisuallyHidden>
-            <DialogTitle>Model Settings</DialogTitle>
+            <DialogTitle>{t('sumBtn.model')}</DialogTitle>
           </VisuallyHidden>
           <ModelSettingsModal
             onSave={async (config) => {
@@ -186,10 +191,12 @@ export function SummaryGeneratorButtonGroup({
             <Button
               variant="outline"
               size="sm"
-              title="Select summary template"
+              title={t('sumBtn.template')}
             >
               <FileText />
-              <span className="hidden @[40rem]:inline">Template</span>
+              <span className="hidden @[40rem]:inline max-w-[9rem] truncate">
+                {availableTemplates.find((tpl) => tpl.id === selectedTemplate)?.name ?? t('sumBtn.template')}
+              </span>
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
@@ -200,7 +207,12 @@ export function SummaryGeneratorButtonGroup({
                 title={template.description}
                 className="flex items-center justify-between gap-2"
               >
-                <span>{template.name}</span>
+                <span className="flex items-center gap-1.5">
+                  {template.name}
+                  {recommendedTemplate === template.id && (
+                    <span className="rounded bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700">{t('templates.recommended')}</span>
+                  )}
+                </span>
                 {selectedTemplate === template.id && (
                   <Check className="h-4 w-4 text-green-600" />
                 )}
@@ -218,7 +230,7 @@ export function SummaryGeneratorButtonGroup({
                   className="flex items-center gap-2"
                 >
                   <SlidersHorizontal className="h-4 w-4" />
-                  <span>Manage templates…</span>
+                  <span>{t('templates.manage')}</span>
                 </DropdownMenuItem>
               </>
             )}

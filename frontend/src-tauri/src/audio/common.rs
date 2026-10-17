@@ -14,10 +14,18 @@ pub(crate) async fn acquire_engine_lifecycle_lock() -> OwnedMutexGuard<()> {
     ENGINE_LIFECYCLE_LOCK.clone().lock_owned().await
 }
 
-/// Unload the transcription engine after a batch job (import or retranscription).
-/// Skips unloading if a live recording is currently in progress, since recording
-/// uses the same global engine instances.
-pub(crate) async fn unload_engine_after_batch(use_parakeet: bool) {
+/// Non-blocking variant for background housekeeping that must never delay a
+/// recording start.
+pub(crate) fn try_acquire_engine_lifecycle_lock(
+) -> Result<OwnedMutexGuard<()>, tokio::sync::TryLockError> {
+    ENGINE_LIFECYCLE_LOCK.clone().try_lock_owned()
+}
+
+/// Hand the transcription engine back after a batch job (import or
+/// retranscription). Whether it is unloaded now or kept warm for the next
+/// recording is decided by the model residency policy; a live recording is
+/// never affected.
+pub(crate) async fn unload_engine_after_batch<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     let _engine_lifecycle_guard = acquire_engine_lifecycle_lock().await;
 
     if crate::audio::recording_commands::is_recording().await {
@@ -25,23 +33,25 @@ pub(crate) async fn unload_engine_after_batch(use_parakeet: bool) {
         return;
     }
 
-    if use_parakeet {
-        use crate::parakeet_engine::commands::PARAKEET_ENGINE;
-        let engine = {
-            let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-            guard.as_ref().cloned()
-        };
-        if let Some(e) = engine {
-            e.unload_model().await;
-        }
-    } else {
-        use crate::whisper_engine::commands::WHISPER_ENGINE;
-        let engine = {
-            let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-            guard.as_ref().cloned()
-        };
-        if let Some(e) = engine {
-            e.unload_model().await;
+    crate::audio::transcription::residency::release_after_use(app).await;
+}
+
+/// Decide whether a batch job (import / retranscription) runs in the cloud.
+///
+/// An explicit provider id wins. With no provider, the saved transcript
+/// provider is used when it is an available cloud provider, so "transcribe
+/// this recording" follows the user's configured choice. Local ids (and
+/// unknown ids) return `None`, keeping the existing Whisper/Parakeet paths.
+pub(crate) async fn resolve_batch_cloud_provider<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    provider: Option<&str>,
+) -> Option<String> {
+    use crate::audio::transcription::is_cloud_transcription_provider;
+    match provider.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(explicit) => is_cloud_transcription_provider(explicit).then(|| explicit.to_string()),
+        None => {
+            let configured = crate::audio::transcription::configured_provider_id(app).await;
+            is_cloud_transcription_provider(&configured).then_some(configured)
         }
     }
 }

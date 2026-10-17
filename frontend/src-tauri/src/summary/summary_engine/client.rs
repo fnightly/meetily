@@ -168,6 +168,9 @@ pub async fn generate_with_builtin(
         global_manager.clone().unwrap()
     };
 
+    // Free an idle speech model first so the two large models are not resident together.
+    crate::audio::transcription::residency::release_for_heavy_task("built-in summary model").await;
+
     // Ensure sidecar is running with this model
     manager.ensure_running(model_path.clone()).await?;
 

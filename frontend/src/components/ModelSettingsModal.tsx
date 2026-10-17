@@ -13,6 +13,8 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
+  SelectGroup,
+  SelectLabel,
 } from '@/components/ui/select';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -28,6 +30,8 @@ import {
   CommandList,
 } from '@/components/ui/command';
 import { cn, isOllamaNotInstalledError } from '@/lib/utils';
+import { useI18n } from '@/contexts/I18nContext';
+import { LLM_PRESETS, applyPreset, presetForEndpoint, type LlmPreset } from '@/lib/llm-presets';
 import { toast } from 'sonner';
 
 export interface ModelConfig {
@@ -130,6 +134,7 @@ export function ModelSettingsModal({
   const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(!!modelConfig.apiKey?.trim());
   const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
   const { serverAddress } = useSidebar();
+  const { t } = useI18n();
   const [openRouterModels, setOpenRouterModels] = useState<OpenRouterModel[]>([]);
   const [openRouterError, setOpenRouterError] = useState<string>('');
   const [isLoadingOpenRouter, setIsLoadingOpenRouter] = useState<boolean>(false);
@@ -149,6 +154,20 @@ export function ModelSettingsModal({
   const [customOpenAIEndpoint, setCustomOpenAIEndpoint] = useState<string>(modelConfig.customOpenAIEndpoint || '');
   const [customOpenAIModel, setCustomOpenAIModel] = useState<string>(modelConfig.customOpenAIModel || '');
   const [customOpenAIApiKey, setCustomOpenAIApiKey] = useState<string>(modelConfig.customOpenAIApiKey || '');
+  // Vendor preset matching the current endpoint (DeepSeek, Qwen, LM Studio …).
+  const activePreset = presetForEndpoint(customOpenAIEndpoint);
+  const applyPresetToDraft = (
+    preset: LlmPreset,
+    base?: { endpoint: string; model: string; apiKey: string },
+  ) => {
+    const next = applyPreset(
+      base ?? { endpoint: customOpenAIEndpoint, model: customOpenAIModel, apiKey: customOpenAIApiKey },
+      preset,
+    );
+    setCustomOpenAIEndpoint(next.endpoint);
+    setCustomOpenAIModel(next.model);
+    setCustomOpenAIApiKey(next.apiKey);
+  };
   const [customMaxTokens, setCustomMaxTokens] = useState<string>(modelConfig.maxTokens?.toString() || '');
   const [customTemperature, setCustomTemperature] = useState<string>(modelConfig.temperature?.toString() || '');
   const [customTopP, setCustomTopP] = useState<string>(modelConfig.topP?.toString() || '');
@@ -671,7 +690,7 @@ export function ModelSettingsModal({
   // Test custom OpenAI connection
   const testCustomOpenAIConnection = async () => {
     if (!customOpenAIEndpoint.trim() || !customOpenAIModel.trim()) {
-      toast.error('Please enter endpoint URL and model name first');
+      toast.error(t('llm.needEndpointAndModel'));
       return;
     }
 
@@ -682,7 +701,7 @@ export function ModelSettingsModal({
         apiKey: customOpenAIApiKey.trim() || null,
         model: customOpenAIModel.trim(),
       });
-      toast.success(result.message || 'Connection successful!');
+      toast.success(result.message || t('llm.connectionOk'));
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       toast.error(errorMsg);
@@ -804,17 +823,30 @@ export function ModelSettingsModal({
   return (
     <div>
       <div className="flex justify-between items-center mb-4">
-        <h3 className="text-lg font-semibold">Model Settings</h3>
+        <h3 className="text-lg font-semibold">{t('llm.title')}</h3>
       </div>
 
       <div className="space-y-4">
         <div>
-          <Label>Summarization Model</Label>
+          <Label>{t('llm.summaryModel')}</Label>
           <div className="flex space-x-2 mt-1">
             <Select
-              value={modelConfig.provider}
+              value={
+                modelConfig.provider === 'custom-openai' && activePreset
+                  ? `preset:${activePreset.id}`
+                  : modelConfig.provider
+              }
               onValueChange={(value) => {
-                const provider = value as ModelConfig['provider'];
+                // Vendor presets are the custom OpenAI-compatible provider with
+                // the endpoint pre-filled.
+                const preset = value.startsWith('preset:')
+                  ? LLM_PRESETS.find((p) => `preset:${p.id}` === value)
+                  : undefined;
+                const provider = (preset ? 'custom-openai' : value) as ModelConfig['provider'];
+                if (preset && modelConfig.provider === 'custom-openai') {
+                  applyPresetToDraft(preset);
+                  return;
+                }
 
                 // Clear error state when switching providers
                 setError('');
@@ -864,23 +896,50 @@ export function ModelSettingsModal({
                       setCustomTemperature(config.temperature?.toString() || '');
                       setCustomTopP(config.topP?.toString() || '');
                     }
+                    if (preset) {
+                      applyPresetToDraft(preset, {
+                        endpoint: config?.endpoint || '',
+                        model: config?.model || '',
+                        apiKey: config?.apiKey || '',
+                      });
+                    }
                   }).catch((err) => {
                     console.error('Failed to load custom OpenAI config:', err);
+                    if (preset) applyPresetToDraft(preset, { endpoint: '', model: '', apiKey: '' });
                   });
                 }
               }}
             >
-              <SelectTrigger>
-                <SelectValue placeholder="Select provider" />
+              <SelectTrigger aria-label={t('llm.provider')}>
+                <SelectValue placeholder={t('llm.selectProvider')} />
               </SelectTrigger>
-              <SelectContent className="max-h-64 overflow-y-auto">
-                <SelectItem value="builtin-ai">Built-in AI (Offline, No API needed)</SelectItem>
-                <SelectItem value="claude">Claude</SelectItem>
-                <SelectItem value="custom-openai">Custom Server (OpenAI)</SelectItem>
-                <SelectItem value="groq">Groq</SelectItem>
-                <SelectItem value="ollama">Ollama</SelectItem>
-                <SelectItem value="openai">OpenAI</SelectItem>
-                <SelectItem value="openrouter">OpenRouter</SelectItem>
+              <SelectContent className="max-h-80 overflow-y-auto">
+                <SelectGroup>
+                  <SelectLabel>{t('llm.group.local')}</SelectLabel>
+                  <SelectItem value="builtin-ai">🏠 {t('llm.builtin')}</SelectItem>
+                  <SelectItem value="ollama">🏠 Ollama</SelectItem>
+                  {LLM_PRESETS.filter((p) => p.kind === 'local').map((p) => (
+                    <SelectItem key={p.id} value={`preset:${p.id}`}>🏠 {p.label}</SelectItem>
+                  ))}
+                </SelectGroup>
+                <SelectGroup>
+                  <SelectLabel>{t('llm.group.cloudCn')}</SelectLabel>
+                  {LLM_PRESETS.filter((p) => p.kind === 'cloud' && p.id !== 'gemini').map((p) => (
+                    <SelectItem key={p.id} value={`preset:${p.id}`}>☁️ {p.label}</SelectItem>
+                  ))}
+                </SelectGroup>
+                <SelectGroup>
+                  <SelectLabel>{t('llm.group.cloudGlobal')}</SelectLabel>
+                  <SelectItem value="claude">☁️ Claude</SelectItem>
+                  <SelectItem value="openai">☁️ OpenAI</SelectItem>
+                  <SelectItem value="groq">☁️ Groq</SelectItem>
+                  <SelectItem value="openrouter">☁️ OpenRouter</SelectItem>
+                  <SelectItem value="preset:gemini">☁️ Google Gemini</SelectItem>
+                </SelectGroup>
+                <SelectGroup>
+                  <SelectLabel>{t('llm.group.custom')}</SelectLabel>
+                  <SelectItem value="custom-openai">🔧 {t('llm.customServer')}</SelectItem>
+                </SelectGroup>
               </SelectContent>
             </Select>
 
@@ -947,8 +1006,35 @@ export function ModelSettingsModal({
         {/* Custom OpenAI Configuration Section */}
         {modelConfig.provider === 'custom-openai' && (
           <div className="space-y-4 border-t pt-4">
+            {activePreset && (
+              <div
+                className={cn(
+                  'rounded-md border p-3 text-xs',
+                  activePreset.kind === 'local'
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                    : 'border-sky-200 bg-sky-50 text-sky-800',
+                )}
+              >
+                <div className="font-medium">
+                  {activePreset.kind === 'local' ? '🏠 ' : '☁️ '}
+                  {activePreset.label} ·{' '}
+                  {activePreset.kind === 'local' ? t('llm.preset.localBadge') : t('llm.preset.cloudBadge')}
+                </div>
+                {activePreset.noteKey && <p className="mt-1">{t(activePreset.noteKey)}</p>}
+                {activePreset.keyUrl && (
+                  <a
+                    href={activePreset.keyUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mt-1 inline-flex items-center gap-1 underline"
+                  >
+                    {t('llm.preset.getKey')} <ExternalLink className="h-3 w-3" />
+                  </a>
+                )}
+              </div>
+            )}
             <div>
-              <Label htmlFor="custom-endpoint">Endpoint URL *</Label>
+              <Label htmlFor="custom-endpoint">{t('llm.endpoint')} *</Label>
               <Input
                 id="custom-endpoint"
                 value={customOpenAIEndpoint}
@@ -957,32 +1043,61 @@ export function ModelSettingsModal({
                 className="mt-1"
               />
               <p className="text-xs text-muted-foreground mt-1">
-                Base URL of the OpenAI-compatible API
+                {t('llm.endpointHint')}
               </p>
             </div>
 
             <div>
-              <Label htmlFor="custom-model">Model Name *</Label>
+              <Label htmlFor="custom-model">{t('llm.modelName')} *</Label>
               <Input
                 id="custom-model"
                 value={customOpenAIModel}
                 onChange={(e) => setCustomOpenAIModel(e.target.value)}
-                placeholder="gpt-4, llama-3-70b, etc."
+                placeholder={activePreset?.models[0] ?? 'qwen2.5:7b, deepseek-chat …'}
+                list="custom-model-suggestions"
                 className="mt-1"
               />
+              {activePreset && activePreset.models.length > 0 && (
+                <>
+                  <datalist id="custom-model-suggestions">
+                    {activePreset.models.map((m) => (
+                      <option key={m} value={m} />
+                    ))}
+                  </datalist>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {activePreset.models.map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => setCustomOpenAIModel(m)}
+                        className={cn(
+                          'rounded-full border px-2 py-0.5 text-xs transition-colors',
+                          customOpenAIModel === m
+                            ? 'border-blue-500 bg-blue-50 text-blue-700'
+                            : 'border-gray-200 text-gray-600 hover:bg-gray-50',
+                        )}
+                      >
+                        {m}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
               <p className="text-xs text-muted-foreground mt-1">
-                Model identifier to use for requests
+                {t('llm.modelHint')}
               </p>
             </div>
 
             <div>
-              <Label htmlFor="custom-api-key">API Key (optional)</Label>
+              <Label htmlFor="custom-api-key">
+                {activePreset?.requiresKey ? t('llm.apiKeyRequired') : t('llm.apiKeyOptional')}
+              </Label>
               <Input
                 id="custom-api-key"
                 type="password"
                 value={customOpenAIApiKey}
                 onChange={(e) => setCustomOpenAIApiKey(e.target.value)}
-                placeholder="Leave empty if not required"
+                placeholder={activePreset?.requiresKey ? t('llm.apiKeyPlaceholder') : t('llm.apiKeyEmptyOk')}
                 className="mt-1"
               />
             </div>
@@ -993,7 +1108,7 @@ export function ModelSettingsModal({
                 className="flex items-center justify-between cursor-pointer py-2"
                 onClick={() => setIsCustomOpenAIAdvancedOpen(!isCustomOpenAIAdvancedOpen)}
               >
-                <Label className="cursor-pointer">Advanced Options</Label>
+                <Label className="cursor-pointer">{t('llm.advanced')}</Label>
                 {isCustomOpenAIAdvancedOpen ? (
                   <ChevronUp className="h-4 w-4 text-muted-foreground" />
                 ) : (
@@ -1058,12 +1173,12 @@ export function ModelSettingsModal({
               {isTestingConnection ? (
                 <>
                   <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-                  Testing Connection...
+                  {t('llm.testing')}
                 </>
               ) : (
                 <>
                   <CheckCircle2 className="mr-2 h-4 w-4" />
-                  Test Connection
+                  {t('llm.testConnection')}
                 </>
               )}
             </Button>

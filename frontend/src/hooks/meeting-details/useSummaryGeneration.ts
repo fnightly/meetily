@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { tr } from '@/lib/i18n';
 import {
   CancelSummaryResponse,
   MeetingSummary,
@@ -11,6 +12,7 @@ import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
+import { displaySpeaker, fetchSpeakerNames, type SpeakerNames } from '@/lib/speaker-names';
 
 import {
   detectAndCacheSummaryLanguage,
@@ -28,8 +30,8 @@ async function resolveSummaryLanguage(
     if (perMeeting.language) return perMeeting.language;
   } catch (err) {
     console.warn('Failed to load meeting summary language:', err);
-    toast.warning('Could not load saved summary language', {
-      description: 'Using Auto for this generation.',
+    toast.warning(tr('toast.summaryLangLoadFailed'), {
+      description: tr('toast.usingAuto'),
     });
   }
 
@@ -43,8 +45,8 @@ async function resolveSummaryLanguage(
   try {
     const detection = await detectAndCacheSummaryLanguage(meetingId, transcriptTexts);
     if (detection.reason === 'tie') {
-      toast.warning('Bilingual transcript detected', {
-        description: 'Pick a summary language manually if Auto chooses the wrong fallback.',
+      toast.warning(tr('toast.bilingualDetected'), {
+        description: tr('toast.bilingualHint'),
       });
     }
     return detection.language;
@@ -161,7 +163,7 @@ export function useSummaryGeneration({
     activeProcessIdRef.current = null;
     setSummaryError(message);
     setSummaryStatus('error');
-    toast.error(`Failed to ${isRegeneration ? 'regenerate' : 'generate'} summary`, {
+    toast.error(isRegeneration ? tr('toast.regenerateFailed') : tr('toast.summaryFailed'), {
       description: message,
     });
     await finishGeneration(generationId, outcome);
@@ -222,8 +224,8 @@ export function useSummaryGeneration({
           setAiSummary(restoredSummary);
           setSummaryStatus('completed');
           setSummaryError(null);
-          toast.error('Failed to regenerate summary', {
-            description: `${errorMessage}. Your previous summary has been restored.`,
+          toast.error(tr('toast.regenerateFailed'), {
+            description: tr('toast.regenRestored', { error: errorMessage }),
           });
           activeProcessIdRef.current = null;
           await finishGeneration(generationId, 'generation_error');
@@ -253,14 +255,14 @@ export function useSummaryGeneration({
       activeProcessIdRef.current = null;
       setSummaryError(null);
       if (metadata.normalizationFallback) {
-        toast.warning('Summary generated with fallback', {
-          description: 'English normalization failed, so the original sanitized summary was kept.',
+        toast.warning(tr('toast.summaryFallback'), {
+          description: tr('toast.summaryFallbackHint'),
         });
       } else {
-        toast.success('Summary generated successfully!', {
+        toast.success(tr('toast.summaryReady'), {
           description: metadata.reasoningStripped
-            ? 'Your meeting summary is ready. Model reasoning was filtered out of the notes.'
-            : 'Your meeting summary is ready',
+            ? tr('toast.summaryReadyReasoning')
+            : tr('toast.summaryReadyHint'),
           duration: 4000,
         });
       }
@@ -428,12 +430,12 @@ export function useSummaryGeneration({
       return allData.transcripts;
     } catch (error) {
       console.error('❌ Error fetching all transcripts:', error);
-      toast.error('Failed to fetch transcripts for summary generation');
+      toast.error(tr('toast.fetchTranscriptsFailed'));
       return [];
     }
   }, []);
 
-  const buildSummaryTranscriptPayload = useCallback((allTranscripts: Transcript[]) => {
+  const buildSummaryTranscriptPayload = useCallback((allTranscripts: Transcript[], names: SpeakerNames = {}) => {
     const formatTime = (seconds: number | undefined, fallbackTimestamp: string): string => {
       if (seconds === undefined) {
         return fallbackTimestamp;
@@ -444,7 +446,11 @@ export function useSummaryGeneration({
 
     return {
       transcriptText: allTranscripts
-        .map((transcript) => `${formatTime(transcript.audio_start_time, transcript.timestamp)} ${transcript.text}`)
+        .map((transcript) => {
+          // Named speakers let the summary attribute decisions and owners ("张总: …").
+          const who = transcript.speaker ? ` ${displaySpeaker(transcript.speaker, tr, names)}:` : '';
+          return `${formatTime(transcript.audio_start_time, transcript.timestamp)}${who} ${transcript.text}`;
+        })
         .join('\n'),
       transcriptTexts: allTranscripts.map((transcript) => transcript.text),
     };
@@ -458,7 +464,7 @@ export function useSummaryGeneration({
 
   const handleGenerateSummary = useCallback(async (customPrompt: string = '') => {
     if (isModelConfigLoading) {
-      toast.info('Loading model configuration, please wait...');
+      toast.info(tr('toast.loadingModelConfig'));
       return;
     }
     const allTranscripts = await fetchAllTranscripts(meeting.id);
@@ -500,7 +506,7 @@ export function useSummaryGeneration({
     }
 
     await processSummary({
-      ...buildSummaryTranscriptPayload(allTranscripts),
+      ...buildSummaryTranscriptPayload(allTranscripts, await fetchSpeakerNames(meeting.id)),
       customPrompt,
     });
   }, [
@@ -520,12 +526,12 @@ export function useSummaryGeneration({
 
     if (!allTranscripts.length) {
       console.error('No transcripts available for regeneration');
-      toast.error('No transcripts available for summary regeneration');
+      toast.error(tr('toast.noTranscriptsForRegen'));
       return;
     }
 
     await processSummary({
-      ...buildSummaryTranscriptPayload(allTranscripts),
+      ...buildSummaryTranscriptPayload(allTranscripts, await fetchSpeakerNames(meeting.id)),
       isRegeneration: true
     });
   }, [meeting.id, fetchAllTranscripts, buildSummaryTranscriptPayload, processSummary]);
@@ -540,8 +546,8 @@ export function useSummaryGeneration({
       setSummaryStatus('idle');
       setSummaryError(null);
       await finishGeneration(generationId, 'cancelled');
-      toast.info('Summary generation stopped', {
-        description: 'You can generate a new summary anytime',
+      toast.info(tr('toast.summaryStopped'), {
+        description: tr('toast.summaryStoppedHint'),
         duration: 3000,
       });
       return;
@@ -562,13 +568,13 @@ export function useSummaryGeneration({
         setSummaryStatus('idle');
         setSummaryError(null);
         await finishGeneration(generationId, 'cancelled');
-        toast.info('Summary generation stopped', {
-          description: 'You can generate a new summary anytime',
+        toast.info(tr('toast.summaryStopped'), {
+          description: tr('toast.summaryStoppedHint'),
           duration: 3000,
         });
       } else if (activeProcessIdRef.current === processId) {
-        toast.info('Summary is already finishing', {
-          description: 'Waiting for the latest result.',
+        toast.info(tr('toast.summaryFinishing'), {
+          description: tr('toast.summaryFinishingHint'),
         });
       }
     } catch (error) {
@@ -577,8 +583,8 @@ export function useSummaryGeneration({
         generationId === generationIdRef.current
         && activeProcessIdRef.current === processId
       ) {
-        toast.error('Failed to stop summary generation', {
-          description: 'Generation is still running; waiting for its latest status.',
+        toast.error(tr('toast.stopSummaryFailed'), {
+          description: tr('toast.stopSummaryFailedHint'),
         });
       }
     }

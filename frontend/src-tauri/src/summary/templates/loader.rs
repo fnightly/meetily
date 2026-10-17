@@ -307,6 +307,8 @@ pub fn is_custom_templates_dir(dir: &Path) -> bool {
 /// # Returns
 /// Parsed and validated Template struct
 pub fn get_template(template_id: &str) -> Result<Template, String> {
+    // The bundled file was once misspelled; keep saved selections working.
+    let template_id = if template_id == "psychatric_session" { "psychiatric_session" } else { template_id };
     info!("Loading template: {}", template_id);
 
     // Try custom template first, then bundled, then built-in

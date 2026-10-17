@@ -1,7 +1,9 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
+import { useI18n } from '@/contexts/I18nContext';
+import { BUILTIN_TEMPLATE_KEYS, recommendTemplate } from '@/lib/template-recommend';
 
 /** A template as listed by `api_list_templates`. */
 export interface TemplateInfo {
@@ -35,7 +37,19 @@ export interface SaveTemplateResult {
 }
 
 export function useTemplates() {
-  const [availableTemplates, setAvailableTemplates] = useState<TemplateInfo[]>([]);
+  const { t } = useI18n();
+  const [rawTemplates, setAvailableTemplates] = useState<TemplateInfo[]>([]);
+  /** True once the user picked a template by hand; recommendations then stay out of the way. */
+  const userChoseRef = useRef(false);
+  const [recommendedTemplate, setRecommendedTemplate] = useState<string | null>(null);
+
+  // Built-in names are shown in the UI language; custom names are the user's own.
+  const availableTemplates = useMemo(() => rawTemplates.map((tpl) => {
+    const key = !tpl.is_custom ? BUILTIN_TEMPLATE_KEYS[tpl.id] : undefined;
+    if (!key) return tpl;
+    const name = t(key);
+    return name === key ? tpl : { ...tpl, name };
+  }), [rawTemplates, t]);
   const [selectedTemplate, setSelectedTemplate] = useState<string>('standard_meeting');
   const [isLoadingTemplates, setIsLoadingTemplates] = useState(false);
 
@@ -60,12 +74,25 @@ export function useTemplates() {
 
   // Handle template selection
   const handleTemplateSelection = useCallback((templateId: string, templateName: string) => {
+    userChoseRef.current = true;
     setSelectedTemplate(templateId);
-    toast.success('Template selected', {
-      description: `Using "${templateName}" template for summary generation`,
+    toast.success(t('templates.selected'), {
+      description: t('templates.selectedDesc', { name: templateName }),
     });
     Analytics.trackFeatureUsed('template_selected');
-  }, []);
+  }, [t]);
+
+  /**
+   * Pick a template from the meeting's title and opening transcript — unless
+   * the user already chose one in this view.
+   */
+  const recommendFor = useCallback((title: string | null | undefined, sample: string | null | undefined) => {
+    if (userChoseRef.current || rawTemplates.length === 0) return;
+    const id = recommendTemplate(title, sample, rawTemplates.map((tpl) => tpl.id));
+    if (!id) return;
+    setRecommendedTemplate(id === 'standard_meeting' ? null : id);
+    setSelectedTemplate(id);
+  }, [rawTemplates]);
 
   /** Load one template's full definition, for editing. */
   const loadTemplate = useCallback(async (templateId: string): Promise<TemplateFull> => {
@@ -96,12 +123,12 @@ export function useTemplates() {
 
       await refreshTemplates();
       await Analytics.trackFeatureUsed('template_saved');
-      toast.success(result.overwritten ? 'Template updated' : 'Template created', {
-        description: `Saved as "${result.id}"`,
+      toast.success(result.overwritten ? t('templates.updated') : t('templates.created'), {
+        description: t('templates.savedAs', { id: result.id }),
       });
       return result;
     },
-    [refreshTemplates],
+    [refreshTemplates, t],
   );
 
   /** Copy any template (built-in included) into a new editable custom template. */
@@ -112,10 +139,10 @@ export function useTemplates() {
         newName: newName ?? null,
       });
       await refreshTemplates();
-      toast.success('Template duplicated', { description: `Saved as "${result.id}"` });
+      toast.success(t('templates.duplicated'), { description: t('templates.savedAs', { id: result.id }) });
       return result;
     },
-    [refreshTemplates],
+    [refreshTemplates, t],
   );
 
   /** Delete a custom template. Built-in templates are refused by the backend. */
@@ -124,9 +151,9 @@ export function useTemplates() {
       await invokeTauri('api_delete_template', { templateId });
       await refreshTemplates();
       await Analytics.trackFeatureUsed('template_deleted');
-      toast.success('Template deleted', { description: templateId });
+      toast.success(t('templates.deleted'), { description: templateId });
     },
-    [refreshTemplates],
+    [refreshTemplates, t],
   );
 
   /** Directory where custom templates are written (shown in the editor). */
@@ -137,6 +164,8 @@ export function useTemplates() {
   return {
     availableTemplates,
     selectedTemplate,
+    recommendedTemplate,
+    recommendFor,
     isLoadingTemplates,
     handleTemplateSelection,
     refreshTemplates,

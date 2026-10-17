@@ -1,0 +1,36 @@
+{
+  "name": "面试评估",
+  "description": "招聘面试：候选人经历、能力评估、亮点与顾虑、结论建议。",
+  "sections": [
+    {
+      "title": "候选人概况",
+      "instruction": "概括候选人的教育背景、工作经历和应聘岗位。",
+      "format": "paragraph"
+    },
+    {
+      "title": "能力评估",
+      "instruction": "按专业能力、沟通表达、解决问题、团队协作等维度给出基于面试内容的评价和依据。",
+      "format": "list"
+    },
+    {
+      "title": "亮点",
+      "instruction": "列出候选人表现突出的地方，附具体例子。",
+      "format": "list"
+    },
+    {
+      "title": "顾虑与风险",
+      "instruction": "列出存疑之处、经历空白或需要进一步核实的问题。",
+      "format": "list"
+    },
+    {
+      "title": "薪资与入职信息",
+      "instruction": "记录期望薪资、到岗时间、其他 offer 等信息；没有提到则写“未提及”。",
+      "format": "list"
+    },
+    {
+      "title": "结论建议",
+      "instruction": "给出是否推进到下一轮的建议，以及下一轮需要重点考察的问题。仅依据面试内容。",
+      "format": "paragraph"
+    }
+  ]
+}

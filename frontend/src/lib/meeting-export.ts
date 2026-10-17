@@ -257,45 +257,98 @@ export function transcriptToMarkdown(
 export type ExportScope = 'summary' | 'transcript' | 'both';
 
 /**
+ * Headings and fixed phrases written into exported documents.
+ *
+ * Passed in so the document is written in the interface language; the English
+ * defaults keep this module usable (and testable) without the i18n layer.
+ */
+export interface ExportLabels {
+  untitled: string;
+  date: string;
+  meetingId: string;
+  segments: string;
+  duration: string;
+  summary: string;
+  transcript: string;
+  noSummary: string;
+  noTranscript: string;
+}
+
+export const DEFAULT_EXPORT_LABELS: ExportLabels = {
+  untitled: 'Untitled Meeting',
+  date: 'Date',
+  meetingId: 'Meeting ID',
+  segments: 'Segments',
+  duration: 'Duration',
+  summary: 'Summary',
+  transcript: 'Transcript',
+  noSummary: 'No summary has been generated for this meeting.',
+  noTranscript: 'No transcript is available for this meeting.',
+};
+
+/** Recording length from the transcript itself (last segment end). */
+export function transcriptDurationSeconds(transcripts: ExportSegment[] | undefined): number | null {
+  if (!transcripts || transcripts.length === 0) return null;
+  let max = 0;
+  for (const s of transcripts) {
+    const end = s.audio_end_time ?? s.audio_start_time;
+    if (typeof end === 'number' && Number.isFinite(end) && end > max) max = end;
+  }
+  return max > 0 ? max : null;
+}
+
+/** The metadata lines shared by every export format, as label/value pairs. */
+export function meetingMetaPairs(
+  { meeting, transcripts }: MeetingExportInput,
+  labels: ExportLabels = DEFAULT_EXPORT_LABELS,
+): Array<[string, string]> {
+  const pairs: Array<[string, string]> = [];
+  if (meeting.created_at) {
+    const created = new Date(meeting.created_at);
+    pairs.push([
+      labels.date,
+      Number.isNaN(created.getTime()) ? meeting.created_at : created.toLocaleString(),
+    ]);
+  }
+  const duration = transcriptDurationSeconds(transcripts);
+  if (duration) pairs.push([labels.duration, formatOffset(duration)]);
+  if (transcripts && transcripts.length > 0) {
+    pairs.push([labels.segments, String(transcripts.length)]);
+  }
+  pairs.push([labels.meetingId, meeting.id]);
+  return pairs;
+}
+
+/**
  * Build the complete markdown document for a meeting.
  *
  * `scope` decides which parts are included; the other parts are omitted
  * entirely rather than left as empty headings.
  */
 export function buildMeetingMarkdown(
-  { meeting, summary, transcripts, speakerLabel }: MeetingExportInput,
+  input: MeetingExportInput,
   scope: ExportScope = 'both',
+  labels: ExportLabels = DEFAULT_EXPORT_LABELS,
 ): string {
-  const title = meeting.title?.trim() || 'Untitled Meeting';
+  const { meeting, summary, transcripts, speakerLabel } = input;
+  const title = meeting.title?.trim() || labels.untitled;
   const parts: string[] = [`# ${title}\n`];
 
-  const meta: string[] = [];
-  if (meeting.created_at) {
-    const created = new Date(meeting.created_at);
-    meta.push(
-      `- **Date:** ${
-        Number.isNaN(created.getTime()) ? meeting.created_at : created.toLocaleString()
-      }`,
-    );
-  }
-  meta.push(`- **Meeting ID:** \`${meeting.id}\``);
-  if (transcripts && transcripts.length > 0) {
-    meta.push(`- **Segments:** ${transcripts.length}`);
-  }
+  const meta = meetingMetaPairs(input, labels).map(([label, value]) =>
+    label === labels.meetingId ? `- **${label}:** \`${value}\`` : `- **${label}:** ${value}`,
+  );
   parts.push(meta.join('\n') + '\n');
 
   if (scope === 'summary' || scope === 'both') {
     const summaryMd = summaryToMarkdown(summary);
-    parts.push('## Summary\n');
-    parts.push(summaryMd ? summaryMd + '\n' : '_No summary has been generated for this meeting._\n');
+    parts.push(`## ${labels.summary}\n`);
+    parts.push(summaryMd ? summaryMd + '\n' : `_${labels.noSummary}_\n`);
   }
 
   if (scope === 'transcript' || scope === 'both') {
     const transcriptMd = transcriptToMarkdown(transcripts, speakerLabel);
-    parts.push('## Transcript\n');
-    parts.push(
-      transcriptMd ? transcriptMd + '\n' : '_No transcript is available for this meeting._\n',
-    );
+    parts.push(`## ${labels.transcript}\n`);
+    parts.push(transcriptMd ? transcriptMd + '\n' : `_${labels.noTranscript}_\n`);
   }
 
   return parts.join('\n');

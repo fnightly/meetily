@@ -9,6 +9,8 @@ pub mod engine;
 pub mod worker;
 pub mod catalog;
 pub mod provider_commands;
+pub mod cloud_provider;
+pub mod residency;
 
 // Re-export commonly used types
 pub use catalog::{
@@ -19,6 +21,7 @@ pub use catalog::{
 pub use provider::{TranscriptionError, TranscriptionProvider, TranscriptResult};
 pub use whisper_provider::WhisperProvider;
 pub use parakeet_provider::ParakeetProvider;
+pub use cloud_provider::{is_cloud_transcription_provider, CloudSpeechProvider};
 pub use engine::{
     TranscriptionEngine,
     configured_provider_id,

@@ -21,6 +21,7 @@ import { PostRecordingDialog } from '@/components/PostRecordingDialog';
 import { indexedDBService } from '@/services/indexedDBService';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
+import { HomeDashboard } from '@/components/home/HomeDashboard';
 
 export default function Home() {
   // Local page state (not moved to contexts)
@@ -29,7 +30,7 @@ export default function Home() {
   const [showRecoveryDialog, setShowRecoveryDialog] = useState(false);
 
   // Use contexts for state management
-  const { meetingTitle } = useTranscripts();
+  const { meetingTitle, transcripts } = useTranscripts();
   const { transcriptModelConfig, selectedDevices } = useConfig();
   const recordingState = useRecordingState();
 
@@ -194,8 +195,19 @@ export default function Home() {
   // Computed values using global status
   const isProcessingStop = status === RecordingStatus.PROCESSING_TRANSCRIPTS || isProcessing;
 
+  // Idle with nothing on screen: show the dashboard instead of an empty transcript.
+  // The recording controls stay mounted (hidden) so their listeners are unaffected.
+  const showDashboard =
+    !recordingState.isRecording &&
+    !isStopping &&
+    !isProcessingStop &&
+    !isSaving &&
+    status !== RecordingStatus.STOPPING &&
+    status !== RecordingStatus.SAVING &&
+    transcripts.length === 0;
+
   return (
-    <div className="flex flex-col h-screen bg-gray-50">
+    <div className="flex flex-col h-screen bg-background">
       {/* All Modals supported*/}
       <SettingsModals
         modals={modals}
@@ -227,25 +239,33 @@ export default function Home() {
         onDismiss={() => void handlePostRecordingChoice('keep')}
       />
       <div className="flex flex-1 overflow-hidden">
-        <TranscriptPanel
-          isProcessingStop={isProcessingStop}
-          isStopping={isStopping}
-          showModal={showModal}
-        />
+        {showDashboard ? (
+          <HomeDashboard
+            hasMicrophone={hasMicrophone}
+            isStarting={status === RecordingStatus.STARTING}
+            onStart={() => window.dispatchEvent(new CustomEvent('start-recording-from-sidebar'))}
+          />
+        ) : (
+          <TranscriptPanel
+            isProcessingStop={isProcessingStop}
+            isStopping={isStopping}
+            showModal={showModal}
+          />
+        )}
 
         {/* Recording controls - only show when permissions are granted or already recording and not showing status messages */}
         {(hasMicrophone || isRecording) &&
           status !== RecordingStatus.PROCESSING_TRANSCRIPTS &&
           status !== RecordingStatus.SAVING && (
-            <div className="fixed bottom-12 left-0 right-0 z-10">
+            <div className={`fixed bottom-8 left-0 right-0 z-10 ${showDashboard ? 'hidden' : ''}`}>
               <div
-                className="flex justify-center pl-8 transition-[margin] duration-300"
+                className="flex justify-center transition-[margin] duration-300"
                 style={{
                   marginLeft: sidebarCollapsed ? '4rem' : '16rem'
                 }}
               >
                 <div className="w-2/3 max-w-[750px] flex justify-center">
-                  <div className="bg-white rounded-full shadow-lg flex items-center">
+                  <div className="bg-white/95 backdrop-blur rounded-full border border-slate-200 shadow-[0_12px_32px_-12px_rgba(15,23,42,0.25)] flex items-center">
                     <RecordingControls
                       isRecording={recordingState.isRecording}
                       onRecordingStop={(callApi = true) => handleRecordingStop(callApi)}

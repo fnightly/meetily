@@ -1,4 +1,5 @@
 'use client';
+import { tr } from '@/lib/i18n';
 
 import React, { useEffect, useRef, useState } from 'react';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -90,7 +91,7 @@ export function RecordingLevelMonitor({ active, className = '' }: RecordingLevel
         <Mic className="w-4 h-4 text-gray-500 shrink-0" />
         <div className="flex-1 space-y-1">
           {latest.length === 0 ? (
-            <p className="text-xs text-gray-500">Waiting for audio…</p>
+            <p className="text-xs text-gray-500">{tr('live.waitingAudio')}</p>
           ) : (
             latest.map((sample) => (
               <LevelBar key={sample.device_name} sample={sample} />

@@ -86,6 +86,14 @@ impl DatabaseManager {
         log::info!("Tauri DB path: {}", tauri_db_path);
         log::info!("Legacy backend DB path: {}", backend_db_path);
 
+        // A restore staged by the previous session is swapped in before the
+        // pool opens; the replaced database is kept as a dated safety copy.
+        match crate::workspace::backup::apply_pending_restore(Path::new(&tauri_db_path)) {
+            Ok(true) => log::info!("Restored database from backup"),
+            Ok(false) => {}
+            Err(e) => log::error!("Failed to apply staged restore: {}", e),
+        }
+
         // Try to open database with defensive WAL handling
         match Self::new(&tauri_db_path, &backend_db_path).await {
             Ok(db_manager) => {
@@ -172,6 +180,11 @@ impl DatabaseManager {
 
         // Now use the standard initialization which will detect and migrate the legacy db
         Self::new_from_app_handle(app_handle).await
+    }
+
+    /// The database file this manager has open.
+    pub fn db_path(&self) -> &Path {
+        &self.db_path
     }
 
     pub fn pool(&self) -> &SqlitePool {
