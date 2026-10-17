@@ -1211,14 +1211,14 @@ fn a_stricter_threshold_does_not_merge_more_speakers() {
     let strict = diarize_samples(
         &samples,
         &models_dir(),
-        DiarizationConfig { threshold: 0.55, max_speakers: 12 },
+        DiarizationConfig { threshold: 0.55, max_speakers: 12, pair_stride: 1 },
     )
     .expect("strict run");
 
     let loose = diarize_samples(
         &samples,
         &models_dir(),
-        DiarizationConfig { threshold: 0.90, max_speakers: 12 },
+        DiarizationConfig { threshold: 0.90, max_speakers: 12, pair_stride: 1 },
     )
     .expect("loose run");
 
@@ -1372,4 +1372,58 @@ fn how_much_of_the_embedding_work_is_redundant() {
             lengths[lengths.len() / 2] as f64 / 16_000.0
         );
     }
+}
+
+
+/// How much time a window stride saves, and what it costs in clustering detail.
+///
+/// Embedding dominates a run and consecutive windows overlap heavily, so a stride removes
+/// duplicated work. It also removes samples the clustering had, which is the cost this
+/// measures: the reference clip is known to hold four speakers, so any stride that stops
+/// reporting four has given up too much.
+#[test]
+#[ignore = "needs the upstream ~45MB models and reference audio; run with --ignored --nocapture"]
+fn strides_trade_time_for_clustering_detail() {
+    use super::diarization_service::{diarize_samples, DiarizationConfig};
+    use std::time::Instant;
+
+    if skip_unless_available() {
+        return;
+    }
+
+    init_onnx_runtime().expect("ONNX Runtime");
+
+    let samples = load_reference_audio(&reference_wav()).expect("reference audio");
+    let calibrated = DiarizationConfig::default();
+    println!("Audio: {:.1}s", samples.len() as f64 / 16_000.0);
+    println!("Calibrated threshold: {:.2}", calibrated.threshold);
+    println!();
+    println!("stride | speakers | seconds | speedup");
+    println!("-------|----------|---------|--------");
+
+    let mut baseline: Option<f64> = None;
+
+    for stride in [1usize, 2, 3, 4, 5, 6] {
+        let config = DiarizationConfig { pair_stride: stride, ..calibrated };
+
+        let started = Instant::now();
+        let outcome = diarize_samples(&samples, &models_dir(), config).expect("separate");
+        let elapsed = started.elapsed().as_secs_f64();
+
+        let speedup = match baseline {
+            Some(base) if elapsed > 0.0 => format!("{:.2}x", base / elapsed),
+            _ => "—".to_string(),
+        };
+        if baseline.is_none() {
+            baseline = Some(elapsed);
+        }
+
+        println!(
+            "{stride:>6} | {:>8} | {elapsed:>7.1} | {speedup:>7}",
+            outcome.speaker_count
+        );
+    }
+
+    println!();
+    println!("A stride worth using keeps the speaker count at {EXPECTED_SPEAKERS}.");
 }

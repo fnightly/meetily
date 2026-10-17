@@ -96,6 +96,9 @@ impl DiarizationPreferences {
         DiarizationConfig {
             threshold: sane.threshold,
             max_speakers: sane.max_speakers,
+            // Not user-facing: it trades clustering detail for time, and the default is the
+            // one the calibration was measured against.
+            pair_stride: DiarizationConfig::default().pair_stride,
         }
     }
 }

@@ -14,7 +14,8 @@ use std::path::Path;
 
 use super::diarization::{
     batch_window_samples, build_turns, drop_short_turns, embeddable_windows, merge_adjacent,
-    relabel_activity, select_top_speakers, speaker_count_per_frame, speaker_pairs,
+    relabel_activity, select_top_speakers, speaker_count_per_frame,
+    speaker_pairs_with_stride,
     turns_from_chunks, ChunkLabels, SegmentationMeta, DIARIZATION_SAMPLE_RATE, MIN_DURATION_OFF,
     MIN_DURATION_ON,
 };
@@ -43,6 +44,10 @@ pub struct DiarizationConfig {
     /// Upper bound on speakers. Set it well above any plausible meeting so it does not
     /// bind and turn into a floor.
     pub max_speakers: usize,
+    /// Keep only every `stride`-th segmentation window when collecting the spans to
+    /// embed. Consecutive windows overlap heavily, so the same speech is otherwise
+    /// embedded several times over; 1 keeps every window.
+    pub pair_stride: usize,
 }
 
 impl Default for DiarizationConfig {
@@ -53,6 +58,11 @@ impl Default for DiarizationConfig {
             // Higher than the clustering default: a meeting rarely has this many people,
             // and a bound that binds would mislabel rather than merely over-split.
             max_speakers: 12,
+            // Measured on the upstream four-speaker reference clip: strides 1-4 all report
+            // four speakers, stride 5 collapses them to two. Two is used rather than the
+            // faster four to keep a margin, since the cliff has only been located on one
+            // recording. 32.8s -> 17.5s for a 57s clip.
+            pair_stride: 2,
         }
     }
 }
@@ -228,7 +238,13 @@ fn diarize_inner(
 
     // --- Embed --------------------------------------------------------------
     report(DiarizationPhase::Embedding, 0.0);
-    let pairs = speaker_pairs(&chunks, meta.num_speakers, samples, &meta);
+    let pairs = speaker_pairs_with_stride(
+        &chunks,
+        meta.num_speakers,
+        samples,
+        &meta,
+        config.pair_stride,
+    );
     if pairs.is_empty() {
         log::info!("No speaker held enough speech to embed; skipping speaker separation");
         return Ok(DiarizationOutcome {

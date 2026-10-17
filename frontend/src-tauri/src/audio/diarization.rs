@@ -296,6 +296,28 @@ pub fn speaker_pairs(
     audio: &[f32],
     meta: &SegmentationMeta,
 ) -> Vec<SpeakerPair> {
+    speaker_pairs_with_stride(chunks, num_speakers, audio, meta, 1)
+}
+
+/// As [`speaker_pairs`], but only every `stride`-th chunk contributes pairs.
+///
+/// Embedding is the dominant cost of a run, and consecutive segmentation windows overlap
+/// heavily, so the same speech is embedded several times over. Skipping windows removes that
+/// duplication without changing the frame labels the final turns are built from — only the
+/// clustering input shrinks.
+///
+/// The recorded `chunk` index stays the true index into `chunks`, not the position within
+/// the kept subset, because [`relabel_activity`] looks the chunk up by it.
+///
+/// A `stride` of 0 is treated as 1.
+pub fn speaker_pairs_with_stride(
+    chunks: &[ChunkLabels],
+    num_speakers: usize,
+    audio: &[f32],
+    meta: &SegmentationMeta,
+    stride: usize,
+) -> Vec<SpeakerPair> {
+    let stride = stride.max(1);
     if num_speakers == 0 {
         return Vec::new();
     }
@@ -303,6 +325,10 @@ pub fn speaker_pairs(
     let mut pairs = Vec::new();
 
     for (chunk_index, chunk) in chunks.iter().enumerate() {
+        if chunk_index % stride != 0 {
+            continue;
+        }
+
         if chunk.num_frames == 0 {
             continue;
         }
@@ -1502,4 +1528,84 @@ mod speaker_pair_tests {
         let pairs = vec![SpeakerPair { chunk: 0, speaker: 0, samples: vec![0.0; 5_000] }];
         assert_eq!(batch_window_samples(&pairs, 10), MIN_EMBEDDING_SAMPLES);
     }
-}
+
+    // -----------------------------------------------------------------------
+    // Pair subsampling
+    //
+    // Embedding dominates a run's cost and consecutive windows overlap heavily, so the same
+    // speech is embedded repeatedly. These pin the two things a stride must not break: which
+    // chunks contribute, and what index each pair records.
+    // -----------------------------------------------------------------------
+
+    /// Chunks that each hold one speaker talking for enough frames to be embedded.
+    fn speaking_chunks(count: usize) -> Vec<ChunkLabels> {
+        (0..count)
+            .map(|index| {
+                let frames: Vec<Vec<u8>> = (0..MIN_EMBEDDING_FRAMES).map(|_| vec![0]).collect();
+                chunk(index * 16_000, &frames, 1)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_stride_of_one_keeps_every_chunk() {
+        let chunks = speaking_chunks(6);
+        let pairs = speaker_pairs_with_stride(&chunks, 1, &vec![0.1; 200_000], &meta(), 1);
+
+        assert_eq!(pairs.len(), 6);
+        let indices: Vec<usize> = pairs.iter().map(|pair| pair.chunk).collect();
+        assert_eq!(indices, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn a_stride_keeps_the_true_chunk_indices() {
+        // The recorded index is what `relabel_activity` looks the chunk up by, so it has to
+        // stay an index into the full list rather than a position in the kept subset.
+        let chunks = speaking_chunks(6);
+        let pairs = speaker_pairs_with_stride(&chunks, 1, &vec![0.1; 200_000], &meta(), 3);
+
+        let indices: Vec<usize> = pairs.iter().map(|pair| pair.chunk).collect();
+        assert_eq!(indices, vec![0, 3], "a stride must skip, not renumber");
+    }
+
+    #[test]
+    fn a_stride_reduces_the_pairs_proportionally() {
+        let chunks = speaking_chunks(10);
+        let full = speaker_pairs_with_stride(&chunks, 1, &vec![0.1; 400_000], &meta(), 1);
+        let every_fifth = speaker_pairs_with_stride(&chunks, 1, &vec![0.1; 400_000], &meta(), 5);
+
+        assert_eq!(full.len(), 10);
+        assert_eq!(every_fifth.len(), 2, "10 chunks at a stride of 5 keeps 2");
+        assert!(every_fifth.len() < full.len());
+    }
+
+    #[test]
+    fn the_default_entry_point_does_not_subsample() {
+        // `speaker_pairs` is what every existing caller uses, so its behaviour must not
+        // change when a stride becomes available.
+        let chunks = speaking_chunks(4);
+        let via_default = speaker_pairs(&chunks, 1, &vec![0.1; 200_000], &meta());
+        let via_explicit_one = speaker_pairs_with_stride(&chunks, 1, &vec![0.1; 200_000], &meta(), 1);
+
+        assert_eq!(via_default.len(), via_explicit_one.len());
+    }
+
+    #[test]
+    fn a_stride_of_zero_is_treated_as_one() {
+        // Guards against a configuration of 0 removing every pair and reading as "nothing
+        // separable" rather than as a mistake.
+        let chunks = speaking_chunks(3);
+        let pairs = speaker_pairs_with_stride(&chunks, 1, &vec![0.1; 200_000], &meta(), 0);
+
+        assert_eq!(pairs.len(), 3);
+    }
+
+    #[test]
+    fn a_stride_larger_than_the_chunk_count_keeps_the_first() {
+        // Chunk 0 is always kept, so a stride can never leave a run with nothing to embed.
+        let chunks = speaking_chunks(3);
+        let pairs = speaker_pairs_with_stride(&chunks, 1, &vec![0.1; 200_000], &meta(), 99);
+
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].chunk, 0);
+    }}
