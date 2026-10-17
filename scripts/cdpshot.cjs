@@ -78,12 +78,10 @@ window.__TAURI_INTERNALS__ = {
     if (cmd === 'plugin:store|length') return 0;
     if (cmd && cmd.indexOf('plugin:') === 0) return null;
 
-    // Commands whose result is walked as a collection. Returning null for these makes the
-    // application's own guards untested and its render tree collapse, which would say
     // nothing about the interface.
-    if (cmd.indexOf('list') !== -1 || cmd.indexOf('templates') !== -1) return [];
-    if (/^(get_ollama_models|api_get_dictionary)/.test(cmd)) return [];
 
+    // Explicit stubs win. A catch-all placed before the table would swallow commands the
+    // table answers correctly and hand back a shape the component cannot read.
     const table = {
       api_get_meeting_transcripts: function () {
         return { transcripts: T, total_count: T.length, has_more: false, loaded_count: T.length };
@@ -166,6 +164,35 @@ window.__TAURI_INTERNALS__ = {
         };
       },
       get_default_recordings_folder_path: function () { return 'D:\\\\meetily-recordings'; },
+      list_saved_recordings: function () {
+        // One entry deliberately shares the demo meeting's folder path, which is the case a
+        // merged list has to collapse into a single row.
+        return {
+          folder: 'D:\\\\meetily-recordings',
+          folder_missing: false,
+          total_bytes: 42_000_000,
+          recordings: [
+            {
+              folder_name: 'Meeting demo', folder_path: M.folder_path,
+              meeting_name: '产品周会', created_at: '2026-10-15T13:12:54Z',
+              duration_seconds: 1850, audio_file: 'audio.mp3', audio_bytes: 18_400_000,
+              has_transcript: true, has_summary: false,
+            },
+            {
+              folder_name: 'Meeting 16_10_26_22_27_48', folder_path: 'D:\\\\meetily-recordings\\\\Meeting 16',
+              meeting_name: '客户沟通', created_at: '2026-10-16T14:27:48Z',
+              duration_seconds: 420, audio_file: 'audio.mp3', audio_bytes: 4_200_000,
+              has_transcript: false, has_summary: false,
+            },
+            {
+              folder_name: 'Standup 2026-10-14', folder_path: 'D:\\\\meetily-recordings\\\\Standup',
+              meeting_name: '每日站会', created_at: '2026-10-14T01:05:00Z',
+              duration_seconds: 900, audio_file: 'audio.m4a', audio_bytes: 9_800_000,
+              has_transcript: true, has_summary: true,
+            },
+          ],
+        };
+      },
       get_recording_state: function () {
         return {
           is_recording: false,
@@ -185,7 +212,12 @@ window.__TAURI_INTERNALS__ = {
       get_meeting_note: function () { return null; },
       list_meetings: function () { return [M]; },
     };
+    // Anything explicitly stubbed above has been answered; only now fall back by shape.
+
     if (table[cmd]) return table[cmd]();
+    // Placing this first would swallow commands the table knows the shape of.
+    if (cmd.indexOf('list') !== -1 || cmd.indexOf('templates') !== -1) return [];
+    if (/^(get_ollama_models|api_get_dictionary)/.test(cmd)) return [];
     console.log('[stub] unhandled command:', cmd);
     return null;
   },

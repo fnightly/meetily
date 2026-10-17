@@ -230,10 +230,12 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
 
       <div className="p-3 bg-gray-50 border rounded-lg text-xs text-gray-600 break-all">
         <span className="font-medium">{t('library.folder')}:</span> {view?.folder ?? '—'}
-        {view && view.recordings.length > 0 && (
+        {(view?.recordings?.length ?? 0) > 0 && view && (
           <span className="ml-2">
-            PLACEHOLDER_SKIP
-            {view.recordings.length === 1 ? '' : 's'} · {formatBytes(view.total_bytes)} of audio
+            {t('library.summary', {
+              count: view.recordings.length,
+              size: formatBytes(view.total_bytes),
+            })}
           </span>
         )}
       </div>
