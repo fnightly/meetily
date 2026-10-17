@@ -265,7 +265,7 @@ export function SyncSettingsPanel() {
                   id="obsidian-tags"
                   value={tags}
                   onChange={(event) => setTags(event.target.value)}
-                  placeholder="meeting, client"
+                  placeholder={t('sync.tagsPlaceholder')}
                   spellCheck={false}
                 />
                 <p className="mt-1 text-xs text-slate-500">{t('sync.settings.tagsHint')}</p>

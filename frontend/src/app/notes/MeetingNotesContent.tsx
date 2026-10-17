@@ -8,6 +8,7 @@ import { ArrowLeft, ImagePlus, Loader2, Plus, Save, Trash2, X } from "lucide-rea
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { tr } from '@/lib/i18n';
 
 /**
  * Meeting notes editor.
@@ -199,11 +200,11 @@ export function MeetingNotesContent() {
       });
       setBlocks(saved.blocks ?? []);
       setDirty(false);
-      toast.success("Note saved");
+      toast.success(tr('notes.saved'));
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       setError(message);
-      toast.error("Failed to save note", { description: message });
+      toast.error(tr('notes.saveFailed'), { description: message });
     } finally {
       setSaving(false);
     }
@@ -243,7 +244,7 @@ export function MeetingNotesContent() {
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         setError(message);
-        toast.error("Failed to add image", { description: message });
+        toast.error(tr('notes.imageFailed'), { description: message });
       } finally {
         setUploading(false);
         if (fileInputRef.current) fileInputRef.current.value = "";

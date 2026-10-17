@@ -3,6 +3,7 @@ import { Globe } from 'lucide-react';
 import Analytics from '@/lib/analytics';
 import { toast } from 'sonner';
 import { useConfig } from '@/contexts/ConfigContext';
+import { tr } from '@/lib/i18n';
 
 export interface Language {
   code: string;
@@ -155,12 +156,12 @@ export function LanguageSelection({
 
       // Show success toast
       const languageName = selectedLang?.name || languageCode;
-      toast.success("Language preference saved", {
-        description: `Transcription language set to ${languageName}`
+      toast.success(tr('language.saved'), {
+        description: tr('language.savedDetail', { language: languageName })
       });
     } catch (error) {
       console.error('Failed to save language preference:', error);
-      toast.error("Failed to save language preference", {
+      toast.error(tr('language.saveFailed'), {
         description: error instanceof Error ? error.message : String(error)
       });
     } finally {

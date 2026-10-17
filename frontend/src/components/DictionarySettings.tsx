@@ -197,7 +197,7 @@ export function DictionarySettings() {
                 value={entry.misheard_as ?? ''}
                 onChange={(event) => handleMisheardChange(index, event.target.value)}
                 onBlur={() => void persist(entries)}
-                placeholder="misheard as (optional)"
+                placeholder={t('dictionary.misheardPlaceholder')}
                 className="flex-1"
               />
               <Button

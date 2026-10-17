@@ -26,6 +26,7 @@ import { ImportAudioDialog, ImportDropOverlay } from '@/components/ImportAudio'
 import { ImportDialogProvider } from '@/contexts/ImportDialogContext'
 import { I18nProvider } from '@/contexts/I18nContext'
 import { isAudioExtension, getAudioFormatsDisplayList } from '@/constants/audioFormats'
+import { tr } from '@/lib/i18n';
 
 
 const sourceSans3 = Source_Sans_3({
@@ -113,8 +114,8 @@ export default function RootLayout({
       console.log('[Layout] Received request-recording-toggle from tray');
 
       if (showOnboarding) {
-        toast.error("Please complete setup first", {
-          description: "You need to finish onboarding before you can start recording."
+        toast.error(tr('setup.incomplete'), {
+          description: tr('setup.incompleteDetail')
         });
       } else {
         // If in main app, forward to useRecordingStart via window event
