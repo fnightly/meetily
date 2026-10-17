@@ -30,6 +30,13 @@ pub struct ApiResponse<T> {
 pub struct Meeting {
     pub id: String,
     pub title: String,
+    /// Folder holding the meeting's recording, when one is recorded locally.
+    ///
+    /// The sidebar merges the meeting list with the recordings on disk, and this is
+    /// the key it matches them on. Without it the client has to ask for each meeting
+    /// separately, which is one round trip per row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -349,6 +356,7 @@ pub async fn api_get_meetings<R: Runtime>(
                 .map(|m| Meeting {
                     id: m.id,
                     title: m.title,
+                    folder_path: m.folder_path,
                 })
                 .collect();
             Ok(result)
