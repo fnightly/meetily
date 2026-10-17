@@ -347,6 +347,12 @@ async fn list_audio_apps() -> Result<Vec<audio::app_audio::AudioApp>, String> {
     audio::app_audio::list_audio_apps()
 }
 
+// Windows a recording could be pointed at. A window resolves to its process, which is
+// the unit WASAPI can actually capture.
+#[tauri::command]
+async fn list_recordable_windows() -> Result<Vec<audio::window_list::RecordableWindow>, String> {
+    audio::window_list::list_recordable_windows()
+}
 // Audio level monitoring commands
 //
 // `simple_level_monitor` reads real devices, but it is a second capture path: it
@@ -761,6 +767,7 @@ pub fn run() {
             start_recording_with_devices,
             start_recording_with_devices_and_meeting,
             list_audio_apps,
+        list_recordable_windows,
         start_audio_level_monitoring,
             stop_audio_level_monitoring,
             is_audio_level_monitoring,

@@ -124,7 +124,13 @@ fn group_by_application(
 }
 
 #[cfg(target_os = "windows")]
-pub use imp::list_audio_apps;
+pub use imp::{audio_related_processes, list_audio_apps};
+
+/// Processes producing audio, plus the same-executable ancestors that own them.
+#[cfg(not(target_os = "windows"))]
+pub fn audio_related_processes() -> std::collections::HashSet<u32> {
+    std::collections::HashSet::new()
+}
 
 #[cfg(target_os = "windows")]
 mod imp {
@@ -208,6 +214,47 @@ mod imp {
     }
 
     /// Every application with a session on the default output device.
+    /// Processes producing audio, plus the same-executable ancestors that own them.
+    ///
+    /// Chromium-based applications split a window and its audio across processes, so a
+    /// window own process often holds no audio session while the window is playing.
+    /// Ancestors are included only when the executable matches: every process descends
+    /// from `explorer.exe`, so walking up unconditionally would mark every Explorer
+    /// window as playing.
+    pub fn audio_related_processes() -> std::collections::HashSet<u32> {
+        use std::collections::HashSet;
+
+        let mut related: HashSet<u32> = HashSet::new();
+        let parents = parent_map();
+        let Ok(apps) = list_audio_apps() else {
+            return related;
+        };
+
+        for app in apps {
+            let anchor = app.executable.clone();
+            for process_id in app.process_ids {
+                related.insert(process_id);
+
+                let mut current = process_id;
+                let mut hops = 0;
+                while hops < 32 {
+                    let Some(&parent) = parents.get(&current) else { break };
+                    if parent == current || parent == 0 {
+                        break;
+                    }
+                    if executable_for(parent).as_deref() != anchor.as_deref() {
+                        break;
+                    }
+                    related.insert(parent);
+                    current = parent;
+                    hops += 1;
+                }
+            }
+        }
+
+        related
+    }
+
     pub fn list_audio_apps() -> Result<Vec<AudioApp>, String> {
         unsafe {
             // Failing here means COM is already initialised with a different model on

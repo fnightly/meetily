@@ -46,6 +46,7 @@ pub mod recording_saver;
 pub mod incremental_saver;  // NEW: Incremental audio saving with checkpoints
 pub mod app_audio;
 pub mod process_capture;
+pub mod window_list;
 pub mod level_monitor;
 pub mod simple_level_monitor;
 pub mod buffer_pool;
