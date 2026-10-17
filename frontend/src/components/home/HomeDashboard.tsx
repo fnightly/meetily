@@ -6,6 +6,7 @@ import {
   ArrowRight, AudioLines, ChevronRight, Cpu, FileText, Languages, Mic, MonitorSpeaker,
   ShieldCheck, Sparkles, Upload, Library, Settings2, Cloud, ListChecks, MessageCircleQuestion,
 } from 'lucide-react';
+import { WindowPickerDialog } from '@/components/WindowPickerDialog';
 import { ActionItemsPanel } from '@/components/workspace/ActionItemsPanel';
 import { backfillActionItems } from '@/lib/action-items-sync';
 import { useI18n } from '@/contexts/I18nContext';
@@ -14,6 +15,7 @@ import { useConfig } from '@/contexts/ConfigContext';
 import { useImportDialog } from '@/contexts/ImportDialogContext';
 import { usePrewarmSpeechModel } from '@/hooks/usePrewarmSpeechModel';
 import { buildHomeOverview, greetingKey, splitDuration } from '@/lib/home-overview';
+import { formatWindowValue } from '@/lib/window-picker';
 import { formatDuration, formatRecordedAt } from '@/lib/recordings';
 import type { SidebarEntry } from '@/lib/sidebar-entries';
 
@@ -42,13 +44,22 @@ export function HomeDashboard({ hasMicrophone, onStart, isStarting = false }: Ho
   const { t, locale } = useI18n();
   const router = useRouter();
   const { entries, setCurrentMeeting } = useSidebar();
-  const { selectedDevices, transcriptModelConfig, selectedLanguage, betaFeatures } = useConfig();
+  const { selectedDevices, selectedWindow, setSelectedWindow, transcriptModelConfig, selectedLanguage, betaFeatures } = useConfig();
   const { openImportDialog } = useImportDialog();
   const prewarm = usePrewarmSpeechModel();
   const [now, setNow] = useState(() => new Date());
+  const [windowPickerOpen, setWindowPickerOpen] = useState(false);
 
   // Mine summaries written before follow-ups existed (once per session).
   useEffect(() => { void backfillActionItems(); }, []);
+
+  // A stale window blocks recording (better than silently widening to the whole
+  // system), and the start hook asks the dashboard to fix the choice right away.
+  useEffect(() => {
+    const openPicker = () => setWindowPickerOpen(true);
+    window.addEventListener('open-window-picker', openPicker);
+    return () => window.removeEventListener('open-window-picker', openPicker);
+  }, []);
 
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 60_000);
@@ -83,23 +94,41 @@ export function HomeDashboard({ hasMicrophone, onStart, isStarting = false }: Ho
     router.push(`/meeting-details?id=${encodeURIComponent(entry.meetingId)}`);
   };
 
-  const setupItems = [
+  // The selected window replaces the plain system-audio label: showing the window
+  // title tells the user what is actually about to be recorded.
+  const systemAudioValue = selectedWindow
+    ? formatWindowValue(selectedWindow, t('home.setup.windowFallback'))
+    : selectedDevices?.systemDevice || t('home.setup.defaultDevice');
+
+  const setupItems: Array<{
+    key: string;
+    icon: typeof Mic;
+    label: string;
+    value: string;
+    onClick?: () => void;
+    actionLabel?: string;
+  }> = [
     {
+      key: 'mic',
       icon: Mic,
       label: t('home.setup.mic'),
       value: selectedDevices?.micDevice || t('home.setup.defaultDevice'),
     },
     {
+      key: 'system',
       icon: MonitorSpeaker,
       label: t('home.setup.system'),
-      value: selectedDevices?.systemDevice || t('home.setup.defaultDevice'),
+      value: systemAudioValue,
+      onClick: () => setWindowPickerOpen(true),
+      actionLabel: t('home.setup.windowAria'),
     },
     {
+      key: 'engine',
       icon: isLocal ? Cpu : Cloud,
       label: t('home.setup.engine'),
       value: `${PROVIDER_LABELS[provider] ?? provider}${transcriptModelConfig?.model ? ` · ${transcriptModelConfig.model}` : ''}`,
     },
-    { icon: Languages, label: t('home.setup.language'), value: languageLabel },
+    { key: 'language', icon: Languages, label: t('home.setup.language'), value: languageLabel },
   ];
 
   const quickActions = [
@@ -130,11 +159,29 @@ export function HomeDashboard({ hasMicrophone, onStart, isStarting = false }: Ho
               <p className="mt-1 text-sm text-slate-500 leading-relaxed">{t('home.hero.subtitle')}</p>
 
               <dl className="mt-5 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                {setupItems.map(({ icon: Icon, label, value }) => (
-                  <div key={label} className="flex items-center gap-2.5 rounded-lg bg-slate-50 px-3 py-2 min-w-0">
+                {setupItems.map(({ key, icon: Icon, label, value, onClick, actionLabel }) => (
+                  // A <div> wrapping the dt/dd pair is the only valid way to make a
+                  // dl row interactive: the overlay button is the hit target, while
+                  // the description-list semantics stay intact underneath it.
+                  <div
+                    key={key}
+                    className={`relative flex min-w-0 items-center gap-2.5 rounded-lg bg-slate-50 px-3 py-2 ${onClick ? 'transition-colors hover:bg-slate-100' : ''}`}
+                  >
                     <Icon className="h-4 w-4 flex-shrink-0 text-slate-400" />
                     <dt className="flex-shrink-0 text-xs text-slate-500">{label}</dt>
-                    <dd className="min-w-0 truncate text-xs font-medium text-slate-800" title={value}>{value}</dd>
+                    <dd className="min-w-0 flex-1 truncate text-xs font-medium text-slate-800" title={value}>{value}</dd>
+                    {onClick && (
+                      <>
+                        <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-slate-300" />
+                        <button
+                          type="button"
+                          onClick={onClick}
+                          title={actionLabel}
+                          aria-label={actionLabel}
+                          className="absolute inset-0 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60"
+                        />
+                      </>
+                    )}
                   </div>
                 ))}
               </dl>
@@ -336,6 +383,13 @@ export function HomeDashboard({ hasMicrophone, onStart, isStarting = false }: Ho
           </aside>
         </div>
       </div>
+
+      <WindowPickerDialog
+        open={windowPickerOpen}
+        onOpenChange={setWindowPickerOpen}
+        selected={selectedWindow}
+        onSelect={setSelectedWindow}
+      />
     </div>
   );
 }

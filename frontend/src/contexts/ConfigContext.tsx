@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, ReactNode, useRef } from 'react';
 import { TranscriptModelProps } from '@/components/TranscriptSettings';
 import { SelectedDevices } from '@/components/DeviceSelection';
+import type { RecordableWindow } from '@/lib/window-picker';
 import { configService, ModelConfig } from '@/services/configService';
 import { invoke } from '@tauri-apps/api/core';
 import Analytics from '@/lib/analytics';
@@ -55,6 +56,12 @@ interface ConfigContextType {
   // Device configuration
   selectedDevices: SelectedDevices;
   setSelectedDevices: (devices: SelectedDevices) => void;
+
+  // Recording target: one application's window, or null for the whole system.
+  // Transient on purpose - a process id saved across restarts can point at an app
+  // that is no longer running.
+  selectedWindow: RecordableWindow | null;
+  setSelectedWindow: (window: RecordableWindow | null) => void;
 
   // Language preference
   selectedLanguage: string;
@@ -138,6 +145,9 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     micDevice: null,
     systemDevice: null
   });
+
+  // Which window's application the recording follows; null records the whole system.
+  const [selectedWindow, setSelectedWindow] = useState<RecordableWindow | null>(null);
 
   // Language preference state
   const [selectedLanguage, setSelectedLanguage] = useState<string>(() => {
@@ -532,6 +542,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     setTranscriptModelConfig,
     selectedDevices,
     setSelectedDevices,
+    selectedWindow,
+    setSelectedWindow,
     selectedLanguage,
     setSelectedLanguage: handleSetSelectedLanguage,
     showConfidenceIndicator,
@@ -555,6 +567,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     updateProviderApiKey,
     transcriptModelConfig,
     selectedDevices,
+    selectedWindow,
     selectedLanguage,
     handleSetSelectedLanguage,
     showConfidenceIndicator,

@@ -6,6 +6,7 @@ import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { useConfig } from '@/contexts/ConfigContext';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
 import { recordingService } from '@/services/recordingService';
+import { isSameWindow, type RecordableWindow } from '@/lib/window-picker';
 import Analytics from '@/lib/analytics';
 import { showRecordingNotification } from '@/lib/recordingNotification';
 import {
@@ -54,7 +55,7 @@ export function useRecordingStart(
 
   const { clearTranscripts, setMeetingTitle } = useTranscripts();
   const { setIsMeetingActive } = useSidebar();
-  const { selectedDevices } = useConfig();
+  const { selectedDevices, selectedWindow } = useConfig();
   const { setStatus } = useRecordingState();
 
   // Generate meeting title with timestamp
@@ -68,6 +69,32 @@ export function useRecordingStart(
     const seconds = String(now.getSeconds()).padStart(2, '0');
     return `Meeting ${day}_${month}_${year}_${hours}_${minutes}_${seconds}`;
   }, []);
+
+  // A window can close between being picked and the recording starting. Recording
+  // its dead process id would capture silence on the system side without telling
+  // the user, so the selection is re-checked against a fresh list first. A failed
+  // list is not treated as stale: the backend already degrades to microphone-only.
+  const selectedWindowIsStillOpen = useCallback(async (): Promise<boolean> => {
+    if (!selectedWindow) return true;
+    try {
+      const windows = await invoke<RecordableWindow[]>('list_recordable_windows');
+      if (windows.some((window) => isSameWindow(window, selectedWindow))) return true;
+    } catch (error) {
+      console.error('Failed to verify the selected window:', error);
+      return true;
+    }
+    // The selection is kept rather than cleared: silently widening the next start
+    // to whole-system audio is worse than asking the user to pick again.
+    toast.error(tr('windowPicker.staleTitle'), {
+      description: tr('windowPicker.staleHint'),
+      duration: 6000,
+      action: {
+        label: tr('windowPicker.repick'),
+        onClick: () => window.dispatchEvent(new CustomEvent('open-window-picker')),
+      },
+    });
+    return false;
+  }, [selectedWindow]);
 
   const getTranscriptionProvider = useCallback(async (): Promise<string> => {
     try {
@@ -158,6 +185,13 @@ export function useRecordingStart(
         return;
       }
 
+      // Give a closed window a chance to be re-picked instead of recording silence.
+      if (!(await selectedWindowIsStillOpen())) {
+        setStatus(RecordingStatus.IDLE);
+        Analytics.trackButtonClick('start_recording_blocked_window_closed', 'home_page');
+        return;
+      }
+
       console.log('Selected transcription model ready - setting up meeting title and state');
 
       const randomTitle = generateMeetingTitle();
@@ -171,7 +205,8 @@ export function useRecordingStart(
       await recordingService.startRecordingWithDevices(
         selectedDevices?.micDevice || null,
         selectedDevices?.systemDevice || null,
-        randomTitle
+        randomTitle,
+        selectedWindow?.process_id ?? null
       );
       console.log('Backend recording started successfully');
 
@@ -216,7 +251,7 @@ export function useRecordingStart(
     } finally {
       isStartingRef.current = false;
     }
-  }, [generateMeetingTitle, setMeetingTitle, setIsRecording, clearTranscripts, setIsMeetingActive, checkModelReady, checkIfModelDownloading, selectedDevices, showModal, setStatus]);
+  }, [generateMeetingTitle, setMeetingTitle, setIsRecording, clearTranscripts, setIsMeetingActive, checkModelReady, checkIfModelDownloading, selectedDevices, selectedWindowIsStillOpen, showModal, setStatus]);
 
   // Check for autoStartRecording flag and start recording automatically
   useEffect(() => {
@@ -253,6 +288,12 @@ export function useRecordingStart(
 
           // Start the actual backend recording
           try {
+            if (!(await selectedWindowIsStillOpen())) {
+              setStatus(RecordingStatus.IDLE);
+              Analytics.trackButtonClick('start_recording_blocked_window_closed', 'sidebar_auto');
+              return;
+            }
+
             // Generate meeting title
             const generatedMeetingTitle = generateMeetingTitle();
 
@@ -263,7 +304,8 @@ export function useRecordingStart(
             const result = await recordingService.startRecordingWithDevices(
               selectedDevices?.micDevice || null,
               selectedDevices?.systemDevice || null,
-              generatedMeetingTitle
+              generatedMeetingTitle,
+              selectedWindow?.process_id ?? null
             );
             console.log('Auto-start backend recording result:', result);
 
@@ -305,6 +347,7 @@ export function useRecordingStart(
     isRecording,
     isAutoStarting,
     selectedDevices,
+    selectedWindowIsStillOpen,
     generateMeetingTitle,
     setMeetingTitle,
     setIsRecording,
@@ -351,6 +394,12 @@ export function useRecordingStart(
       }
 
       try {
+        if (!(await selectedWindowIsStillOpen())) {
+          setStatus(RecordingStatus.IDLE);
+          Analytics.trackButtonClick('start_recording_blocked_window_closed', 'sidebar_direct');
+          return;
+        }
+
         // Generate meeting title
         const generatedMeetingTitle = generateMeetingTitle();
 
@@ -361,7 +410,8 @@ export function useRecordingStart(
         const result = await recordingService.startRecordingWithDevices(
           selectedDevices?.micDevice || null,
           selectedDevices?.systemDevice || null,
-          generatedMeetingTitle
+          generatedMeetingTitle,
+          selectedWindow?.process_id ?? null
         );
         console.log('Backend recording result:', result);
 
@@ -405,6 +455,7 @@ export function useRecordingStart(
     isRecording,
     isAutoStarting,
     selectedDevices,
+    selectedWindowIsStillOpen,
     generateMeetingTitle,
     setMeetingTitle,
     setIsRecording,

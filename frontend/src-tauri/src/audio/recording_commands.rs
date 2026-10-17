@@ -558,7 +558,7 @@ pub async fn start_recording_with_devices<R: Runtime>(
     mic_device_name: Option<String>,
     system_device_name: Option<String>,
 ) -> Result<(), String> {
-    start_recording_with_devices_and_meeting(app, mic_device_name, system_device_name, None).await
+    start_recording_with_devices_and_meeting(app, mic_device_name, system_device_name, None, None).await
 }
 
 /// Start recording with specific devices and optional meeting name
@@ -567,10 +567,11 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     mic_device_name: Option<String>,
     system_device_name: Option<String>,
     meeting_name: Option<String>,
+    target_process_id: Option<u32>,
 ) -> Result<(), String> {
     info!(
-        "Starting recording with specific devices: mic={:?}, system={:?}, meeting={:?}",
-        mic_device_name, system_device_name, meeting_name
+        "Starting recording with specific devices: mic={:?}, system={:?}, meeting={:?}, target_process={:?}",
+        mic_device_name, system_device_name, meeting_name, target_process_id
     );
 
     let engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
@@ -617,8 +618,23 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
             }
         };
 
-    // Resolve the system device up front: the macOS audio-wake step needs it.
-    let system_device = resolve_system_or_default(system_device_name.as_deref());
+    // A chosen application replaces the system device rather than joining it:
+    // both reach the mixer as `DeviceType::System`, so capturing the whole system
+    // alongside the app would sum the app's audio against itself. This has to stay
+    // a literal `None` — resolving it would quietly bring the default output back.
+    let system_device = match target_process_id {
+        Some(process_id) => {
+            info!(
+                "🎯 Application {} is the system-audio source; requested system device {:?} is not captured",
+                process_id, system_device_name
+            );
+            None
+        }
+        None => {
+            // Resolve the system device up front: the macOS audio-wake step needs it.
+            resolve_system_or_default(system_device_name.as_deref())
+        }
+    };
 
     // Loading the speech model and preparing the audio hardware are independent,
     // so they run concurrently instead of back to back. With the model already
@@ -733,13 +749,34 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     // Spawn background device event processor (mic-disconnect fallback).
     if let Some(receiver) = device_event_receiver {
-        spawn_device_event_processor(app.clone(), receiver, session);
+        spawn_device_event_processor(app.clone(), receiver, session.clone());
     }
 
     // Flip recording live + reset per-session flags (speech-detected latch,
     // mic-recovery budget). Shared with the other start path — see helper.
     finalize_recording_start();
     drop(engine_lifecycle_guard);
+
+    // Only after the session is live: the capture thread's loop condition is the
+    // recording flag, so spawning earlier would exit on its first poll.
+    #[cfg(target_os = "windows")]
+    if let Some(process_id) = target_process_id {
+        if let Err(e) = super::process_capture::spawn_process_capture(session.clone(), process_id) {
+            // A missing per-application source means no system audio for this
+            // meeting, not a failed recording: the microphone still captures.
+            error!(
+                "Application audio capture for process {} failed to start: {} — continuing with microphone only",
+                process_id, e
+            );
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    if let Some(process_id) = target_process_id {
+        warn!(
+            "Application audio capture is Windows-only; process {} will not be captured",
+            process_id
+        );
+    }
 
     // Start optimized parallel transcription task and store handle
     let task_handle = transcription::start_transcription_task(
@@ -790,7 +827,10 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         "message": "Recording started with custom devices and parallel processing",
         "devices": [
             mic_device_name.unwrap_or_else(|| "Default Microphone".to_string()),
-            system_device_name.unwrap_or_else(|| "Default System Audio".to_string())
+            match target_process_id {
+                Some(process_id) => format!("Application {process_id}"),
+                None => system_device_name.unwrap_or_else(|| "Default System Audio".to_string()),
+            }
         ],
         "workers": 3
     })).map_err(|e| e.to_string())?;

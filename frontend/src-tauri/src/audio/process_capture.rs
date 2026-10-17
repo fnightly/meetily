@@ -54,7 +54,10 @@ pub fn spawn_process_capture(
             log::info!("Capturing application {process_id} as system audio");
             let mut chunk_id: u64 = 0;
 
-            while state.is_recording() && !state.is_paused() {
+            // Keep draining while paused: the buffer would otherwise overflow and
+            // replay stale audio on resume. send_audio_chunk already discards chunks
+            // while paused, so only the recording flag ends the loop.
+            while state.is_recording() {
                 match capture.read() {
                     Ok(samples) if !samples.is_empty() => {
                         let chunk = AudioChunk {

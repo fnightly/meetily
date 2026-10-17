@@ -200,6 +200,7 @@ async fn start_recording<R: Runtime>(
         mic_device_name,
         system_device_name,
         meeting_name.clone(),
+        None,
     )
     .await
     {
@@ -417,7 +418,7 @@ async fn start_recording_with_devices<R: Runtime>(
     mic_device_name: Option<String>,
     system_device_name: Option<String>,
 ) -> Result<(), String> {
-    start_recording_with_devices_and_meeting(app, mic_device_name, system_device_name, None).await
+    start_recording_with_devices_and_meeting(app, mic_device_name, system_device_name, None, None).await
 }
 
 #[tauri::command]
@@ -426,16 +427,19 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
     mic_device_name: Option<String>,
     system_device_name: Option<String>,
     meeting_name: Option<String>,
+    target_process_id: Option<u32>,
 ) -> Result<(), String> {
-    log_info!("🚀 CALLED start_recording_with_devices_and_meeting - Mic: {:?}, System: {:?}, Meeting: {:?}",
-             mic_device_name, system_device_name, meeting_name);
+    log_info!("🚀 CALLED start_recording_with_devices_and_meeting - Mic: {:?}, System: {:?}, Meeting: {:?}, Target: {:?}",
+             mic_device_name, system_device_name, meeting_name, target_process_id);
 
     // Clone meeting_name for notification use later
     let meeting_name_for_notification = meeting_name.clone();
 
-    // Call the recording module functions that support meeting names
+    // An application target is an explicit start even with no devices named:
+    // the defaults path cannot carry a process id, and would record the whole
+    // system instead of the chosen window's audio.
     let recording_result = match (mic_device_name.clone(), system_device_name.clone()) {
-        (None, None) => {
+        (None, None) if target_process_id.is_none() => {
             log_info!(
                 "No devices specified, starting with defaults and meeting: {:?}",
                 meeting_name
@@ -445,16 +449,18 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
         }
         _ => {
             log_info!(
-                "Starting with specified devices: mic={:?}, system={:?}, meeting={:?}",
+                "Starting with specified devices: mic={:?}, system={:?}, meeting={:?}, target_process={:?}",
                 mic_device_name,
                 system_device_name,
-                meeting_name
+                meeting_name,
+                target_process_id
             );
             audio::recording_commands::start_recording_with_devices_and_meeting(
                 app.clone(),
                 mic_device_name,
                 system_device_name,
                 meeting_name,
+                target_process_id,
             )
             .await
         }
