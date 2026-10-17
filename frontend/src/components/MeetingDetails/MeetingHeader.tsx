@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
-import { CalendarDays, Check, ChevronLeft, Clock, Download, FileText, Pencil, Sparkles, StickyNote, X } from 'lucide-react';
+import { CalendarDays, Check, ChevronLeft, Clock, Download, FileText, Pencil, Share2, Sparkles, StickyNote, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useI18n } from '@/contexts/I18nContext';
 import { formatDuration } from '@/lib/recordings';
@@ -19,6 +19,8 @@ interface MeetingHeaderProps {
   hasSummary: boolean;
   onTitleSaved: (title: string) => void;
   onExport: () => void;
+  /** Opens the explicit Obsidian / Notion sync dialog for this meeting. */
+  onSync: () => void;
 }
 
 /**
@@ -26,7 +28,7 @@ interface MeetingHeaderProps {
  * and the actions that apply to the whole meeting rather than one pane.
  */
 export function MeetingHeader({
-  meetingId, title, createdAt, segmentCount, durationSeconds, hasSummary, onTitleSaved, onExport,
+  meetingId, title, createdAt, segmentCount, durationSeconds, hasSummary, onTitleSaved, onExport, onSync,
 }: MeetingHeaderProps) {
   const { t, locale } = useI18n();
   const router = useRouter();
@@ -120,6 +122,16 @@ export function MeetingHeader({
           <Button variant="ghost" size="sm" onClick={() => router.push(`/notes?id=${encodeURIComponent(meetingId)}`)}>
             <StickyNote />
             <span className="hidden lg:inline">{t('nav.notes')}</span>
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onSync}
+            title={t('sync.actionHint')}
+            aria-label={t('sync.title')}
+          >
+            <Share2 />
+            <span className="hidden lg:inline">{t('sync.action')}</span>
           </Button>
           <Button size="sm" onClick={onExport}>
             <Download />

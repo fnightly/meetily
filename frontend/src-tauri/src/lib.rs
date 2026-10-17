@@ -62,6 +62,7 @@ pub mod parakeet_engine;
 pub mod state;
 pub mod storage;
 pub mod summary;
+pub mod sync;
 pub mod tray;
 pub mod utils;
 pub mod whisper_engine;
@@ -880,6 +881,13 @@ pub fn run() {
             storage::commands::open_storage_folder,
             storage::commands::reset_storage_location,
             storage::commands::storage_default_subdirs,
+            // Obsidian / Notion sync: explicit, per-meeting, never automatic.
+            sync::commands::get_sync_settings,
+            sync::commands::save_sync_settings,
+            sync::commands::pick_obsidian_folder,
+            sync::commands::obsidian_sync_meeting,
+            sync::commands::notion_sync_meeting,
+            sync::commands::notion_test_connection,
             // Notification system commands
             notifications::commands::get_notification_settings,
             notifications::commands::set_notification_settings,

@@ -268,6 +268,59 @@ impl SettingsRepository {
         Ok(())
     }
 
+    // ===== SYNC SECRETS =====
+    //
+    // Stored in the same `settings` row as the provider keys, following the rule
+    // that every secret in this app lives in one place. Notion has no
+    // model/provider concept, so these are dedicated methods instead of another
+    // branch in the provider allowlists above.
+
+    pub async fn save_notion_api_key(
+        pool: &SqlitePool,
+        api_key: &str,
+    ) -> std::result::Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO settings (id, provider, model, whisperModel, notionApiKey)
+            VALUES ('1', 'openai', 'gpt-4o-2024-11-20', 'large-v3', $1)
+            ON CONFLICT(id) DO UPDATE SET
+                notionApiKey = $1
+            "#,
+        )
+        .bind(api_key)
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// The stored token, or `None` when none was saved.
+    ///
+    /// The column is nullable, so the row itself is fetched as `Option<String>`
+    /// before flattening: decoding a NULL into `String` would turn "no token yet"
+    /// into a database error.
+    pub async fn get_notion_api_key(
+        pool: &SqlitePool,
+    ) -> std::result::Result<Option<String>, sqlx::Error> {
+        let stored = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT notionApiKey FROM settings WHERE id = '1' LIMIT 1",
+        )
+        .fetch_optional(pool)
+        .await?;
+
+        Ok(stored.flatten().filter(|key| !key.trim().is_empty()))
+    }
+
+    pub async fn delete_notion_api_key(
+        pool: &SqlitePool,
+    ) -> std::result::Result<(), sqlx::Error> {
+        sqlx::query("UPDATE settings SET notionApiKey = NULL WHERE id = '1'")
+            .execute(pool)
+            .await?;
+
+        Ok(())
+    }
+
     // ===== CUSTOM OPENAI CONFIG METHODS =====
 
     /// Gets the custom OpenAI configuration from JSON

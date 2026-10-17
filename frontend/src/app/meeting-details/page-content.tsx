@@ -11,6 +11,7 @@ import { SummaryPanel } from '@/components/MeetingDetails/SummaryPanel';
 import { MeetingDetailsSplitView, type MeetingDetailsTab } from '@/components/MeetingDetails/MeetingDetailsSplitView';
 import { ModelConfig } from '@/components/ModelSettingsModal';
 import { ExportDialog } from '@/components/ExportDialog';
+import { SyncDialog } from '@/components/SyncDialog';
 import { MeetingHeader } from '@/components/MeetingDetails/MeetingHeader';
 import { hasVisibleSummaryContent } from '@/lib/summary-content';
 import { useI18n } from '@/contexts/I18nContext';
@@ -180,6 +181,12 @@ export default function PageContent({
    */
   const [exportOpen, setExportOpen] = useState(false);
 
+  /**
+   * Sync is a separate, explicit action from export: Obsidian writes locally,
+   * but Notion uploads the note, so it must never ride along with exporting.
+   */
+  const [syncOpen, setSyncOpen] = useState(false);
+
   const summaryMarkdown = useMemo(() => {
     const md = summaryToMarkdown(meetingData.aiSummary);
     return md.trim() ? md : null;
@@ -283,6 +290,7 @@ export default function PageContent({
         hasSummary={hasVisibleSummaryContent(meetingData.aiSummary)}
         onTitleSaved={meetingData.updateMeetingTitle}
         onExport={() => setExportOpen(true)}
+        onSync={() => setSyncOpen(true)}
       />
       <div className="flex flex-1 min-w-0 overflow-hidden">
         <MeetingDetailsSplitView
@@ -363,6 +371,13 @@ export default function PageContent({
           }
         />
       </div>
+      <SyncDialog
+        open={syncOpen}
+        onOpenChange={setSyncOpen}
+        meetingId={meeting.id}
+        title={meetingData.meetingTitle || meeting.title}
+        summaryOverride={meetingData.aiSummary}
+      />
       <ExportDialog
         open={exportOpen}
         onOpenChange={setExportOpen}

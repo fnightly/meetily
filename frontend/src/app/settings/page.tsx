@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Settings2, Mic, Database as DatabaseIcon, SparkleIcon, FlaskConical, BookA, Archive } from 'lucide-react';
+import { Settings2, Mic, Database as DatabaseIcon, SparkleIcon, FlaskConical, BookA, Archive, Share2 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { TranscriptSettings } from '@/components/TranscriptSettings';
 import { RecordingSettings } from '@/components/RecordingSettings';
@@ -11,6 +11,7 @@ import { BetaSettings } from '@/components/BetaSettings';
 import { useConfig } from '@/contexts/ConfigContext';
 import { DictionarySettings } from '@/components/DictionarySettings';
 import { BackupSettings } from '@/components/BackupSettings';
+import { SyncSettingsPanel } from '@/components/SyncSettingsPanel';
 import { SpeakerSeparationSettings } from '@/components/SpeakerSeparationSettings';
 import { useI18n } from '@/contexts/I18nContext';
 import { LOCALES, LOCALE_LABELS, type Locale } from '@/lib/i18n';
@@ -25,6 +26,7 @@ const TABS = [
   { value: 'dictionary', labelKey: 'settings.tabs.dictionary', icon: BookA },
   { value: 'Transcriptionmodels', labelKey: 'settings.tabs.transcription', icon: DatabaseIcon },
   { value: 'summaryModels', labelKey: 'settings.tabs.summary', icon: SparkleIcon },
+  { value: 'sync', labelKey: 'sync.tab', icon: Share2 },
   { value: 'data', labelKey: 'settings.tabs.data', icon: Archive },
   { value: 'beta', labelKey: 'settings.tabs.beta', icon: FlaskConical }
 ] as const;
@@ -35,6 +37,15 @@ export default function SettingsPage() {
 
   // Animation state for tabs
   const [activeTab, setActiveTab] = useState('general');
+
+  // Deep link from the sync dialog's "Open settings" button, so an unconfigured
+  // Notion target lands on the panel that fixes it instead of on General.
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get('tab');
+    if (requested && TABS.some((tab) => tab.value === requested)) {
+      setActiveTab(requested);
+    }
+  }, []);
 
   // Load saved transcript configuration on mount
   useEffect(() => {
@@ -134,6 +145,9 @@ export default function SettingsPage() {
             </TabsContent>
             <TabsContent value="summaryModels" className="mt-0">
               <SummaryModelSettings />
+            </TabsContent>
+            <TabsContent value="sync" className="mt-0">
+              <SyncSettingsPanel />
             </TabsContent>
             <TabsContent value="data" className="mt-0">
               <BackupSettings />
