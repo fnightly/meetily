@@ -321,8 +321,18 @@ pub fn format_prompt(
 /// Default max tokens for generation (increased for better summary quality)
 pub const DEFAULT_MAX_TOKENS: i32 = 4096;
 
-/// Idle timeout for sidecar (seconds) - can be overridden via LLAMA_IDLE_TIMEOUT env var
-pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300; // 5 minutes
+/// How long the summary sidecar may sit idle before it is shut down.
+///
+/// The loaded model is the largest thing the app holds — 1.2 GB for the 2B preset,
+/// 2.6 GB for the 4B — and it is only needed while a summary is being written. Two
+/// minutes covers reading a summary and asking for it again, which is the one flow
+/// that would otherwise pay the reload twice; beyond that the process is holding
+/// memory nobody is using. Reloading costs about ten seconds and is visible as
+/// progress, so the trade favours the memory.
+///
+/// `LLAMA_IDLE_TIMEOUT` still overrides this for anyone who would rather keep the
+/// model resident.
+pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 120;
 
 /// Generation timeout (how long to wait for a response)
 pub const GENERATION_TIMEOUT_SECS: u64 = 900; // 15 minutes
