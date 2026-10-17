@@ -195,11 +195,16 @@ futures-channel = "0.3.31"
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
 # Process-level audio session enumeration, for per-app recording. `windows-sys` is
 # raw FFI — these COM interfaces need the higher-level wrappers and their vtables.
+# `#[implement]` expands to paths through `windows_core`, so it has to be a direct
+# dependency rather than only reachable through the `windows` re-export.
+windows-core = "0.61"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Media_Audio",
     "Win32_System_Com",
     "Win32_System_Threading",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
     "Win32_System_ProcessStatus",
     "Win32_System_Diagnostics_ToolHelp",
 ] }
