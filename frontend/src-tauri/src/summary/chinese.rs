@@ -117,10 +117,14 @@ pub fn chinese_final_report_system_prompt(
     )
 }
 
-/// A concise Chinese summary structure, offered when the user has no template.
+/// A concise Chinese summary structure, used as the reference the section
+/// coverage test checks against.
 ///
-/// Not used to override a user's template — templates take precedence — but it
-/// documents the expected shape for the section instructions.
+/// It is deliberately not shipped into a prompt: a user's template takes
+/// precedence, and the built-in prompt describes the sections itself. Keeping it
+/// here documents the shape a Chinese note is expected to have, and the test below
+/// fails if the two ever drift apart.
+#[cfg(test)]
 pub const CHINESE_SUMMARY_OUTLINE: &str = r#"# 会议纪要
 
 **主题**：

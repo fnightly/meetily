@@ -30,7 +30,7 @@ pub struct CleanupOutcome {
 }
 
 /// Result of resolving which local model to clean with.
-enum CleanupTarget {
+pub enum CleanupTarget {
     Ready {
         provider: LLMProvider,
         provider_id: String,

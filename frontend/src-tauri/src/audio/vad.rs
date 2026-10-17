@@ -448,6 +448,49 @@ where
 mod tests {
     use super::*;
 
+    /// Point `ort` at the bundled ONNX Runtime before any session is created.
+    ///
+    /// The application does this in Tauri's `setup` hook, which a unit test never
+    /// runs, so without this every test that builds a VAD processor dies on the
+    /// guard in `ensure_onnx_runtime_available` rather than testing anything.
+    /// `Once` keeps it to a single initialisation for the whole test process.
+    fn init_onnx_runtime() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+
+        INIT.call_once(|| {
+            #[cfg(target_os = "windows")]
+            {
+                let candidates = [
+                    // The development build puts the DLL next to the test binary.
+                    std::env::current_exe()
+                        .ok()
+                        .and_then(|exe| exe.parent().map(|dir| dir.join("onnxruntime.dll"))),
+                    // The bundled resource the application loads from.
+                    Some(
+                        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                            .join("binaries")
+                            .join("onnxruntime")
+                            .join("onnxruntime.dll"),
+                    ),
+                ];
+
+                if let Some(path) = candidates
+                    .into_iter()
+                    .flatten()
+                    .find(|candidate| candidate.is_file())
+                {
+                    if ort::init_from(path.to_string_lossy().into_owned())
+                        .with_telemetry(false)
+                        .commit()
+                        .is_ok()
+                    {
+                        crate::record_onnx_runtime_ready();
+                    }
+                }
+            }
+        });
+    }
+
     /// Generate synthetic speech-like audio with alternating speech/silence
     fn generate_test_audio_with_speech(duration_seconds: f32, sample_rate: u32) -> Vec<f32> {
         let total_samples = (duration_seconds * sample_rate as f32) as usize;
@@ -484,6 +527,7 @@ mod tests {
 
     #[test]
     fn test_vad_chunked_vs_single_processing() {
+        init_onnx_runtime();
         // Generate 60 seconds of audio with speech patterns at 16kHz
         let audio = generate_test_audio_with_speech(60.0, 16000);
         println!("Generated {} samples ({:.1}s)", audio.len(), audio.len() as f32 / 16000.0);
@@ -509,6 +553,7 @@ mod tests {
 
     #[test]
     fn test_vad_large_file_progress() {
+        init_onnx_runtime();
         // Generate 120 seconds (2 minutes) of audio - triggers large file threshold
         let audio = generate_test_audio_with_speech(120.0, 16000);
         let total_samples = audio.len();
@@ -553,6 +598,7 @@ mod tests {
 
     #[test]
     fn test_vad_cancellation() {
+        init_onnx_runtime();
         let audio = generate_test_audio_with_speech(120.0, 16000);
 
         // Cancel at 50%
@@ -568,6 +614,7 @@ mod tests {
 
     #[test]
     fn test_vad_continuous_processor_state_across_chunks() {
+        init_onnx_runtime();
         // Test that VAD state is correctly maintained across chunk boundaries
         let mut processor = ContinuousVadProcessor::new(16000, 2000).expect("Failed to create processor");
 
@@ -595,6 +642,7 @@ mod tests {
 
     #[test]
     fn test_vad_400ms_vs_2000ms_segmentation() {
+        init_onnx_runtime();
         // Demonstrates why 2000ms redemption is needed for batch processing:
         // 400ms creates excessive fragmentation, 2000ms bridges natural pauses.
         //
@@ -656,6 +704,7 @@ mod tests {
     /// a long recording to surface.
     #[test]
     fn test_speech_start_sample_never_exceeds_processed_samples() {
+        init_onnx_runtime();
         // 20s of silence, then 3s of speech still running when the buffer ends.
         let audio = generate_late_speech_audio(20.0, 3.0, 16000);
 
@@ -686,6 +735,7 @@ mod tests {
     /// A forced segment's timestamps and samples must describe the same real audio interval.
     #[test]
     fn test_flush_segment_timestamps_stay_within_audio_duration() {
+        init_onnx_runtime();
         let audio = generate_late_speech_audio(20.0, 3.0, 16000);
         let audio_duration_ms = (audio.len() as f64 / VAD_SAMPLE_RATE as f64) * 1000.0;
 

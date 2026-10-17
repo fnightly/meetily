@@ -27,6 +27,7 @@ pub const ZH_PROJECT_PITCH: &str = include_str!("../../../templates/zh_project_p
 /// Registry of all built-in templates
 ///
 /// Maps template identifiers to their embedded JSON content
+#[cfg(test)]
 pub fn get_builtin_templates() -> Vec<(&'static str, &'static str)> {
     vec![
         ("daily_standup", DAILY_STANDUP),

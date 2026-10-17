@@ -120,7 +120,7 @@ mod tests {
         match devices {
             Ok(device_list) => {
                 println!("System audio devices: {:?}", device_list);
-                assert!(device_list.len() >= 0); // Should at least not crash
+                // No assertion on the contents: this is a smoke test that listing`r`n                // audio devices returns rather than panicking, and an empty list is valid.`r`n                let _ = device_list.len();
             }
             Err(e) => {
                 println!("Error listing devices: {}", e);

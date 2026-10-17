@@ -19,7 +19,7 @@ use std::path::Path;
 use ndarray::{ArrayD, IxDyn};
 
 use super::diarization::{decode_chunk, powerset_mapping, SegmentationMeta};
-use super::onnx_model::{array2, array3, OnnxModel};
+use super::onnx_model::{array3, OnnxModel};
 
 /// Metadata keys the segmentation export publishes.
 ///
