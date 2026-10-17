@@ -943,6 +943,19 @@ export function ModelSettingsModal({
               </SelectContent>
             </Select>
 
+            {/* The built-in model is the only summary option that is already on the
+                machine: no key, no separate server, nothing installed by the user. It
+                is not a `LLM_PRESETS` entry because those are all OpenAI-compatible
+                endpoints, and this one runs as a bundled process, so it states its
+                own readiness here instead of borrowing the preset card. */}
+            {modelConfig.provider === 'builtin-ai' && (
+              <p className="text-xs text-gray-600">
+                {builtinAiModels.some((m: any) => m.status?.type === 'available')
+                  ? t('llm.builtinOnDevice')
+                  : t('llm.builtinNeedsDownload')}
+              </p>
+            )}
+
             {modelConfig.provider !== 'builtin-ai' && modelConfig.provider !== 'custom-openai' && (
               <Popover open={modelComboboxOpen} onOpenChange={setModelComboboxOpen} modal={true}>
                 <PopoverTrigger asChild>
