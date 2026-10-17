@@ -20,6 +20,73 @@ pub const CAPTURE_SAMPLE_RATE: u32 = 48_000;
 #[cfg(target_os = "windows")]
 pub use imp::start_process_capture;
 
+/// Start feeding one application's audio into the running recording pipeline.
+///
+/// Samples are delivered as `DeviceType::System` chunks, which is what the mixing stage
+/// expects from the system side of a meeting — so choosing an application instead of a
+/// device gets the same downstream behaviour, including the mix with the microphone.
+///
+/// The capture runs on its own thread and stops when recording stops. Because the chunks
+/// are typed as system audio, a caller must not also ask for a system *device*, or the two
+/// streams would be summed together.
+#[cfg(target_os = "windows")]
+pub fn spawn_process_capture(
+    state: std::sync::Arc<crate::audio::recording_state::RecordingState>,
+    process_id: u32,
+) -> Result<(), String> {
+    use crate::audio::recording_state::{AudioChunk, DeviceType};
+    use std::time::Duration;
+
+    std::thread::Builder::new()
+        .name("app-audio-capture".to_string())
+        .spawn(move || {
+            let capture = match start_process_capture(process_id) {
+                Ok(capture) => capture,
+                Err(e) => {
+                    // Reported through the log rather than the recording error channel:
+                    // a failed per-app source means no system audio, not a broken session,
+                    // and the microphone keeps recording.
+                    log::error!("Could not capture application {process_id}: {e}");
+                    return;
+                }
+            };
+
+            log::info!("Capturing application {process_id} as system audio");
+            let mut chunk_id: u64 = 0;
+
+            while state.is_recording() && !state.is_paused() {
+                match capture.read() {
+                    Ok(samples) if !samples.is_empty() => {
+                        let chunk = AudioChunk {
+                            data: samples,
+                            sample_rate: CAPTURE_SAMPLE_RATE,
+                            timestamp: state.get_recording_duration().unwrap_or(0.0),
+                            chunk_id,
+                            device_type: DeviceType::System,
+                        };
+                        chunk_id = chunk_id.wrapping_add(1);
+                        if state.send_audio_chunk(chunk).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::error!("Application audio capture stopped: {e}");
+                        break;
+                    }
+                }
+                // A 20 ms poll keeps latency below what a listener would notice while
+                // leaving the thread idle most of the time.
+                std::thread::sleep(Duration::from_millis(20));
+            }
+
+            log::info!("Application audio capture finished after {chunk_id} chunks");
+        })
+        .map_err(|e| format!("could not start the application capture thread: {e}"))?;
+
+    Ok(())
+}
+
 #[cfg(target_os = "windows")]
 mod imp {
     use super::CAPTURE_SAMPLE_RATE;
@@ -356,5 +423,55 @@ mod layout_probe {
             assert_eq!(cb_size as usize, std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>());
             assert_eq!(data, &p as *const _ as *const u8, "blob must point at the params");
         }
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod integration_tests {
+    use super::*;
+    use crate::audio::recording_state::{DeviceType, RecordingState};
+
+    /// Drive a real recording state with a real capture and check that chunks arrive.
+    ///
+    /// Ignored by default: it needs an application actively playing sound. Run with
+    /// `--ignored --nocapture` while audio is playing.
+    #[test]
+    #[ignore]
+    fn application_audio_reaches_the_recording_pipeline() {
+        let apps = crate::audio::app_audio::list_audio_apps().expect("list audio apps");
+        let target = apps.first().expect("nothing is playing audio right now");
+        println!("target: {} (pid {})", target.display_name, target.process_ids[0]);
+
+        let state = RecordingState::new();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        state.set_audio_sender(sender);
+        state.start_recording().expect("start recording");
+
+        spawn_process_capture(state.clone(), target.process_ids[0]).expect("spawn capture");
+
+        let mut chunks = 0usize;
+        let mut samples = 0usize;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+
+        while std::time::Instant::now() < deadline {
+            match receiver.try_recv() {
+                Ok(chunk) => {
+                    assert_eq!(chunk.sample_rate, CAPTURE_SAMPLE_RATE);
+                    assert!(matches!(chunk.device_type, DeviceType::System));
+                    chunks += 1;
+                    samples += chunk.data.len();
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+
+        state.stop_recording();
+        println!("chunks={chunks} samples={samples}");
+
+        assert!(chunks > 0, "no chunks reached the pipeline");
+        assert!(
+            samples >= CAPTURE_SAMPLE_RATE as usize / 2,
+            "less than half a second of audio arrived: {samples} samples"
+        );
     }
 }
