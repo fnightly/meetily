@@ -3,7 +3,6 @@ import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { MeetingSummary, SummaryProcessResponse } from '@/types';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
-import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
@@ -243,7 +242,6 @@ export default function PageContent({
 
   // Track page view
   useEffect(() => {
-    Analytics.trackPageView('meeting_details');
   }, []);
 
   useEffect(() => {
@@ -408,7 +406,6 @@ export default function PageContent({
         meetingIds={[meeting.id]}
         title={meetingData.meetingTitle || meeting.title}
         summaryOverride={meetingData.aiSummary}
-        onExported={() => void Analytics.track('meeting_exported', {})}
       />
     </motion.div>
   );

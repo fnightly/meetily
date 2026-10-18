@@ -2,7 +2,6 @@
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
-import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import type { SummaryProcessResponse } from '@/types';
@@ -165,11 +164,9 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
           folderPath: meeting.folder_path ?? null
         }));
         setMeetings(await withRecordingFolders(transformedMeetings));
-        Analytics.trackBackendConnection(true);
       } catch (error) {
         console.error('Error fetching meetings:', error);
         setMeetings([]);
-        Analytics.trackBackendConnection(false, error instanceof Error ? error.message : 'Unknown error');
       } finally {
         setMeetingsLoading(false);
       }
@@ -241,7 +238,6 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       }
 
       // Track recording initiation from sidebar
-      Analytics.trackButtonClick('start_recording', 'sidebar');
     }
     // The actual recording start/stop is handled in the Home component
   };

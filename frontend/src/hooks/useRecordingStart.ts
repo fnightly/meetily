@@ -7,7 +7,6 @@ import { useConfig } from '@/contexts/ConfigContext';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
 import { recordingService } from '@/services/recordingService';
 import { isSameWindow, type RecordableWindow } from '@/lib/window-picker';
-import Analytics from '@/lib/analytics';
 import { showRecordingNotification } from '@/lib/recordingNotification';
 import {
   getProviderCommands,
@@ -17,7 +16,7 @@ import {
 import { toast } from 'sonner';
 
 const TRANSCRIPTION_RUNTIME_START_ERROR_CODE = 'TRANSCRIPTION_RUNTIME_INITIALIZATION_FAILED';
-const TRANSCRIPTION_RUNTIME_USER_MESSAGE = 'Speech recognition could not initialize. Restart Meetily. If the problem continues, repair or reinstall the app.';
+const TRANSCRIPTION_RUNTIME_USER_MESSAGE = 'Speech recognition could not initialize. Restart 会见. If the problem continues, repair or reinstall the app.';
 
 const isTranscriptionRuntimeStartError = (error: unknown) =>
   String(error) === TRANSCRIPTION_RUNTIME_START_ERROR_CODE;
@@ -38,7 +37,6 @@ interface TranscriptConfig {
  * Features:
  * - Meeting title generation (format: Meeting DD_MM_YY_HH_MM_SS)
  * - Transcript clearing on start
- * - Analytics tracking
  * - Recording notification display
  * - Auto-start from sidebar via sessionStorage flag
  */
@@ -188,14 +186,12 @@ export function useRecordingStart(
             description: tr('toast.modelDownloadingHint'),
             duration: 5000,
           });
-          Analytics.trackButtonClick('start_recording_blocked_downloading', 'home_page');
         } else {
           toast.error(tr('toast.modelNotReady'), {
             description: tr('toast.modelNotReadyHint'),
             duration: 5000,
           });
           showModal?.('modelSelector', 'Transcription model setup required');
-          Analytics.trackButtonClick('start_recording_blocked_missing', 'home_page');
         }
         setStatus(RecordingStatus.IDLE);
         return;
@@ -204,7 +200,6 @@ export function useRecordingStart(
       // Give a closed window a chance to be re-picked instead of recording silence.
       if (!(await selectedWindowIsStillOpen())) {
         setStatus(RecordingStatus.IDLE);
-        Analytics.trackButtonClick('start_recording_blocked_window_closed', 'home_page');
         return;
       }
 
@@ -232,7 +227,6 @@ export function useRecordingStart(
       setIsRecording(true); // This will also update the sidebar via the useEffect
       clearTranscripts(); // Clear previous transcripts when starting new recording
       setIsMeetingActive(true);
-      Analytics.trackButtonClick('start_recording', 'home_page');
 
       // Show recording notification if enabled
       await showRecordingNotification();
@@ -247,7 +241,6 @@ export function useRecordingStart(
       if (errorMsg.includes('already in progress')) {
         console.warn('Start rejected because recording is already active - leaving live recording state untouched');
         setStatus(RecordingStatus.RECORDING);
-        Analytics.trackButtonClick('start_recording_error', 'home_page');
         return;
       }
 
@@ -260,7 +253,6 @@ export function useRecordingStart(
         ? TRANSCRIPTION_RUNTIME_USER_MESSAGE
         : errorMsg);
       setIsRecording(false); // Reset state on error
-      Analytics.trackButtonClick('start_recording_error', 'home_page');
       if (isRuntimeError) return;
       // Re-throw so RecordingControls can handle device-specific errors
       throw error;
@@ -288,14 +280,12 @@ export function useRecordingStart(
                 description: tr('toast.modelDownloadingHint'),
                 duration: 5000,
               });
-              Analytics.trackButtonClick('start_recording_blocked_downloading', 'sidebar_auto');
             } else {
               toast.error(tr('toast.modelNotReady'), {
                 description: tr('toast.modelNotReadyHint'),
                 duration: 5000,
               });
               showModal?.('modelSelector', 'Transcription model setup required');
-              Analytics.trackButtonClick('start_recording_blocked_missing', 'sidebar_auto');
             }
             setStatus(RecordingStatus.IDLE);
             setIsAutoStarting(false);
@@ -306,7 +296,6 @@ export function useRecordingStart(
           try {
             if (!(await selectedWindowIsStillOpen())) {
               setStatus(RecordingStatus.IDLE);
-              Analytics.trackButtonClick('start_recording_blocked_window_closed', 'sidebar_auto');
               return;
             }
 
@@ -331,7 +320,6 @@ export function useRecordingStart(
             setIsRecording(true);
             clearTranscripts();
             setIsMeetingActive(true);
-            Analytics.trackButtonClick('start_recording', 'sidebar_auto');
 
             // Show recording notification if enabled
             await showRecordingNotification();
@@ -350,7 +338,6 @@ export function useRecordingStart(
                 toast.error(tr('toast.startRecordingFailed'), { description: errorMsg });
               }
             }
-            Analytics.trackButtonClick('start_recording_error', 'sidebar_auto');
           } finally {
             setIsAutoStarting(false);
           }
@@ -395,14 +382,12 @@ export function useRecordingStart(
             description: tr('toast.modelDownloadingHint'),
             duration: 5000,
           });
-          Analytics.trackButtonClick('start_recording_blocked_downloading', 'sidebar_direct');
         } else {
           toast.error(tr('toast.modelNotReady'), {
             description: tr('toast.modelNotReadyHint'),
             duration: 5000,
           });
           showModal?.('modelSelector', 'Transcription model setup required');
-          Analytics.trackButtonClick('start_recording_blocked_missing', 'sidebar_direct');
         }
         setStatus(RecordingStatus.IDLE);
         setIsAutoStarting(false);
@@ -412,7 +397,6 @@ export function useRecordingStart(
       try {
         if (!(await selectedWindowIsStillOpen())) {
           setStatus(RecordingStatus.IDLE);
-          Analytics.trackButtonClick('start_recording_blocked_window_closed', 'sidebar_direct');
           return;
         }
 
@@ -437,7 +421,6 @@ export function useRecordingStart(
         setIsRecording(true);
         clearTranscripts();
         setIsMeetingActive(true);
-        Analytics.trackButtonClick('start_recording', 'sidebar_direct');
 
         // Show recording notification if enabled
         await showRecordingNotification();
@@ -456,7 +439,6 @@ export function useRecordingStart(
             toast.error(tr('toast.startRecordingFailed'), { description: errorMsg });
           }
         }
-        Analytics.trackButtonClick('start_recording_error', 'sidebar_direct');
       } finally {
         setIsAutoStarting(false);
       }

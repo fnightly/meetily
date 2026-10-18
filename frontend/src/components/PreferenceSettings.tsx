@@ -4,7 +4,6 @@ import { tr } from '@/lib/i18n'
 import { useEffect, useState, useRef } from "react"
 import { Switch } from "./ui/switch"
 import { invoke } from "@tauri-apps/api/core"
-import Analytics from "@/lib/analytics"
 import { StorageLocationsPanel } from "./StorageLocationsPanel"
 import { useConfig, NotificationSettings } from "@/contexts/ConfigContext"
 
@@ -29,22 +28,15 @@ export function PreferenceSettings() {
     hasTrackedViewRef.current = false;
   }, [loadPreferences]);
 
-  // Track preferences viewed analytics on every tab visit (once per mount)
   useEffect(() => {
     if (hasTrackedViewRef.current) return;
 
     const trackPreferencesViewed = async () => {
       // Wait for notification settings to be available (either from cache or after loading)
       if (notificationSettings) {
-        await Analytics.track('preferences_viewed', {
-          notifications_enabled: notificationSettings.notification_preferences.show_recording_started ? 'true' : 'false'
-        });
         hasTrackedViewRef.current = true;
       } else if (!isLoadingPreferences) {
         // If not loading and no settings available, track with default value
-        await Analytics.track('preferences_viewed', {
-          notifications_enabled: 'false'
-        });
         hasTrackedViewRef.current = true;
       }
     };
@@ -99,9 +91,6 @@ export function PreferenceSettings() {
         console.log("Successfully updated notification settings to:", notificationsEnabled);
 
         // Track notification preference change - only fires when user manually toggles
-        await Analytics.track('notification_settings_changed', {
-          notifications_enabled: notificationsEnabled.toString()
-        });
       } catch (error) {
         console.error('Failed to update notification settings:', error);
       }

@@ -3,7 +3,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Copy, FolderOpen, RefreshCw, Users } from 'lucide-react';
-import Analytics from '@/lib/analytics';
 import { RetranscribeDialog } from './RetranscribeDialog';
 import { useConfig } from '@/contexts/ConfigContext';
 import { useI18n } from '@/contexts/I18nContext';
@@ -98,7 +97,6 @@ export function TranscriptButtonGroup({
     setIdentifying(true);
     setProgress(null);
     try {
-      Analytics.trackButtonClick('identify_speakers', 'meeting_details');
 
       const result = await invoke<{
         speaker_count: number;
@@ -144,7 +142,6 @@ export function TranscriptButtonGroup({
           size="sm"
           className="px-2 @[34rem]:px-3"
           onClick={() => {
-            Analytics.trackButtonClick('copy_transcript', 'meeting_details');
             onCopyTranscript();
           }}
           disabled={transcriptCount === 0}
@@ -159,7 +156,6 @@ export function TranscriptButtonGroup({
           variant="ghost"
           className="px-2 @[34rem]:px-3"
           onClick={() => {
-            Analytics.trackButtonClick('open_recording_folder', 'meeting_details');
             onOpenMeetingFolder();
           }}
           title={t('transcriptActions.openFolder')}
@@ -203,10 +199,6 @@ export function TranscriptButtonGroup({
               ? 'px-2 @[34rem]:px-3'
               : 'px-2 @[34rem]:px-3 text-blue-700 hover:bg-blue-50'}
             onClick={() => {
-              Analytics.trackButtonClick(
-                transcriptCount === 0 ? 'transcribe_recording' : 'enhance_transcript',
-                'meeting_details',
-              );
               setShowRetranscribeDialog(true);
             }}
             title={transcriptCount === 0

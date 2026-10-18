@@ -3,7 +3,6 @@ import { Switch } from '@/components/ui/switch';
 import { FolderOpen } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { DeviceSelection, SelectedDevices } from '@/components/DeviceSelection';
-import Analytics from '@/lib/analytics';
 import { toast } from 'sonner';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useConfig } from '@/contexts/ConfigContext';
@@ -202,9 +201,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     await savePreferences(newPreferences);
 
     // Track auto-save setting change
-    await Analytics.track('auto_save_recording_toggled', {
-      enabled: enabled.toString()
-    });
   };
 
   const handleDeferTranscriptionToggle = async (enabled: boolean) => {
@@ -215,9 +211,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     setDeferTranscription(enabled);
     await savePreferences(newPreferences);
 
-    await Analytics.track('defer_transcription_toggled', {
-      enabled: enabled.toString()
-    });
   };
 
   const handleFormatChange = async (format: string) => {
@@ -225,7 +218,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     setPreferences(newPreferences);
     await savePreferences(newPreferences);
 
-    await Analytics.track('recording_format_changed', { format });
   };
 
   const handleQualityChange = async (quality: string) => {
@@ -233,7 +225,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     setPreferences(newPreferences);
     await savePreferences(newPreferences);
 
-    await Analytics.track('recording_quality_changed', { quality });
   };
 
   const handleSilenceStopToggle = async (enabled: boolean) => {
@@ -244,7 +235,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     setPreferences(newPreferences);
     await savePreferences(newPreferences);
 
-    await Analytics.track('silence_stop_toggled', { enabled: String(enabled), seconds: String(seconds) });
   };
 
   const handleSilenceStopSecondsChange = async (seconds: number) => {
@@ -260,7 +250,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     setPreferences(newPreferences);
     await savePreferences(newPreferences);
 
-    await Analytics.track('max_recording_length_toggled', { enabled: String(enabled), seconds: String(seconds) });
   };
 
   const handleMaxSecondsChange = async (seconds: number) => {
@@ -274,7 +263,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     setPreferences(newPreferences);
     await savePreferences(newPreferences);
 
-    await Analytics.track('transcript_cleanup_toggled', { enabled: String(enabled) });
   };
 
   const handleRetentionChange = async (days: number) => {    const newPreferences = { ...preferences, recordings_retention_days: days };
@@ -283,7 +271,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     // A stale preview would describe the previous policy.
     setPurgePreview(null);
 
-    await Analytics.track('retention_changed', { days: String(days) });
   };
 
   /**
@@ -322,12 +309,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     await savePreferences(newPreferences);
 
     // Track default device preference changes
-    // Note: Individual device selection analytics are tracked in DeviceSelection component
-    await Analytics.track('default_devices_changed', {
-      has_preferred_microphone: (!!devices.micDevice).toString(),
-      has_preferred_system_audio: (!!devices.systemDevice).toString()
-    });
-  };
+    };
 
   const handleRecordingSourceChange = async (source: RecordingSource) => {
     const newPreferences = {
@@ -347,7 +329,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     }
     await savePreferences(newPreferences);
 
-    await Analytics.track('recording_source_changed', { source });
   };
 
   const handleStereoInternalToggle = async (enabled: boolean) => {
@@ -355,9 +336,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     setPreferences(newPreferences);
     await savePreferences(newPreferences);
 
-    await Analytics.track('stereo_internal_recording_toggled', {
-      enabled: enabled.toString()
-    });
   };
 
   // Dragging the slider only touches local state; the backend is written on
@@ -380,9 +358,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     persistedGainRef.current = DEFAULT_MICROPHONE_GAIN_DB;
     await savePreferences(newPreferences);
 
-    await Analytics.track('microphone_gain_changed', {
-      db: String(DEFAULT_MICROPHONE_GAIN_DB)
-    });
   };
 
   const handleEchoCancellationToggle = async (enabled: boolean) => {
@@ -390,9 +365,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     setPreferences(newPreferences);
     await savePreferences(newPreferences);
 
-    await Analytics.track('echo_cancellation_toggled', {
-      enabled: enabled.toString()
-    });
   };
 
   const handleNoiseSuppressionToggle = async (enabled: boolean) => {
@@ -400,9 +372,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     setPreferences(newPreferences);
     await savePreferences(newPreferences);
 
-    await Analytics.track('noise_suppression_toggled', {
-      enabled: enabled.toString()
-    });
   };
 
   const handleOpenFolder = async () => {
@@ -419,7 +388,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       if (!picked) return; // cancelled
       setPreferences(prev => ({ ...prev, save_folder: picked }));
       toast.success(t('recording.folderUpdated'), { description: picked });
-      await Analytics.track('recordings_folder_changed', { changed: 'true' });
     } catch (error) {
       console.error('Failed to change recordings folder:', error);
       toast.error(t('recording.folderChangeFailed'), {
@@ -436,9 +404,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       await store.set('show_recording_notification', enabled);
       await store.save();
       toast.success(t('recSet.preferenceSaved'));
-      await Analytics.track('recording_notification_preference_changed', {
-        enabled: enabled.toString()
-      });
     } catch (error) {
       console.error('Failed to save notification preference:', error);
       toast.error(t('recSet.preferenceSaveFailed'));
@@ -528,7 +493,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
           const next = { ...preferences, model_residency: value, model_keep_warm_minutes: minutes };
           setPreferences(next);
           void savePreferences(next);
-          void Analytics.track('model_residency_changed', { value, minutes: String(minutes) });
         }}
       />
 

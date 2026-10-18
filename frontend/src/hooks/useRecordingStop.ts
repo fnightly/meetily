@@ -9,7 +9,6 @@ import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
 import { storageService } from '@/services/storageService';
 import { transcriptService } from '@/services/transcriptService';
-import Analytics from '@/lib/analytics';
 import {
   actionNeedsSummary,
   actionNeedsTranscription,
@@ -47,7 +46,6 @@ interface UseRecordingStopReturn {
  * - Transcription completion polling (60s max, 500ms interval)
  * - Transcript buffer flush coordination
  * - SQLite meeting save with folder_path from sessionStorage
- * - Comprehensive analytics tracking (duration, word count, activation)
  * - Auto-navigation to meeting details
  * - Toast notifications for success/error
  * - Window exposure for Rust callbacks
@@ -163,7 +161,6 @@ export function useRecordingStop(
     (meetingId: string) => {
       router.push(`/meeting-details?id=${meetingId}&source=recording`);
       clearTranscripts();
-      Analytics.trackPageView('meeting_details');
       setStatus(RecordingStatus.IDLE);
     },
     [router, clearTranscripts, setStatus],
@@ -506,7 +503,6 @@ export function useRecordingStop(
                 label: tr('toast.viewMeeting'),
                 onClick: () => {
                   router.push(`/meeting-details?id=${meetingId}`);
-                  Analytics.trackButtonClick('view_meeting_from_toast', 'recording_complete');
                 }
               },
               duration: 10000,

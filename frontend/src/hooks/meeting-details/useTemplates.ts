@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
-import Analytics from '@/lib/analytics';
 import { useI18n } from '@/contexts/I18nContext';
 import { BUILTIN_TEMPLATE_KEYS, recommendTemplate } from '@/lib/template-recommend';
 
@@ -79,7 +78,6 @@ export function useTemplates() {
     toast.success(t('templates.selected'), {
       description: t('templates.selectedDesc', { name: templateName }),
     });
-    Analytics.trackFeatureUsed('template_selected');
   }, [t]);
 
   /**
@@ -122,7 +120,6 @@ export function useTemplates() {
       });
 
       await refreshTemplates();
-      await Analytics.trackFeatureUsed('template_saved');
       toast.success(result.overwritten ? t('templates.updated') : t('templates.created'), {
         description: t('templates.savedAs', { id: result.id }),
       });
@@ -150,7 +147,6 @@ export function useTemplates() {
     async (templateId: string): Promise<void> => {
       await invokeTauri('api_delete_template', { templateId });
       await refreshTemplates();
-      await Analytics.trackFeatureUsed('template_deleted');
       toast.success(t('templates.deleted'), { description: templateId });
     },
     [refreshTemplates, t],

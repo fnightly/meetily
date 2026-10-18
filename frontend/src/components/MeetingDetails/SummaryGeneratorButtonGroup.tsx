@@ -19,7 +19,6 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Sparkles, Settings, Loader2, FileText, Check, Square, SlidersHorizontal } from 'lucide-react';
-import Analytics from '@/lib/analytics';
 import { TemplateManagerModal } from './TemplateManagerModal';
 import type { TemplateInfo } from '@/hooks/meeting-details/useTemplates';
 import { useState, useEffect, ReactNode } from 'react';
@@ -113,7 +112,6 @@ export function SummaryGeneratorButtonGroup({
           size="sm"
           className="bg-red-50 text-red-700 hover:bg-red-100 border-red-200 px-3 gap-2"
           onClick={() => {
-            Analytics.trackButtonClick('stop_summary_generation', 'meeting_details');
             onStopGeneration();
           }}
           title={t('sumBtn.stopHint')}
@@ -127,7 +125,6 @@ export function SummaryGeneratorButtonGroup({
           size="sm"
           className="bg-violet-600 text-white hover:bg-violet-700 hover:text-white border-violet-600 px-3 gap-2"
           onClick={() => {
-            Analytics.trackButtonClick('generate_summary', 'meeting_details');
             void onGenerateSummary(customPrompt);
           }}
           disabled={isModelConfigLoading}
@@ -225,7 +222,6 @@ export function SummaryGeneratorButtonGroup({
                 <DropdownMenuItem
                   onClick={() => {
                     setTemplateManagerOpen(true);
-                    Analytics.trackFeatureUsed('template_manager_opened');
                   }}
                   className="flex items-center gap-2"
                 >

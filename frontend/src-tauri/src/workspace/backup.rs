@@ -219,7 +219,7 @@ fn safe_relative(name: &str) -> Option<PathBuf> {
 /// Read the manifest without extracting anything.
 pub fn read_manifest(archive: &Path) -> Result<BackupManifest, String> {
     let file = File::open(archive).map_err(|e| format!("无法打开备份文件：{e}"))?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|_| "不是有效的 Meetily 备份文件".to_string())?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|_| "不是有效的 会见 备份文件".to_string())?;
     let mut raw = String::new();
     zip.by_name(MANIFEST)
         .map_err(|_| "备份文件缺少 manifest.json".to_string())?
@@ -227,7 +227,7 @@ pub fn read_manifest(archive: &Path) -> Result<BackupManifest, String> {
         .map_err(|e| e.to_string())?;
     let manifest: BackupManifest = serde_json::from_str(&raw).map_err(|e| format!("备份清单无法解析：{e}"))?;
     if manifest.format_version > FORMAT_VERSION {
-        return Err("备份来自更新版本的 Meetily，请先升级应用".into());
+        return Err("备份来自更新版本的会见，请先升级应用".into());
     }
     Ok(manifest)
 }
@@ -337,7 +337,7 @@ pub async fn api_create_backup<R: Runtime>(
     state: tauri::State<'_, AppState>,
 ) -> Result<BackupResult, String> {
     use tauri_plugin_dialog::DialogExt;
-    let name = format!("Meetily-备份-{}.zip", chrono::Local::now().format("%Y%m%d-%H%M"));
+    let name = format!("会见-备份-{}.zip", chrono::Local::now().format("%Y%m%d-%H%M"));
     let dialog_app = app.clone();
     let picked = tokio::task::spawn_blocking(move || {
         let mut builder = dialog_app.dialog().file().set_file_name(&name).add_filter("ZIP", &["zip"]);
@@ -377,7 +377,7 @@ pub async fn api_restore_backup<R: Runtime>(
     use tauri_plugin_dialog::DialogExt;
     let dialog_app = app.clone();
     let picked = tokio::task::spawn_blocking(move || {
-        dialog_app.dialog().file().add_filter("Meetily 备份", &["zip"]).blocking_pick_file()
+        dialog_app.dialog().file().add_filter("会见 备份", &["zip"]).blocking_pick_file()
     })
     .await
     .map_err(|e| e.to_string())?;

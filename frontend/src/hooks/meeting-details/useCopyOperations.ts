@@ -3,7 +3,6 @@ import { tr } from '@/lib/i18n';
 import { MeetingSummary, Transcript } from '@/types';
 import { BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
 import { toast } from 'sonner';
-import Analytics from '@/lib/analytics';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { hasVisibleSummaryContent } from '@/lib/summary-content';
 import { useI18n } from '@/contexts/I18nContext';
@@ -105,16 +104,10 @@ export function useCopyOperations({
     await navigator.clipboard.writeText(header + date + fullTranscript);
     toast.success(tr('toast.transcriptCopied'));
 
-    // Track copy analytics
-    const wordCount = allTranscripts
+      const wordCount = allTranscripts
       .map(t => t.text.split(/\s+/).length)
       .reduce((a, b) => a + b, 0);
 
-    await Analytics.trackCopy('transcript', {
-      meeting_id: meeting.id,
-      transcript_length: allTranscripts.length.toString(),
-      word_count: wordCount.toString()
-    });
   }, [meeting, meetingTitle, fetchAllTranscripts]);
 
   // Copy summary to clipboard
@@ -195,12 +188,7 @@ export function useCopyOperations({
       console.log('✅ Successfully copied to clipboard!');
       toast.success(tr('toast.summaryCopied'));
 
-      // Track copy analytics
-      await Analytics.trackCopy('summary', {
-        meeting_id: meeting.id,
-        has_markdown: (!!aiSummary && 'markdown' in aiSummary).toString()
-      });
-    } catch (error) {
+        } catch (error) {
       console.error('❌ Failed to copy summary:', error);
       toast.error(tr('toast.copySummaryFailed'));
     }

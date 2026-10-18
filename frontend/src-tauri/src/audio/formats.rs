@@ -218,9 +218,9 @@ impl RecordingTags {
 
         Self {
             title: Some(meeting_name.to_string()),
-            album: Some("Meetily".to_string()),
+            album: Some("会见".to_string()),
             genre: Some("Speech".to_string()),
-            comment: Some(format!("Recorded by Meetily on {}", date)),
+            comment: Some(format!("Recorded by 会见 on {}", date)),
         }
     }
 
@@ -554,12 +554,12 @@ mod tests {
         let tags = RecordingTags::for_meeting("Team Standup", "2026-10-14T09:30:00+08:00");
 
         assert_eq!(tags.title.as_deref(), Some("Team Standup"));
-        assert_eq!(tags.album.as_deref(), Some("Meetily"));
+        assert_eq!(tags.album.as_deref(), Some("会见"));
         assert_eq!(tags.genre.as_deref(), Some("Speech"));
         // Only the date part: a full timestamp is not portable across containers.
         assert_eq!(
             tags.comment.as_deref(),
-            Some("Recorded by Meetily on 2026-10-14")
+            Some("Recorded by 会见 on 2026-10-14")
         );
     }
 
