@@ -211,6 +211,9 @@ const EN: Record<string, string> = {
   'recording.gainReset': 'Reset to 0 dB',
   'recording.noiseSuppression': 'Noise suppression',
   'recording.noiseSuppressionHint': 'Reduces steady background noise (RNNoise). For speaker echo, use microphone-only mode or headphones.',
+  'recording.echoCancellation': 'Echo suppression (experimental)',
+  'recording.echoCancellationHint': 'Removes sound played through the speakers from the microphone track (WebRTC AEC3). Costs CPU; headphones still give the cleanest recording.',
+  'recording.echoCancellationNeedsSystem': 'Needs microphone + computer audio.',
 
   'postRecording.title': 'Recording finished',
   'postRecording.deferredMessage':
@@ -1103,6 +1106,9 @@ const ZH_CN: Record<string, string> = {
   'recording.gainReset': '恢复 0 dB',
   'recording.noiseSuppression': '降噪',
   'recording.noiseSuppressionHint': '抑制持续的环境底噪（RNNoise）。外放回声请使用“仅麦克风”模式或戴耳机。',
+  'recording.echoCancellation': '回声抑制（实验）',
+  'recording.echoCancellationHint': '从麦克风轨中消除外放出来的电脑声音（WebRTC AEC3）。会增加 CPU 占用；戴耳机录音效果仍最好。',
+  'recording.echoCancellationNeedsSystem': '需要同时录制电脑声音。',
 
   'postRecording.title': '录音已结束',
   'postRecording.deferredMessage': '本次录音设置了延后转写。请选择接下来怎么处理。',

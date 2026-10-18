@@ -351,12 +351,14 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         capture_system_audio,
         microphone_gain_db,
         noise_suppression,
+        echo_cancellation,
     ) = match super::recording_preferences::load_recording_preferences(&app).await {
         Ok(prefs) => {
-            info!("📋 Loaded recording preferences: auto_save={}, defer_transcription={}, format={}, quality={}, preferred_mic={:?}, preferred_system={:?}, capture_system_audio={}, mic_gain_db={}, noise_suppression={}",
+            info!("📋 Loaded recording preferences: auto_save={}, defer_transcription={}, format={}, quality={}, preferred_mic={:?}, preferred_system={:?}, capture_system_audio={}, mic_gain_db={}, noise_suppression={}, echo_cancellation={}",
                   prefs.auto_save, prefs.defer_transcription, prefs.file_format, prefs.file_quality,
                   prefs.preferred_mic_device, prefs.preferred_system_device,
-                  prefs.capture_system_audio, prefs.microphone_gain_db, prefs.noise_suppression);
+                  prefs.capture_system_audio, prefs.microphone_gain_db, prefs.noise_suppression,
+                  prefs.echo_cancellation);
             (
                 prefs.auto_save,
                 prefs.defer_transcription,
@@ -367,6 +369,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
                 prefs.capture_system_audio,
                 prefs.microphone_gain_db,
                 prefs.noise_suppression,
+                prefs.echo_cancellation,
             )
         }
         Err(e) => {
@@ -381,6 +384,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
                 true,
                 0.0,
                 false,
+                false,
             )
         }
     };
@@ -393,6 +397,17 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     } else {
         info!("🎙️ Microphone-only recording: no system or window audio will be captured");
         None
+    };
+
+    // AEC needs the render stream. Without one there is nothing to subtract, so the
+    // preference is dropped instead of running a canceller on silence.
+    let echo_cancellation = if capture_system_audio {
+        echo_cancellation
+    } else {
+        if echo_cancellation {
+            info!("🔇 Echo cancellation off: microphone-only recording has no render stream");
+        }
+        false
     };
 
     // Loading the speech model and preparing the audio hardware are independent,
@@ -491,6 +506,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // have to be in place before recording starts.
     manager.get_state().set_microphone_gain_db(microphone_gain_db);
     manager.get_state().set_noise_suppression(noise_suppression);
+    manager.get_state().set_echo_cancellation(echo_cancellation);
 
     // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
     let transcription_receiver = manager
@@ -635,12 +651,14 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         capture_system_audio,
         microphone_gain_db,
         noise_suppression,
+        echo_cancellation,
     ) = match super::recording_preferences::load_recording_preferences(&app).await {
         Ok(prefs) => {
             info!(
-                "📋 Loaded recording preferences: auto_save={}, defer_transcription={}, format={}, quality={}, capture_system_audio={}, mic_gain_db={}, noise_suppression={}",
+                "📋 Loaded recording preferences: auto_save={}, defer_transcription={}, format={}, quality={}, capture_system_audio={}, mic_gain_db={}, noise_suppression={}, echo_cancellation={}",
                 prefs.auto_save, prefs.defer_transcription, prefs.file_format, prefs.file_quality,
-                prefs.capture_system_audio, prefs.microphone_gain_db, prefs.noise_suppression
+                prefs.capture_system_audio, prefs.microphone_gain_db, prefs.noise_suppression,
+                prefs.echo_cancellation
             );
             (
                 prefs.auto_save,
@@ -650,6 +668,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
                 prefs.capture_system_audio,
                 prefs.microphone_gain_db,
                 prefs.noise_suppression,
+                prefs.echo_cancellation,
             )
         }
         Err(e) => {
@@ -661,6 +680,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
                 None,
                 true,
                 0.0,
+                false,
                 false,
             )
         }
@@ -676,6 +696,17 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         }
     }
     let target_process_id = if capture_system_audio { target_process_id } else { None };
+
+    // AEC needs the render stream. Without one there is nothing to subtract, so the
+    // preference is dropped instead of running a canceller on silence.
+    let echo_cancellation = if capture_system_audio {
+        echo_cancellation
+    } else {
+        if echo_cancellation {
+            info!("🔇 Echo cancellation off: microphone-only recording has no render stream");
+        }
+        false
+    };
 
     // A chosen application replaces the system device rather than joining it:
     // both reach the mixer as `DeviceType::System`, so capturing the whole system
@@ -795,6 +826,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // have to be in place before recording starts.
     manager.get_state().set_microphone_gain_db(microphone_gain_db);
     manager.get_state().set_noise_suppression(noise_suppression);
+    manager.get_state().set_echo_cancellation(echo_cancellation);
 
     // Start recording with specified devices and auto_save setting
     let transcription_receiver = manager

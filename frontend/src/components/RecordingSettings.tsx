@@ -21,6 +21,7 @@ import {
   formatGainDb,
   resolveCaptureSystemAudio,
   resolveMicrophoneGainDb,
+  resolveEchoCancellation,
   resolveNoiseSuppression,
 } from '@/lib/mic-settings';
 
@@ -51,6 +52,8 @@ export interface RecordingPreferences {
   microphone_gain_db?: number;
   /** Reduce steady background noise with RNNoise. */
   noise_suppression?: boolean;
+  /** Experimental WebRTC AEC3 echo suppression on the microphone track. */
+  echo_cancellation?: boolean;
 }
 
 /** Silence durations offered in the UI. */
@@ -99,7 +102,8 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     preferred_system_device: null,
     capture_system_audio: true,
     microphone_gain_db: DEFAULT_MICROPHONE_GAIN_DB,
-    noise_suppression: false
+    noise_suppression: false,
+    echo_cancellation: false
   });
   const [encodingOptions, setEncodingOptions] = useState<RecordingEncodingOptions | null>(null);
   const [purgePreview, setPurgePreview] = useState<string | null>(null);
@@ -137,6 +141,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
           capture_system_audio: resolveCaptureSystemAudio(prefs.capture_system_audio),
           microphone_gain_db: resolveMicrophoneGainDb(prefs.microphone_gain_db),
           noise_suppression: resolveNoiseSuppression(prefs.noise_suppression),
+          echo_cancellation: resolveEchoCancellation(prefs.echo_cancellation),
         };
         setPreferences(normalized);
         persistedGainRef.current = normalized.microphone_gain_db ?? DEFAULT_MICROPHONE_GAIN_DB;
@@ -342,6 +347,16 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
 
     await Analytics.track('microphone_gain_changed', {
       db: String(DEFAULT_MICROPHONE_GAIN_DB)
+    });
+  };
+
+  const handleEchoCancellationToggle = async (enabled: boolean) => {
+    const newPreferences = { ...preferences, echo_cancellation: enabled };
+    setPreferences(newPreferences);
+    await savePreferences(newPreferences);
+
+    await Analytics.track('echo_cancellation_toggled', {
+      enabled: enabled.toString()
     });
   };
 
@@ -849,6 +864,23 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
                 />
               </div>
               <p className="text-xs text-slate-500">{t('recording.noiseSuppressionHint')}</p>
+            </div>
+
+            <div className="space-y-1">
+              <div className="flex items-center justify-between gap-4">
+                <Label htmlFor="rec-echo-cancellation">{t('recording.echoCancellation')}</Label>
+                <Switch
+                  id="rec-echo-cancellation"
+                  checked={preferences.echo_cancellation === true}
+                  onCheckedChange={handleEchoCancellationToggle}
+                  disabled={controlsLocked || !captureSystemAudio}
+                />
+              </div>
+              <p className="text-xs text-slate-500">
+                {captureSystemAudio
+                  ? t('recording.echoCancellationHint')
+                  : t('recording.echoCancellationNeedsSystem')}
+              </p>
             </div>
           </div>
         </div>

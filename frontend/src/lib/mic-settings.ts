@@ -45,6 +45,11 @@ export function resolveNoiseSuppression(value: boolean | null | undefined): bool
   return value === true;
 }
 
+/** Echo cancellation is opt-in and experimental, so a missing field means off. */
+export function resolveEchoCancellation(value: boolean | null | undefined): boolean {
+  return value === true;
+}
+
 /**
  * Format a gain for display with an explicit sign on positive values.
  *

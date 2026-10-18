@@ -6,6 +6,7 @@ import {
   clampGainDb,
   formatGainDb,
   resolveCaptureSystemAudio,
+  resolveEchoCancellation,
   resolveMicrophoneGainDb,
   resolveNoiseSuppression,
 } from '@/lib/mic-settings';
@@ -70,5 +71,12 @@ describe('recording source defaults', () => {
     expect(resolveNoiseSuppression(null)).toBe(false);
     expect(resolveNoiseSuppression(true)).toBe(true);
     expect(resolveNoiseSuppression(false)).toBe(false);
+  });
+
+  test('experimental echo cancellation is off unless explicitly enabled', () => {
+    expect(resolveEchoCancellation(undefined)).toBe(false);
+    expect(resolveEchoCancellation(null)).toBe(false);
+    expect(resolveEchoCancellation(true)).toBe(true);
+    expect(resolveEchoCancellation(false)).toBe(false);
   });
 });

@@ -9,6 +9,7 @@ use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolat
 use super::devices::AudioDevice;
 use super::recording_state::{AudioChunk, AudioError, RecordingState, DeviceType};
 use super::audio_processing::{audio_to_mono, LoudnessNormalizer, NoiseSuppressionProcessor, HighPassFilter};
+use super::echo_cancellation::EchoCanceller;
 use super::vad::{ContinuousVadProcessor};
 
 /// How long a silence must last before the VAD closes a speech segment, and
@@ -630,12 +631,12 @@ impl AudioCapture {
             }
 
             // STEP 4: User gain, applied last so the normalizer cannot cancel it.
-            // This is the final sample-domain stage before the chunk is sent, so the
-            // only ceiling on a high setting is clipping into the saved track.
+            // The soft limiter rounds off peaks instead of clipping them, so a hot
+            // setting costs some dynamics rather than adding distortion.
             let gain = self.state.mic_gain_linear();
             if gain != 1.0 {
                 for sample in mono_data.iter_mut() {
-                    *sample = (*sample * gain).clamp(-1.0, 1.0);
+                    *sample = soft_limit(*sample * gain);
                 }
             }
         }
@@ -759,6 +760,9 @@ pub struct AudioPipeline {
     // PROFESSIONAL AUDIO MIXING: Ring buffer + RMS-based mixer
     ring_buffer: AudioMixerRingBuffer,
     mixer: ProfessionalAudioMixer,
+    /// Present only when the session asked for echo cancellation and has a render
+    /// stream to cancel; `None` keeps the microphone path exactly as it was.
+    echo_canceller: Arc<std::sync::Mutex<Option<EchoCanceller>>>,
     // Recording sender for pre-mixed audio
     recording_sender_for_mixed: Option<mpsc::UnboundedSender<AudioChunk>>,
 }
@@ -767,7 +771,7 @@ impl AudioPipeline {
     pub fn new(
         receiver: mpsc::UnboundedReceiver<AudioChunk>,
         transcription_sender: mpsc::UnboundedSender<AudioChunk>,
-        _state: Arc<RecordingState>,
+        state: Arc<RecordingState>,
         target_chunk_duration_ms: u32,
         sample_rate: u32,
         mic_device_name: String,
@@ -820,6 +824,20 @@ impl AudioPipeline {
         let ring_buffer = AudioMixerRingBuffer::new(sample_rate);
         let mixer = ProfessionalAudioMixer::new(sample_rate);
 
+        // AEC needs a far-end stream to subtract from the microphone. The start path
+        // clears the session flag in microphone-only mode; this is the backstop for
+        // any future caller that sets the preference without a system stream.
+        let echo_canceller = if state.echo_cancellation_enabled() {
+            let canceller = EchoCanceller::new(sample_rate);
+            if canceller.is_none() {
+                warn!("Echo cancellation could not be initialised; recording continues without it");
+            }
+            canceller
+        } else {
+            None
+        };
+        let echo_canceller = Arc::new(std::sync::Mutex::new(echo_canceller));
+
         // Note: target_chunk_duration_ms is ignored - VAD controls segmentation now
         let _ = target_chunk_duration_ms;
 
@@ -834,8 +852,24 @@ impl AudioPipeline {
             processed_chunks: 0,
             ring_buffer,
             mixer,
+            echo_canceller,
             recording_sender_for_mixed: None,  // Will be set by manager
         })
+    }
+
+    /// Pass the microphone window through AEC when the session enabled it.
+    ///
+    /// The lock is uncontended (the pipeline thread is the only user); it exists
+    /// because the canceller has to be installed before the task starts and shared
+    /// with the struct that runs it.
+    fn cancel_echo(&self, mic_window: Vec<f32>, sys_window: &[f32]) -> Vec<f32> {
+        let Ok(mut guard) = self.echo_canceller.lock() else {
+            return mic_window;
+        };
+        match guard.as_mut() {
+            Some(canceller) => canceller.process_window(&mic_window, sys_window),
+            None => mic_window,
+        }
     }
 
     /// Run the VAD-driven audio processing pipeline
@@ -883,6 +917,11 @@ impl AudioPipeline {
                     // STEP 2: Mix audio in fixed windows when both streams have sufficient data
                     while self.ring_buffer.can_mix() {
                         if let Some((mic_window, sys_window)) = self.ring_buffer.extract_window() {
+                            // Cancel speaker echo in the microphone before mixing:
+                            // otherwise the recording contains both the system audio
+                            // and its delayed, coloured copy from the room.
+                            let mic_window = self.cancel_echo(mic_window, &sys_window);
+
                             // Simple mixing without aggressive ducking
                             let mixed_clean = self.mixer.mix_window(&mic_window, &sys_window);
 
@@ -999,6 +1038,25 @@ impl AudioPipeline {
         Ok(())
     }
 
+}
+
+/// Soft knee limiter for the user-gain stage.
+///
+/// Below 0.9 the sample is untouched. Above it a tanh knee bends the remaining
+/// headroom towards an asymptote just under full scale, so a hot gain setting
+/// rounds peaks off instead of squaring them at a hard clamp. The asymptote is
+/// 0.999 rather than 1.0 because f32 rounding would otherwise let a large enough
+/// input land exactly on full scale, which is what the hard clamp did.
+fn soft_limit(sample: f32) -> f32 {
+    const KNEE: f32 = 0.9;
+    const ASYMPTOTE: f32 = 0.999;
+    if sample.abs() <= KNEE {
+        return sample;
+    }
+    let sign = if sample.is_sign_negative() { -1.0 } else { 1.0 };
+    let headroom = ASYMPTOTE - KNEE;
+    let excess = (sample.abs() - KNEE) / headroom;
+    sign * (KNEE + headroom * excess.tanh())
 }
 
 /// Simple audio pipeline manager
@@ -1148,5 +1206,137 @@ mod tests {
         // uninterrupted speech. Batch import/retranscription use 2000ms.
         // See #679 and #756.
         assert_eq!(VAD_REDEMPTION_TIME_MS, 500);
+    }
+
+    #[test]
+    fn soft_limit_leaves_quiet_samples_untouched() {
+        for sample in [-0.9, -0.5, -0.1, 0.0, 0.3, 0.9] {
+            assert_eq!(soft_limit(sample), sample);
+        }
+    }
+
+    #[test]
+    fn soft_limit_bends_loud_samples_below_full_scale() {
+        for sample in [0.901, 0.95, 1.0, 2.0, 100.0] {
+            let limited = soft_limit(sample);
+            assert!(limited > 0.9, "{sample} lost its signal: {limited}");
+            assert!(limited < 1.0, "{sample} reached full scale: {limited}");
+        }
+        for sample in [-0.901, -0.95, -1.0, -2.0, -100.0] {
+            let limited = soft_limit(sample);
+            assert!(limited < -0.9, "{sample} lost its signal: {limited}");
+            assert!(limited > -1.0, "{sample} reached full scale: {limited}");
+        }
+    }
+
+    #[test]
+    fn soft_limit_is_monotonic_and_finite() {
+        let mut previous = f32::NEG_INFINITY;
+        let mut sample = -4.0f32;
+        while sample <= 4.0 {
+            let limited = soft_limit(sample);
+            assert!(limited.is_finite(), "non-finite output for {sample}");
+            assert!(
+                limited >= previous,
+                "soft limiter went backwards at {sample}: {limited} < {previous}"
+            );
+            previous = limited;
+            sample += 0.01;
+        }
+    }
+
+    /// Record two seconds from the system default microphone and assert sound arrived.
+    ///
+    /// Ignored by default because it needs real hardware. Run
+    /// "cargo test --lib real_microphone_probe -- --ignored --nocapture" to check the
+    /// microphone capture path without launching the app.
+    #[test]
+    #[ignore]
+    fn real_microphone_probe_receives_sound() {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        use cpal::SampleFormat;
+        use std::sync::{Arc, Mutex};
+
+        let host = cpal::default_host();
+        let device = host.default_input_device().expect(
+            "no default input device — connect a microphone and check the Windows sound settings",
+        );
+        let supported = device
+            .default_input_config()
+            .expect("the default input device exposes no input configuration");
+        println!(
+            "probing '{}' ({:?}, {} Hz, {} ch)",
+            device.name().unwrap_or_else(|_| "<unnamed>".to_string()),
+            supported.sample_format(),
+            supported.sample_rate().0,
+            supported.channels()
+        );
+
+        let collected: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+        let stream_config = supported.config();
+        let error_fn = |err| eprintln!("microphone probe stream error: {err}");
+
+        let stream = match supported.sample_format() {
+            SampleFormat::F32 => {
+                let sink = collected.clone();
+                device.build_input_stream(
+                    &stream_config,
+                    move |data: &[f32], _| {
+                        if let Ok(mut sink) = sink.lock() {
+                            sink.extend_from_slice(data);
+                        }
+                    },
+                    error_fn,
+                    None,
+                )
+            }
+            SampleFormat::I16 => {
+                let sink = collected.clone();
+                device.build_input_stream(
+                    &stream_config,
+                    move |data: &[i16], _| {
+                        if let Ok(mut sink) = sink.lock() {
+                            sink.extend(data.iter().map(|&s| s as f32 / 32768.0));
+                        }
+                    },
+                    error_fn,
+                    None,
+                )
+            }
+            SampleFormat::U16 => {
+                let sink = collected.clone();
+                device.build_input_stream(
+                    &stream_config,
+                    move |data: &[u16], _| {
+                        if let Ok(mut sink) = sink.lock() {
+                            sink.extend(data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0));
+                        }
+                    },
+                    error_fn,
+                    None,
+                )
+            }
+            other => panic!("microphone probe cannot handle sample format {other:?}"),
+        }
+        .expect("could not build an input stream for the default microphone");
+
+        stream.play().expect("could not start the microphone stream");
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        drop(stream);
+
+        let samples = collected.lock().map(|s| s.clone()).unwrap_or_default();
+        assert!(
+            !samples.is_empty(),
+            "the microphone delivered no samples at all"
+        );
+
+        let peak = samples
+            .iter()
+            .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+        assert!(
+            peak > 1e-4,
+            "the microphone delivered silence (peak {peak:e}); check the Windows microphone privacy setting and that the selected input is not muted"
+        );
+        println!("probe captured {} samples, peak {peak:.4}", samples.len());
     }
 }

@@ -162,6 +162,9 @@ pub struct RecordingState {
     /// suppressor when the capture stream is created, so it must be set before
     /// recording starts.
     noise_suppression: AtomicBool,
+    /// Runtime switch for echo cancellation. The pipeline builds its canceller when
+    /// the pipeline starts, so it must be set before recording starts.
+    echo_cancellation: AtomicBool,
 }
 
 impl RecordingState {
@@ -185,6 +188,7 @@ impl RecordingState {
             defer_transcription: AtomicBool::new(false),
             microphone_gain_db: AtomicU32::new(0.0f32.to_bits()),
             noise_suppression: AtomicBool::new(false),
+            echo_cancellation: AtomicBool::new(false),
         })
     }
 
@@ -223,6 +227,15 @@ impl RecordingState {
 
     pub fn noise_suppression_enabled(&self) -> bool {
         self.noise_suppression.load(Ordering::SeqCst)
+    }
+
+    /// Enable echo cancellation for the session that is about to start.
+    pub fn set_echo_cancellation(&self, enabled: bool) {
+        self.echo_cancellation.store(enabled, Ordering::SeqCst);
+    }
+
+    pub fn echo_cancellation_enabled(&self) -> bool {
+        self.echo_cancellation.load(Ordering::SeqCst)
     }
 
     // Recording control
@@ -506,6 +519,7 @@ impl Default for RecordingState {
             defer_transcription: AtomicBool::new(false),
             microphone_gain_db: AtomicU32::new(0.0f32.to_bits()),
             noise_suppression: AtomicBool::new(false),
+            echo_cancellation: AtomicBool::new(false),
         }
     }
 }
@@ -563,7 +577,9 @@ mod tests {
 
         state.set_microphone_gain_db(3.5);
         state.set_noise_suppression(true);
+        state.set_echo_cancellation(true);
         assert_eq!(state.microphone_gain_db(), 3.5);
         assert!(state.noise_suppression_enabled());
+        assert!(state.echo_cancellation_enabled());
     }
 }

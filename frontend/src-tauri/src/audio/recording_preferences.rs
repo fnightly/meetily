@@ -100,6 +100,14 @@ pub struct RecordingPreferences {
     /// Run RNNoise on the microphone before mixing.
     #[serde(default)]
     pub noise_suppression: bool,
+
+    /// Cancel speaker echo with WebRTC AEC3 before mixing the microphone with the
+    /// system stream.
+    ///
+    /// Opt-in: it costs CPU and only helps when the meeting is played through
+    /// speakers, so headphone users should not pay for it.
+    #[serde(default)]
+    pub echo_cancellation: bool,
 }
 
 /// Serde default for `file_quality`.
@@ -172,6 +180,7 @@ impl Default for RecordingPreferences {
             capture_system_audio: default_capture_system_audio(),
             microphone_gain_db: default_microphone_gain_db(),
             noise_suppression: false,
+            echo_cancellation: false,
         }
     }
 }
@@ -275,11 +284,12 @@ pub async fn load_recording_preferences<R: Runtime>(
 
     // Logs the switches that change what gets written, so the effective settings
     // can be confirmed from a log rather than inferred from behaviour.
-    info!("Loaded recording preferences: save_folder={:?}, auto_save={}, format={}, quality={}, defer_transcription={}, cleanup_after_recording={}, mic={:?}, system={:?}, capture_system_audio={}, mic_gain_db={}, noise_suppression={}",
+    info!("Loaded recording preferences: save_folder={:?}, auto_save={}, format={}, quality={}, defer_transcription={}, cleanup_after_recording={}, mic={:?}, system={:?}, capture_system_audio={}, mic_gain_db={}, noise_suppression={}, echo_cancellation={}",
           prefs.save_folder, prefs.auto_save, prefs.file_format, prefs.file_quality,
           prefs.defer_transcription, prefs.cleanup_after_recording,
           prefs.preferred_mic_device, prefs.preferred_system_device,
-          prefs.capture_system_audio, prefs.microphone_gain_db, prefs.noise_suppression);
+          prefs.capture_system_audio, prefs.microphone_gain_db, prefs.noise_suppression,
+          prefs.echo_cancellation);
     Ok(prefs)
 }
 

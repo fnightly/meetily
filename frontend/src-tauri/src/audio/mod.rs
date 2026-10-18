@@ -45,6 +45,7 @@ pub mod recording_preferences;
 pub mod recording_saver;
 pub mod incremental_saver;  // NEW: Incremental audio saving with checkpoints
 pub mod app_audio;
+pub mod echo_cancellation;
 pub mod process_capture;
 pub mod window_list;
 pub mod level_monitor;
