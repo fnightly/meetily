@@ -8,6 +8,8 @@ import { useConfig } from '@/contexts/ConfigContext';
 import {
   LevelTracker,
   formatDbfs,
+  AUDIBLE_RMS,
+  CLIPPING_PEAK,
   type LevelDiagnosis,
   type LevelSample,
 } from '@/lib/audio-levels';
@@ -43,7 +45,9 @@ export function RecordingLevelMonitor({ active, className = '' }: RecordingLevel
   // Levels arrive one device at a time. Keeping only the last event made the
   // second source disappear as soon as the first one reported again, which is why
   // the bar could show the microphone and nothing else even while both were live.
-  const [samplesByDevice, setSamplesByDevice] = useState<Record<string, LevelSample & { device_type?: string }>>({});
+  const [samplesByDevice, setSamplesByDevice] = useState<
+    Record<string, LevelSample & { device_type?: string; last_seen: number }>
+  >({});
 
   useEffect(() => {
     if (!active) {
@@ -79,6 +83,7 @@ export function RecordingLevelMonitor({ active, className = '' }: RecordingLevel
             device_type: level.device_type,
             rms_level: level.rms_level,
             peak_level: level.peak_level,
+            last_seen: Date.now(),
           };
         });
         return next;
@@ -114,7 +119,13 @@ export function RecordingLevelMonitor({ active, className = '' }: RecordingLevel
           ? tr('recordingLevel.clipping', { device: deviceSuffix })
           : null;
 
-  const samples = Object.values(samplesByDevice);
+  // A source that stops reporting (muted device, closed window) must not keep its
+  // last green sample forever; the other source's events still trigger renders, so
+  // staleness is evaluated against the wall clock on each render.
+  const now = Date.now();
+  const samples = Object.values(samplesByDevice).filter(
+    (sample) => now - sample.last_seen <= 2_000,
+  );
   const micSample = samples.find((sample) => sample.device_type !== 'system');
   const systemSample = samples.find((sample) => sample.device_type === 'system');
   const visibleSamples = captureMicrophone || captureSystemAudio ? samples : latest;
@@ -126,6 +137,21 @@ export function RecordingLevelMonitor({ active, className = '' }: RecordingLevel
     ? tr('live.sourceWindow', { name: selectedWindow.title })
     : systemSample?.device_name || selectedDevices?.systemDevice || tr('devices.defaultSystemAudio');
 
+  const statusFor = (sample: LevelSample | undefined) => {
+    if (!sample) {
+      return { label: tr('live.sourceStatusWaiting'), dot: 'bg-slate-300' };
+    }
+    if (sample.peak_level >= CLIPPING_PEAK) {
+      return { label: tr('live.sourceStatusClipping'), dot: 'bg-red-500' };
+    }
+    if (sample.rms_level < AUDIBLE_RMS) {
+      return { label: tr('live.sourceStatusSilent'), dot: 'bg-amber-500' };
+    }
+    return { label: tr('live.sourceStatusOk'), dot: 'bg-green-500' };
+  };
+  const micStatus = statusFor(micSample);
+  const systemStatus = statusFor(systemSample);
+
   return (
     <div className={`space-y-2 ${className}`}>
       {(captureMicrophone || captureSystemAudio) && (
@@ -135,12 +161,20 @@ export function RecordingLevelMonitor({ active, className = '' }: RecordingLevel
             <span className="inline-flex items-center gap-1 min-w-0">
               <Mic className="w-3 h-3 shrink-0 text-gray-500" />
               <span className="truncate" title={micName}>{micName}</span>
+              <span className="inline-flex items-center gap-1 shrink-0 text-slate-400">
+                <span className={`h-1.5 w-1.5 rounded-full ${micStatus.dot}`} />
+                {micStatus.label}
+              </span>
             </span>
           )}
           {captureSystemAudio && (
             <span className="inline-flex items-center gap-1 min-w-0">
               <MonitorSpeaker className="w-3 h-3 shrink-0 text-gray-500" />
               <span className="truncate" title={systemName}>{systemName}</span>
+              <span className="inline-flex items-center gap-1 shrink-0 text-slate-400">
+                <span className={`h-1.5 w-1.5 rounded-full ${systemStatus.dot}`} />
+                {systemStatus.label}
+              </span>
             </span>
           )}
         </div>

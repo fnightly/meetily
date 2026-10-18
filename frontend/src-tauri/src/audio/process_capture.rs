@@ -35,7 +35,7 @@ pub fn spawn_process_capture(
     process_id: u32,
 ) -> Result<(), String> {
     use crate::audio::recording_state::{AudioChunk, DeviceType};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     // The session decides once, before recording starts, whether the file is mono or
     // stereo; asking WASAPI for stereo only when the recorder writes stereo keeps the
@@ -60,6 +60,7 @@ pub fn spawn_process_capture(
                 "Capturing application {process_id} as system audio ({channels} channel(s))"
             );
             let mut chunk_id: u64 = 0;
+            let mut last_level_emit = Instant::now() - Duration::from_secs(1);
 
             // Keep draining while paused: the buffer would otherwise overflow and
             // replay stale audio on resume. send_audio_chunk already discards chunks
@@ -67,6 +68,25 @@ pub fn spawn_process_capture(
             while state.is_recording() {
                 match capture.read() {
                     Ok(samples) if !samples.is_empty() => {
+                        // The whole-system cpal path reports its level inside the
+                        // capture callback, but this thread reads WASAPI directly, so
+                        // without this the meter stays at "waiting" for a window
+                        // source even though its audio is being recorded.
+                        if !state.is_paused() && last_level_emit.elapsed() >= Duration::from_millis(100) {
+                            let mut peak = 0.0f32;
+                            let mut sum_squares = 0.0f32;
+                            for &sample in &samples {
+                                let magnitude = sample.abs();
+                                if magnitude > peak {
+                                    peak = magnitude;
+                                }
+                                sum_squares += sample * sample;
+                            }
+                            let rms = (sum_squares / samples.len() as f32).sqrt();
+                            state.report_level("System audio", "system", rms, peak);
+                            last_level_emit = Instant::now();
+                        }
+
                         let chunk = AudioChunk {
                             data: samples,
                             sample_rate: CAPTURE_SAMPLE_RATE,
