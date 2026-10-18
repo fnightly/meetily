@@ -866,6 +866,7 @@ pub fn run() {
             audio::retention_commands::preview_retention_sweep,
             // Saved recordings: listing plus per-recording management.
             audio::recordings_commands::list_saved_recordings,
+            audio::recordings_commands::get_recording_audio_path,
             audio::recordings_commands::ensure_meeting_for_recording,
             audio::recordings_commands::open_recording_folder,
             audio::recordings_commands::rename_saved_recording,

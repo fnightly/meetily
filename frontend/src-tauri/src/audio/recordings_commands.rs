@@ -89,6 +89,7 @@ pub fn folder_size_bytes(folder: &Path) -> u64 {
 #[tauri::command]
 pub async fn list_saved_recordings<R: Runtime>(
     app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<RecordingsListView, String> {
     let prefs = super::recording_preferences::load_recording_preferences(&app)
         .await
@@ -96,9 +97,91 @@ pub async fn list_saved_recordings<R: Runtime>(
 
     let folder = prefs.save_folder.clone();
 
+    // The recordings root is not the whole library: changing the save folder
+    // leaves older recordings where they were, and those meetings are still in
+    // the sidebar. Read the meeting folders too so both lists describe the same
+    // set of recordings, and a meeting whose audio was moved or deleted still
+    // appears (with the missing-audio state) instead of silently vanishing.
+    let meeting_rows: Vec<(String, Option<String>, Option<String>, i64, i64)> = sqlx::query_as(
+        "SELECT m.title, m.folder_path, m.created_at,
+                EXISTS(SELECT 1 FROM transcripts t WHERE t.meeting_id = m.id) AS has_transcript,
+                EXISTS(SELECT 1 FROM summary_processes s
+                       WHERE s.meeting_id = m.id AND s.status = 'completed') AS has_summary
+         FROM meetings m",
+    )
+    .fetch_all(state.db_manager.pool())
+    .await
+    .map_err(|e| format!("Failed to load meetings for the recordings list: {e}"))?;
+
     let (folder, recordings, total_bytes, folder_missing) = tokio::task::spawn_blocking(move || {
         let folder_missing = !folder.is_dir();
-        let recordings = list_recordings(&folder);
+        let mut recordings = list_recordings(&folder);
+
+        for (title, meeting_folder, created_at, has_transcript, has_summary) in meeting_rows {
+            let Some(path) = meeting_folder else {
+                continue;
+            };
+
+            let normalized = normalize_folder(&path);
+
+            if let Some(existing) = recordings
+                .iter_mut()
+                .find(|entry| normalize_folder(&entry.folder_path) == normalized)
+            {
+                // The meeting's title is the one the details page shows, and the
+                // database knows about transcripts/summaries even when the
+                // recording folder was written before those files existed.
+                existing.meeting_name = title;
+                existing.has_transcript |= has_transcript != 0;
+                existing.has_summary |= has_summary != 0;
+                continue;
+            }
+
+            let path_buf = PathBuf::from(&path);
+            if path_buf.is_dir() {
+                if let Some(mut entry) = super::recordings::read_recording_entry(&path_buf) {
+                    entry.meeting_name = title;
+                    entry.has_transcript |= has_transcript != 0;
+                    entry.has_summary |= has_summary != 0;
+                    recordings.push(entry);
+                    continue;
+                }
+            }
+
+            // The meeting is still listed but its audio is gone. It remains
+            // actionable (open, rename, delete the empty record) and the library
+            // can explain why there is nothing to play.
+            let folder_name = path_buf
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| title.clone());
+            let sort_key = created_at
+                .as_deref()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.timestamp())
+                .unwrap_or(0);
+            recordings.push(RecordingEntry {
+                folder_name,
+                folder_path: path,
+                meeting_name: title,
+                created_at,
+                duration_seconds: None,
+                audio_file: None,
+                audio_path: None,
+                audio_bytes: None,
+                has_transcript: has_transcript != 0,
+                has_summary: has_summary != 0,
+                status: None,
+                sort_key,
+            });
+        }
+
+        recordings.sort_by(|a, b| {
+            b.sort_key
+                .cmp(&a.sort_key)
+                .then_with(|| a.folder_name.cmp(&b.folder_name))
+        });
+
         let total_bytes = recordings.iter().filter_map(|r| r.audio_bytes).sum();
         (folder, recordings, total_bytes, folder_missing)
     })
@@ -111,6 +194,23 @@ pub async fn list_saved_recordings<R: Runtime>(
         total_bytes,
         folder_missing,
     })
+}
+
+/// Compare two folder paths without caring about separators or trailing slashes.
+fn normalize_folder(path: &str) -> String {
+    path.trim().replace('\\', "/").trim_end_matches('/').to_string()
+}
+
+/// Resolve the audio file inside a saved recording folder.
+///
+/// Meeting details already knows the folder but not the encoder's file name
+/// (`audio.mp3`, `.m4a`, ...), and the recordings root may have changed since the
+/// meeting was saved. Resolving it from the folder keeps old meetings playable.
+#[tauri::command]
+pub async fn get_recording_audio_path(folder_path: String) -> Result<Option<String>, String> {
+    let folder = require_recording_folder(&folder_path)?;
+
+    Ok(find_audio_file(&folder).map(|path| path.to_string_lossy().to_string()))
 }
 
 /// Find the meeting row for a recording folder, creating one when absent.
@@ -187,6 +287,7 @@ pub async fn open_recording_folder(folder_path: String) -> Result<(), String> {
 /// up with the same folder name.
 #[tauri::command]
 pub async fn rename_saved_recording(
+    state: tauri::State<'_, AppState>,
     folder_path: String,
     new_title: String,
 ) -> Result<RecordingMutationResult, String> {
@@ -195,7 +296,9 @@ pub async fn rename_saved_recording(
         return Err("A recording name cannot be empty".to_string());
     }
 
-    tokio::task::spawn_blocking(move || {
+    let original_path = folder_path.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
         let path = require_recording_folder(&folder_path)?;
 
         let folder_name = path
@@ -239,7 +342,20 @@ pub async fn rename_saved_recording(
         })
     })
     .await
-    .map_err(|e| format!("Rename task failed: {}", e))?
+    .map_err(|e| format!("Rename task failed: {}", e))??;
+
+    // The sidebar reads meetings from the database. Without this update a rename
+    // changed the folder on disk but left the sidebar pointing at the old path, so
+    // the two lists disagreed.
+    sqlx::query("UPDATE meetings SET folder_path = ?, title = ? WHERE folder_path = ?")
+        .bind(&result.folder_path)
+        .bind(&result.title)
+        .bind(&original_path)
+        .execute(state.db_manager.pool())
+        .await
+        .map_err(|e| format!("The recording was renamed but its meeting could not be updated: {e}"))?;
+
+    Ok(result)
 }
 
 /// Delete a recording from disk.
@@ -277,11 +393,13 @@ pub async fn delete_saved_recording(
 #[tauri::command]
 pub async fn move_saved_recording<R: Runtime>(
     app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
     folder_path: String,
     destination: Option<String>,
 ) -> Result<RecordingMutationResult, String> {
     use tauri_plugin_dialog::DialogExt;
 
+    let original_path = folder_path.clone();
     let source = require_recording_folder(&folder_path)?;
 
     let destination = match destination {
@@ -300,7 +418,7 @@ pub async fn move_saved_recording<R: Runtime>(
         }
     };
 
-    tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || {
         if !destination.is_dir() {
             return Err(format!(
                 "Destination folder does not exist: {}",
@@ -346,14 +464,21 @@ pub async fn move_saved_recording<R: Runtime>(
         Ok(RecordingMutationResult {
             folder_path: target.to_string_lossy().to_string(),
             title,
-            detail: format!(
-                "Moved to {}. It now lives outside your recordings folder, so it no longer appears in this list.",
-                destination.display()
-            ),
+            detail: format!("Moved to {}", destination.display()),
         })
     })
     .await
-    .map_err(|e| format!("Move task failed: {}", e))?
+    .map_err(|e| format!("Move task failed: {}", e))??;
+
+    // Keep the sidebar and the library pointing at the same folder after a move.
+    sqlx::query("UPDATE meetings SET folder_path = ? WHERE folder_path = ?")
+        .bind(&result.folder_path)
+        .bind(&original_path)
+        .execute(state.db_manager.pool())
+        .await
+        .map_err(|e| format!("The recording was moved but its meeting could not be updated: {e}"))?;
+
+    Ok(result)
 }
 
 /// Copy a directory tree.

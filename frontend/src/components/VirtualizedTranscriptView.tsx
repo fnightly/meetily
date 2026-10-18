@@ -41,6 +41,9 @@ export interface VirtualizedTranscriptViewProps {
     focusTime?: number | null;
     /** Text to mark in every row (the search query that led here). */
     highlightQuery?: string | null;
+    /** Replace the generic empty-state copy (e.g. when audio was saved). */
+    emptyTitle?: string;
+    emptyHint?: string;
 }
 
 // Threshold for enabling virtualization (below this, use simple rendering)
@@ -195,6 +198,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     onLoadMore,
     focusTime = null,
     highlightQuery = null,
+    emptyTitle,
+    emptyHint,
 }) => {
     const { t } = useI18n();
     const [flashId, setFlashId] = useState<string | null>(null);
@@ -361,8 +366,12 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                         </>
                     ) : (
                         <>
-                            <p className="text-sm font-medium text-slate-600">{t('live.emptyTitle')}</p>
-                            <p className="text-xs mt-1 text-slate-400">{t('live.emptyHint')}</p>
+                            <p className="text-sm font-medium text-slate-600">
+                                {emptyTitle ?? t('live.emptyTitle')}
+                            </p>
+                            <p className="text-xs mt-1 text-slate-400">
+                                {emptyHint ?? t('live.emptyHint')}
+                            </p>
                         </>
                     )}
                 </motion.div>

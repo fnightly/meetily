@@ -9,6 +9,7 @@ import { SpeakerNamesProvider } from '@/lib/speaker-names';
 import { SpeakerRenameDialog } from '@/components/workspace/SpeakerRenameDialog';
 import { Sparkles } from 'lucide-react';
 import { useI18n } from '@/contexts/I18nContext';
+import { RecordingAudioPreview } from '@/components/RecordingAudioPreview';
 
 interface TranscriptPanelProps {
   transcripts: Transcript[];
@@ -31,6 +32,8 @@ interface TranscriptPanelProps {
   // Retranscription props
   meetingId?: string;
   meetingFolderPath?: string | null;
+  /** Absolute audio path for the saved recording, when it still exists. */
+  audioPath?: string | null;
   onRefetchTranscripts?: () => Promise<void>;
 
   // Markdown export
@@ -59,6 +62,7 @@ export function TranscriptPanel({
   onLoadMore,
   meetingId,
   meetingFolderPath,
+  audioPath = null,
   onRefetchTranscripts,
   onExportMarkdown,
   isExporting = false,
@@ -108,6 +112,12 @@ export function TranscriptPanel({
         />
       </div>
 
+      {audioPath && (
+        <div className="px-4 pt-2.5">
+          <RecordingAudioPreview audioPath={audioPath} />
+        </div>
+      )}
+
       {/* Transcript content - use virtualized view for better performance */}
       <div className="flex-1 overflow-hidden pb-4">
         <VirtualizedTranscriptView
@@ -126,6 +136,8 @@ export function TranscriptPanel({
           onLoadMore={onLoadMore}
           focusTime={focusTime}
           highlightQuery={highlightQuery}
+          emptyTitle={audioPath ? t('meeting.emptyRecordedTitle') : undefined}
+          emptyHint={audioPath ? t('meeting.emptyRecordedHint') : undefined}
         />
       </div>
 

@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import {
@@ -81,6 +82,7 @@ interface RecordingsLibraryProps {
  */
 export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
   const { t } = useI18n();
+  const router = useRouter();
   const {
     recordingsView: view,
     recordingsLoading: loading,
@@ -110,6 +112,30 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
    * row (materialised by ensure_meeting_for_recording) both come from the disk
    * and the database, so both lists need re-reading.
    */
+  /**
+   * Open the meeting behind a recording.
+   *
+   * A recording that was never given a meeting row is materialised first; that is
+   * what makes the audio and its transcript/summary one item rather than two lists.
+   */
+  const openMeetingDetails = useCallback(async (entry: RecordingEntry) => {
+    try {
+      let meetingId = folderToMeeting.get(entry.folder_path);
+      if (!meetingId) {
+        meetingId = await invoke<string>('ensure_meeting_for_recording', {
+          folderPath: entry.folder_path,
+          meetingTitle: entry.meeting_name,
+        });
+        await refetchMeetings();
+      }
+      router.push(`/meeting-details?id=${meetingId}&source=recording`);
+    } catch (error) {
+      toast.error(t('library.operationFailed'), {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }, [folderToMeeting, refetchMeetings, router, t]);
+
   const handleTranscriptionFinished = useCallback(async () => {
     await load();
     await refetchMeetings();
@@ -261,7 +287,12 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
         ...args,
       });
       toast.success(successMessage(result));
-      if (refresh) await load();
+      if (refresh) {
+        await load();
+        // Rename/move update the meeting row on the Rust side; reload the sidebar
+        // so it does not keep pointing at the old folder.
+        await refetchMeetings();
+      }
       onChanged?.();
       return result;
     } catch (error) {
@@ -584,7 +615,14 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
               </span>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-semibold text-sm text-slate-900 truncate">{entry.meeting_name}</span>
+                  <button
+                    type="button"
+                    onClick={() => void openMeetingDetails(entry)}
+                    title={t('library.openMeeting')}
+                    className="max-w-full truncate text-left font-semibold text-sm text-slate-900 hover:text-blue-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 rounded"
+                  >
+                    {entry.meeting_name}
+                  </button>
 
                   {!entry.audio_file && (
                     <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-red-100 text-red-800">
@@ -651,7 +689,7 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
                   variant="ghost"
                   size="sm"
                   onClick={() => void handleOpen(entry)}
-                  disabled={isBusy}
+                  disabled={isBusy || !entry.audio_file}
                   title={t('library.openFolder')}
                 >
                   <FolderOpen className="w-4 h-4" />
@@ -664,7 +702,7 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
                     setRenameTarget(entry);
                     setRenameValue(entry.meeting_name);
                   }}
-                  disabled={isBusy}
+                  disabled={isBusy || !entry.audio_file}
                   title={t('library.renameTitle')}
                 >
                   <Pencil className="w-4 h-4" />
@@ -674,7 +712,7 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
                   variant="ghost"
                   size="sm"
                   onClick={() => void handleMove(entry)}
-                  disabled={isBusy}
+                  disabled={isBusy || !entry.audio_file}
                   title={t('library.moveTitle')}
                 >
                   <FolderInput className="w-4 h-4" />
@@ -810,7 +848,7 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
                   variant="ghost"
                   size="sm"
                   onClick={() => setDeleteTarget(entry)}
-                  disabled={isBusy}
+                  disabled={isBusy || !entry.audio_file}
                   className="text-red-600 hover:text-red-700"
                   title={t('library.deleteTitle')}
                 >

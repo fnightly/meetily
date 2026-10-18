@@ -89,9 +89,32 @@ export default function PageContent({
   const [customPrompt, setCustomPrompt] = useState<string>('');
   const isRecording = false;
   const [activeTab, setActiveTab] = useState<MeetingDetailsTab>('transcript');
+  const [meetingAudioPath, setMeetingAudioPath] = useState<string | null>(null);
   const actionItemsSyncedRef = useRef<string | null>(null);
   const previousSummaryStatusRef = useRef<string | null>(null);
   const templateRecommendedRef = useRef(false);
+
+  // The meeting page knows the folder, not the encoder's file name; ask the
+  // backend so old meetings whose audio lives outside the current recordings
+  // folder can still be played inline.
+  useEffect(() => {
+    let cancelled = false;
+    setMeetingAudioPath(null);
+    if (!meeting.folder_path) return;
+
+    invoke<string | null>('get_recording_audio_path', { folderPath: meeting.folder_path })
+      .then((path) => {
+        if (!cancelled) setMeetingAudioPath(path);
+      })
+      .catch((error) => {
+        console.warn('Could not resolve the meeting audio file:', error);
+        if (!cancelled) setMeetingAudioPath(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [meeting.folder_path]);
 
   // Ref to store the modal open function from SummaryGeneratorButtonGroup
   const openModelSettingsRef = useRef<(() => void) | null>(null);
@@ -317,6 +340,7 @@ export default function PageContent({
               onLoadMore={onLoadMore}
               meetingId={meeting.id}
               meetingFolderPath={meeting.folder_path}
+              audioPath={meetingAudioPath}
               onRefetchTranscripts={onRefetchTranscripts}
               onExportMarkdown={() => setExportOpen(true)}
               isExporting={exportOpen}
