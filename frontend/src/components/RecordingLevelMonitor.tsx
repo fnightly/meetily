@@ -8,8 +8,11 @@ import { useConfig } from '@/contexts/ConfigContext';
 import {
   LevelTracker,
   formatDbfs,
+  toDbfs,
   AUDIBLE_RMS,
   CLIPPING_PEAK,
+  SILENCE_DB,
+  QUIET_DB,
   type LevelDiagnosis,
   type LevelSample,
 } from '@/lib/audio-levels';
@@ -42,6 +45,10 @@ export function RecordingLevelMonitor({ active, className = '' }: RecordingLevel
   const [diagnosis, setDiagnosis] = useState<LevelDiagnosis | null>(null);
   const [latest, setLatest] = useState<LevelSample[]>([]);
   const trackerRef = useRef(new LevelTracker());
+  // Clipping is an event, not a level: the peak can fall immediately after a
+  // clipped sample. Latch it briefly so the red state is visible rather than a
+  // one-frame flicker.
+  const clipHoldRef = useRef<Record<string, number>>({});
   // Levels arrive one device at a time. Keeping only the last event made the
   // second source disappear as soon as the first one reported again, which is why
   // the bar could show the microphone and nothing else even while both were live.
@@ -55,6 +62,7 @@ export function RecordingLevelMonitor({ active, className = '' }: RecordingLevel
       setDiagnosis(null);
       setLatest([]);
       setSamplesByDevice({});
+      clipHoldRef.current = {};
       return;
     }
 
@@ -78,6 +86,9 @@ export function RecordingLevelMonitor({ active, className = '' }: RecordingLevel
       setSamplesByDevice((previous) => {
         const next = { ...previous };
         levels.forEach((level) => {
+          if (level.peak_level >= CLIPPING_PEAK) {
+            clipHoldRef.current[level.device_name] = Date.now();
+          }
           next[level.device_name] = {
             device_name: level.device_name,
             device_type: level.device_type,
@@ -141,7 +152,10 @@ export function RecordingLevelMonitor({ active, className = '' }: RecordingLevel
     if (!sample) {
       return { label: tr('live.sourceStatusWaiting'), dot: 'bg-slate-300' };
     }
-    if (sample.peak_level >= CLIPPING_PEAK) {
+    if (
+      sample.peak_level >= CLIPPING_PEAK
+      || now - (clipHoldRef.current[sample.device_name] ?? 0) < 1_500
+    ) {
       return { label: tr('live.sourceStatusClipping'), dot: 'bg-red-500' };
     }
     if (sample.rms_level < AUDIBLE_RMS) {
@@ -211,6 +225,7 @@ export function RecordingLevelMonitor({ active, className = '' }: RecordingLevel
               : 'bg-amber-50 border-amber-200 text-amber-900'
           }`}
           role="status"
+          aria-live="polite"
         >
           <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
           <span>{warning}</span>
@@ -220,35 +235,49 @@ export function RecordingLevelMonitor({ active, className = '' }: RecordingLevel
   );
 }
 
+/** Map dBFS onto the meter, with -60 dB as the left edge and 0 dB as full scale. */
+function meterPercent(db: number): number {
+  if (!Number.isFinite(db)) return 0;
+  return Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
+}
+
 /** A single device's level bar. */
 function LevelBar({ sample }: { sample: LevelSample }) {
-  // Log scaling, matching the device-selection meter so the two read the same.
-  const scale = (value: number) => {
-    const clamped = Math.max(0, Math.min(1, value));
-    return clamped > 0 ? Math.log10(clamped * 9 + 1) : 0;
-  };
+  // Level meters are read in dBFS, so the bar maps -60..0 dB linearly rather than
+  // stretching linear amplitude. That keeps speech, ambience and clipping in the
+  // ranges broadcast meters expect instead of bunching everything at the bottom.
+  const rmsDb = toDbfs(sample.rms_level);
+  const peakDb = toDbfs(sample.peak_level);
+  const rmsPercent = meterPercent(rmsDb);
+  const peakPercent = meterPercent(peakDb);
 
-  const rmsPercent = Math.round(scale(sample.rms_level) * 100);
-  const peakPercent = Math.round(scale(sample.peak_level) * 100);
-
-  // Green means healthy here. The device-selection meter colours *low* levels
-  // green and high levels red, which reads backwards: normal speech sits near
-  // 60% and so appeared as a warning colour, while near-silence looked fine.
+  // Green is the healthy speech range; amber means the signal is too quiet to
+  // transcribe reliably; red is reserved for clipping, which is damaging.
   const colour =
-    sample.peak_level >= 0.98
+    sample.peak_level >= CLIPPING_PEAK
       ? 'bg-red-500'
-      : rmsPercent < 10
-        ? 'bg-gray-400'
-        : rmsPercent < 30
+      : rmsDb < SILENCE_DB
+        ? 'bg-slate-400'
+        : rmsDb < QUIET_DB
           ? 'bg-amber-500'
           : 'bg-green-500';
+
+  const dbLabel = formatDbfs(rmsDb);
 
   return (
     <div className="flex items-center gap-2">
       <span className="text-[10px] text-gray-500 w-24 truncate" title={sample.device_name}>
         {sample.device_name}
       </span>
-      <div className="flex-1 h-2 bg-gray-200 rounded-sm overflow-hidden relative">
+      <div
+        role="meter"
+        aria-label={sample.device_name}
+        aria-valuemin={-60}
+        aria-valuemax={0}
+        aria-valuenow={Number.isFinite(rmsDb) ? Math.max(-60, Math.round(rmsDb)) : -60}
+        aria-valuetext={dbLabel}
+        className="flex-1 h-2 bg-gray-200 rounded-sm overflow-hidden relative"
+      >
         <div
           className={`h-full ${colour} transition-all duration-150 ease-out`}
           style={{ width: `${rmsPercent}%` }}
@@ -260,7 +289,7 @@ function LevelBar({ sample }: { sample: LevelSample }) {
           />
         )}
       </div>
-      <span className="text-[10px] font-mono text-gray-500 w-8 text-right">{rmsPercent}%</span>
+      <span className="text-[10px] font-mono text-gray-500 w-[4.5rem] text-right">{dbLabel}</span>
     </div>
   );
 }
