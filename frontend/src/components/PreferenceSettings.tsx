@@ -5,7 +5,6 @@ import { useEffect, useState, useRef } from "react"
 import { Switch } from "./ui/switch"
 import { invoke } from "@tauri-apps/api/core"
 import Analytics from "@/lib/analytics"
-import AnalyticsConsentSwitch from "./AnalyticsConsentSwitch"
 import { StorageLocationsPanel } from "./StorageLocationsPanel"
 import { useConfig, NotificationSettings } from "@/contexts/ConfigContext"
 
@@ -140,10 +139,6 @@ export function PreferenceSettings() {
       {/* Data Storage Locations Section (editable) */}
       <StorageLocationsPanel />
 
-      {/* Analytics Section */}
-      <div className="surface-card p-6">
-        <AnalyticsConsentSwitch />
-      </div>
     </div>
   )
 }
