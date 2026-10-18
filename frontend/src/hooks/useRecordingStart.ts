@@ -150,8 +150,24 @@ export function useRecordingStart(
     }
   }, [getTranscriptionProvider]);
 
+  // Deferred transcription runs speech recognition after the recording, so a
+  // missing model must not block starting it. Reading the preference here keeps
+  // the start button working before any model has ever been downloaded.
+  const transcriptionIsDeferred = useCallback(async (): Promise<boolean> => {
+    try {
+      const preferences = await invoke<{ defer_transcription?: boolean }>('get_recording_preferences');
+      return preferences?.defer_transcription === true;
+    } catch (error) {
+      console.error('Failed to read whether transcription is deferred:', error);
+      return false;
+    }
+  }, []);
+
   // The Rust recording command validates the same provider again before capture.
-  const checkModelReady = checkTranscriptionModelReady;
+  const checkModelReady = useCallback(async (): Promise<boolean> => {
+    if (await transcriptionIsDeferred()) return true;
+    return checkTranscriptionModelReady();
+  }, [transcriptionIsDeferred, checkTranscriptionModelReady]);
 
   // Handle manual recording start (from button click)
   const handleRecordingStart = useCallback(async () => {
@@ -331,7 +347,7 @@ export function useRecordingStart(
                 ? TRANSCRIPTION_RUNTIME_USER_MESSAGE
                 : errorMsg);
               if (!isRuntimeError) {
-                alert(`Failed to start recording.\n\n${errorMsg}`);
+                toast.error(tr('toast.startRecordingFailed'), { description: errorMsg });
               }
             }
             Analytics.trackButtonClick('start_recording_error', 'sidebar_auto');
@@ -437,7 +453,7 @@ export function useRecordingStart(
             ? TRANSCRIPTION_RUNTIME_USER_MESSAGE
             : errorMsg);
           if (!isRuntimeError) {
-            alert(`Failed to start recording.\n\n${errorMsg}`);
+            toast.error(tr('toast.startRecordingFailed'), { description: errorMsg });
           }
         }
         Analytics.trackButtonClick('start_recording_error', 'sidebar_direct');

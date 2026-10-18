@@ -35,7 +35,7 @@ export default function Home() {
 
   // Use contexts for state management
   const { meetingTitle, transcripts } = useTranscripts();
-  const { transcriptModelConfig, selectedDevices } = useConfig();
+  const { transcriptModelConfig, selectedDevices, captureMicrophone } = useConfig();
   const recordingState = useRecordingState();
 
   // Extract status from global state
@@ -278,7 +278,7 @@ export default function Home() {
         )}
 
         {/* Recording controls - only show when permissions are granted or already recording and not showing status messages */}
-        {(hasMicrophone || isRecording) &&
+        {(hasMicrophone || !captureMicrophone || isRecording) &&
           status !== RecordingStatus.PROCESSING_TRANSCRIPTS &&
           status !== RecordingStatus.SAVING && (
             <div className={`fixed bottom-8 left-0 right-0 z-10 ${showDashboard ? 'hidden' : ''}`}>

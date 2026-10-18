@@ -195,29 +195,41 @@ export function TranscriptButtonGroup({
           </Button>
         )}
 
-        {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
+        {meetingId && meetingFolderPath && (betaFeatures.importAndRetranscribe || transcriptCount === 0) && (
           <Button
             size="sm"
-            variant="ghost"
-            className="px-2 @[34rem]:px-3 text-blue-700 hover:bg-blue-50"
+            variant={transcriptCount === 0 ? 'default' : 'ghost'}
+            className={transcriptCount === 0
+              ? 'px-2 @[34rem]:px-3'
+              : 'px-2 @[34rem]:px-3 text-blue-700 hover:bg-blue-50'}
             onClick={() => {
-              Analytics.trackButtonClick('enhance_transcript', 'meeting_details');
+              Analytics.trackButtonClick(
+                transcriptCount === 0 ? 'transcribe_recording' : 'enhance_transcript',
+                'meeting_details',
+              );
               setShowRetranscribeDialog(true);
             }}
-            title={t('transcriptActions.retranscribeHint')}
+            title={transcriptCount === 0
+              ? t('transcriptActions.transcribeRecordingHint')
+              : t('transcriptActions.retranscribeHint')}
           >
             <RefreshCw className="@[34rem]:mr-1" size={16} />
-            <span className="hidden @[34rem]:inline">{t('transcriptActions.retranscribe')}</span>
+            <span className="hidden @[34rem]:inline">
+              {transcriptCount === 0
+                ? t('transcriptActions.transcribeRecording')
+                : t('transcriptActions.retranscribe')}
+            </span>
           </Button>
         )}
       </div>
 
-      {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
+      {meetingId && meetingFolderPath && (betaFeatures.importAndRetranscribe || transcriptCount === 0) && (
         <RetranscribeDialog
           open={showRetranscribeDialog}
           onOpenChange={setShowRetranscribeDialog}
           meetingId={meetingId}
           meetingFolderPath={meetingFolderPath}
+          emptyTranscript={transcriptCount === 0}
           onComplete={handleRetranscribeComplete}
         />
       )}

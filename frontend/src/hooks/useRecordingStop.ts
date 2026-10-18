@@ -10,7 +10,11 @@ import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateCon
 import { storageService } from '@/services/storageService';
 import { transcriptService } from '@/services/transcriptService';
 import Analytics from '@/lib/analytics';
-import { actionNeedsTranscription, type PostRecordingAction } from '@/lib/post-recording';
+import {
+  actionNeedsSummary,
+  actionNeedsTranscription,
+  type PostRecordingAction,
+} from '@/lib/post-recording';
 import { batchTranscriptionTarget, type ActiveSpeechSettings } from '@/lib/transcription-target';
 import type { TranscriptSegmentData } from '@/types';
 import {
@@ -694,9 +698,13 @@ export function useRecordingStop(
         }
       }
 
-      // Summarising is left to the meeting page, which owns the model
-      // configuration and the transcript payload. The existing auto-summary
-      // setting decides whether one is produced, so the user is not asked twice.
+      // The summary itself is generated on the meeting page, which owns the model
+      // configuration and the transcript payload. A one-shot request tells that
+      // page the user asked for it here, even when auto-summary is switched off.
+      if (actionNeedsSummary(action)) {
+        sessionStorage.setItem('meetily.requestedSummaryMeeting', meetingId);
+      }
+
       navigateToMeeting(meetingId);
     },
     [pendingPostRecording, navigateToMeeting, resolveBatchTarget, waitForRetranscription],

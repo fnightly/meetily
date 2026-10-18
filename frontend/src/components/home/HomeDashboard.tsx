@@ -49,6 +49,9 @@ export function HomeDashboard({ hasMicrophone, onStart, isStarting = false }: Ho
   const prewarm = usePrewarmSpeechModel();
   const [now, setNow] = useState(() => new Date());
   const [windowPickerOpen, setWindowPickerOpen] = useState(false);
+  // Internal recording never opens the microphone, so a missing microphone must
+  // not disable the start button in computer-audio-only mode.
+  const canStartRecording = hasMicrophone || !captureMicrophone;
 
   // Mine summaries written before follow-ups existed (once per session).
   useEffect(() => { void backfillActionItems(); }, []);
@@ -210,7 +213,7 @@ export function HomeDashboard({ hasMicrophone, onStart, isStarting = false }: Ho
                   type="button"
                   {...prewarm}
                   onClick={onStart}
-                  disabled={!hasMicrophone || isStarting}
+                  disabled={!canStartRecording || isStarting}
                   aria-label={t('nav.startRecording')}
                   className="relative flex h-24 w-24 items-center justify-center rounded-full bg-record text-white shadow-[0_10px_30px_-8px_rgba(239,68,68,0.6)] transition-transform hover:scale-[1.04] active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-red-200"
                 >
@@ -222,7 +225,7 @@ export function HomeDashboard({ hasMicrophone, onStart, isStarting = false }: Ho
                   {isStarting ? t('home.hero.starting') : t('nav.startRecording')}
                 </div>
                 <div className="text-xs text-slate-400">
-                  {hasMicrophone ? t('home.hero.ready') : t('home.hero.noMic')}
+                  {canStartRecording ? t('home.hero.ready') : t('home.hero.noMic')}
                 </div>
               </div>
             </div>

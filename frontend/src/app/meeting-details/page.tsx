@@ -70,15 +70,25 @@ function MeetingDetailsContent() {
   const setupAutoGeneration = useCallback(async () => {
     if (hasCheckedAutoGen) return; // Only check once
 
-    // Only auto-generate if navigated from recording
-    if (source !== 'recording') {
+    // The post-recording dialog can explicitly ask for a summary (transcribe and
+    // summarise / summarise). That request wins over the global auto-summary
+    // toggle and is consumed once, so opening the meeting later does not repeat it.
+    let requestedSummary = false;
+    if (typeof window !== 'undefined' && meetingId) {
+      const key = 'meetily.requestedSummaryMeeting';
+      requestedSummary = window.sessionStorage.getItem(key) === meetingId;
+      if (requestedSummary) window.sessionStorage.removeItem(key);
+    }
+
+    // Only auto-generate if navigated from recording or explicitly requested
+    if (source !== 'recording' && !requestedSummary) {
       console.log('Not from recording navigation, skipping auto-generation');
       setHasCheckedAutoGen(true);
       return;
     }
 
-    // Respect user's auto-summary toggle preference
-    if (!isAutoSummary) {
+    // Respect user's auto-summary toggle preference unless they asked explicitly
+    if (!isAutoSummary && !requestedSummary) {
       console.log('Auto-summary is disabled in settings');
       setHasCheckedAutoGen(true);
       return;
@@ -119,7 +129,7 @@ function MeetingDetailsContent() {
     }
 
     setHasCheckedAutoGen(true);
-  }, [hasCheckedAutoGen, checkForGemmaModel, source, isAutoSummary]);
+  }, [hasCheckedAutoGen, checkForGemmaModel, source, isAutoSummary, meetingId]);
 
   // Sync meeting metadata from pagination hook to meeting details state
   useEffect(() => {

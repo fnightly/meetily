@@ -22,6 +22,7 @@ import { toast } from 'sonner';
 import { useConfig } from '@/contexts/ConfigContext';
 import { LANGUAGES } from '@/constants/languages';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
+import { useI18n } from '@/contexts/I18nContext';
 import Analytics from '@/lib/analytics';
 
 interface RetranscribeDialogProps {
@@ -29,6 +30,8 @@ interface RetranscribeDialogProps {
   onOpenChange: (open: boolean) => void;
   meetingId: string;
   meetingFolderPath: string | null;
+  /** The recording has no transcript yet: the dialog is a first transcription. */
+  emptyTranscript?: boolean;
   onComplete?: () => void;
 }
 
@@ -56,8 +59,10 @@ export function RetranscribeDialog({
   onOpenChange,
   meetingId,
   meetingFolderPath,
+  emptyTranscript = false,
   onComplete,
 }: RetranscribeDialogProps) {
+  const { t } = useI18n();
   const { selectedLanguage, transcriptModelConfig } = useConfig();
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState<RetranscriptionProgress | null>(null);
@@ -276,26 +281,30 @@ export function RetranscribeDialog({
             {isProcessing ? (
               <>
                 <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
-                Retranscribing...
+                {t('retranscribe.processingTitle')}
               </>
             ) : error ? (
               <>
                 <AlertCircle className="h-5 w-5 text-red-600" />
-                Retranscription Failed
+                {t('retranscribe.failedTitle')}
               </>
             ) : (
               <>
                 <RefreshCw className="h-5 w-5 text-blue-600" />
-                Retranscribe Meeting
+                {emptyTranscript
+                  ? t('transcriptActions.transcribeRecording')
+                  : t('retranscribe.title')}
               </>
             )}
           </DialogTitle>
           <DialogDescription>
             {isProcessing
-              ? progress?.message || 'Processing audio...'
+              ? progress?.message || t('retranscribe.processingDescription')
               : error
-                ? 'An error occurred during retranscription'
-                : 'Re-process the audio with different language settings'}
+                ? t('retranscribe.failedDescription')
+                : emptyTranscript
+                  ? t('retranscribe.emptyDescription')
+                  : t('retranscribe.description')}
           </DialogDescription>
         </DialogHeader>
 
@@ -391,7 +400,7 @@ export function RetranscribeDialog({
           {!isProcessing && !error && (
             <>
               <Button variant="outline" onClick={() => onOpenChange(false)}>
-                Cancel
+                {t('common.cancel')}
               </Button>
               <Button
                 onClick={handleStartRetranscription}
@@ -399,20 +408,20 @@ export function RetranscribeDialog({
                 disabled={!meetingFolderPath}
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
-                Start Retranscription
+                {t('retranscribe.start')}
               </Button>
             </>
           )}
           {isProcessing && (
             <Button variant="outline" onClick={handleCancel}>
               <X className="h-4 w-4 mr-2" />
-              Cancel
+              {t('common.cancel')}
             </Button>
           )}
           {error && (
             <>
               <Button variant="outline" onClick={() => onOpenChange(false)}>
-                Close
+                {t('common.close')}
               </Button>
               <Button
                 onClick={() => {
@@ -421,7 +430,7 @@ export function RetranscribeDialog({
                 }}
                 variant="outline"
               >
-                Try Again
+                {t('common.retry')}
               </Button>
             </>
           )}

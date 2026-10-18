@@ -15,6 +15,7 @@ import {
   type PostRecordingAction,
   type PostRecordingInput,
 } from '@/lib/post-recording';
+import { useI18n } from '@/contexts/I18nContext';
 
 interface PostRecordingDialogProps {
   open: boolean;
@@ -41,10 +42,36 @@ export function PostRecordingDialog({
   onChoose,
   onDismiss,
 }: PostRecordingDialogProps) {
+  const { t } = useI18n();
   const [busyAction, setBusyAction] = useState<PostRecordingAction | null>(null);
   const prompt = buildPostRecordingPrompt(input);
 
   if (!prompt.show) return null;
+
+  // Prompt text comes from the pure module for decisions, but the labels live in
+  // the string table so this dialog follows the interface language like the rest
+  // of the app.
+  const labelFor = (action: PostRecordingAction) => {
+    switch (action) {
+      case 'transcribe':
+        return { label: t('postRecording.transcribe'), description: t('postRecording.transcribeDescription') };
+      case 'transcribe-and-summarize':
+        return {
+          label: t('postRecording.transcribeAndSummarise'),
+          description: t('postRecording.transcribeAndSummariseDescription'),
+        };
+      case 'summarize':
+        return { label: t('postRecording.summarise'), description: t('postRecording.summariseDescription') };
+      case 'keep':
+        return { label: t('postRecording.keep'), description: t('postRecording.keepDescription') };
+    }
+  };
+
+  const message = input.transcriptCount > 0
+    ? t('postRecording.hasTranscriptMessage')
+    : input.deferred
+      ? t('postRecording.deferredMessage')
+      : t('postRecording.noSpeechMessage');
 
   const busy = busyAction !== null;
 
@@ -89,8 +116,8 @@ export function PostRecordingDialog({
         }}
       >
         <DialogHeader>
-          <DialogTitle>{prompt.title}</DialogTitle>
-          <DialogDescription>{prompt.message}</DialogDescription>
+          <DialogTitle>{t('postRecording.title')}</DialogTitle>
+          <DialogDescription>{message}</DialogDescription>
         </DialogHeader>
 
         <div className="space-y-2 mt-2">
@@ -110,9 +137,9 @@ export function PostRecordingDialog({
                 )}
               </span>
               <span className="flex flex-col gap-0.5">
-                <span className="font-medium">{choice.label}</span>
+                <span className="font-medium">{labelFor(choice.action).label}</span>
                 <span className="text-xs text-gray-500 font-normal">
-                  {choice.description}
+                  {labelFor(choice.action).description}
                 </span>
               </span>
             </Button>
@@ -121,9 +148,7 @@ export function PostRecordingDialog({
 
         {busy && (
           <p className="text-xs text-gray-500 mt-1">
-            {busyAction === 'keep'
-              ? 'Finishing up…'
-              : 'Working on the recording. You can keep using the app while this runs.'}
+            {busyAction === 'keep' ? t('postRecording.finishing') : t('postRecording.working')}
           </p>
         )}
       </DialogContent>
