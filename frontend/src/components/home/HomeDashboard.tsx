@@ -44,7 +44,7 @@ export function HomeDashboard({ hasMicrophone, onStart, isStarting = false }: Ho
   const { t, locale } = useI18n();
   const router = useRouter();
   const { entries, setCurrentMeeting } = useSidebar();
-  const { selectedDevices, selectedWindow, setSelectedWindow, captureSystemAudio, captureMicrophone, transcriptModelConfig, selectedLanguage, betaFeatures } = useConfig();
+  const { selectedDevices, selectedWindow, setSelectedWindow, captureSystemAudio, captureMicrophone, deferTranscription, transcriptModelConfig, selectedLanguage, betaFeatures } = useConfig();
   const { openImportDialog } = useImportDialog();
   const prewarm = usePrewarmSpeechModel();
   const [now, setNow] = useState(() => new Date());
@@ -168,7 +168,9 @@ export function HomeDashboard({ hasMicrophone, onStart, isStarting = false }: Ho
           <div className="relative flex flex-col gap-8 p-7 md:flex-row md:items-center">
             <div className="flex-1 min-w-0">
               <h2 className="text-lg font-semibold text-slate-900">{t('home.hero.title')}</h2>
-              <p className="mt-1 text-sm text-slate-500 leading-relaxed">{t('home.hero.subtitle')}</p>
+              <p className="mt-1 text-sm text-slate-500 leading-relaxed">
+                {t(deferTranscription ? 'home.hero.subtitleDeferred' : 'home.hero.subtitle')}
+              </p>
 
               <dl className="mt-5 grid grid-cols-1 gap-2 sm:grid-cols-2">
                 {setupItems.map(({ key, icon: Icon, label, value, onClick, actionLabel }) => (

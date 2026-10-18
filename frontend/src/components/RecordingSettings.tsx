@@ -128,6 +128,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     setSelectedWindow,
     setCaptureSystemAudio,
     setCaptureMicrophone,
+    setDeferTranscription,
   } = useConfig();
   // Last gain written to the backend, so releasing the slider (or blurring it)
   // does not fire a second invoke when nothing changed.
@@ -209,6 +210,9 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   const handleDeferTranscriptionToggle = async (enabled: boolean) => {
     const newPreferences = { ...preferences, defer_transcription: enabled };
     setPreferences(newPreferences);
+    // The home screen words itself around the current mode, so keep the context
+    // in step instead of waiting for a restart.
+    setDeferTranscription(enabled);
     await savePreferences(newPreferences);
 
     await Analytics.track('defer_transcription_toggled', {

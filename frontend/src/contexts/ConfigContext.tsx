@@ -71,6 +71,9 @@ interface ConfigContextType {
   /** False = computer-audio-only recording; the microphone is not opened. */
   captureMicrophone: boolean;
   setCaptureMicrophone: (capture: boolean) => void;
+  /** When true, speech recognition runs after the recording instead of live. */
+  deferTranscription: boolean;
+  setDeferTranscription: (defer: boolean) => void;
 
   // Language preference
   selectedLanguage: string;
@@ -162,6 +165,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   // before the settings page (which owns the preference) is ever opened.
   const [captureSystemAudio, setCaptureSystemAudio] = useState(true);
   const [captureMicrophone, setCaptureMicrophone] = useState(true);
+  const [deferTranscription, setDeferTranscription] = useState(false);
 
   // Language preference state
   const [selectedLanguage, setSelectedLanguage] = useState<string>(() => {
@@ -396,12 +400,15 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     let alive = true;
     (async () => {
       try {
-        const prefs = await invoke<{ capture_system_audio?: boolean; capture_microphone?: boolean }>(
-          'get_recording_preferences',
-        );
+        const prefs = await invoke<{
+          capture_system_audio?: boolean;
+          capture_microphone?: boolean;
+          defer_transcription?: boolean;
+        }>('get_recording_preferences');
         if (alive) {
           setCaptureSystemAudio(resolveCaptureSystemAudio(prefs?.capture_system_audio));
           setCaptureMicrophone(resolveCaptureMicrophone(prefs?.capture_microphone));
+          setDeferTranscription(prefs?.defer_transcription === true);
         }
       } catch (error) {
         // Keep capturing system audio rather than silently narrowing the recording.
@@ -583,6 +590,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     setCaptureSystemAudio,
     captureMicrophone,
     setCaptureMicrophone,
+    deferTranscription,
+    setDeferTranscription,
     selectedLanguage,
     setSelectedLanguage: handleSetSelectedLanguage,
     showConfidenceIndicator,
@@ -609,6 +618,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     selectedWindow,
     captureSystemAudio,
     captureMicrophone,
+    deferTranscription,
     selectedLanguage,
     handleSetSelectedLanguage,
     showConfidenceIndicator,
