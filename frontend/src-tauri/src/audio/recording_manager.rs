@@ -557,7 +557,7 @@ impl RecordingManager {
     /// Set the sink that receives each captured device's level while recording.
     pub fn set_level_callback<F>(&self, callback: F)
     where
-        F: Fn(&str, f32, f32) + Send + Sync + 'static,
+        F: Fn(&str, &str, f32, f32) + Send + Sync + 'static,
     {
         self.state.set_level_callback(callback);
     }

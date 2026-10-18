@@ -3,11 +3,11 @@ import { tr } from '@/lib/i18n';
 
 import React, { useEffect, useRef, useState } from 'react';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { AlertTriangle, Mic } from 'lucide-react';
+import { AlertTriangle, Mic, MonitorSpeaker } from 'lucide-react';
+import { useConfig } from '@/contexts/ConfigContext';
 import {
   LevelTracker,
   formatDbfs,
-  guidanceFor,
   type LevelDiagnosis,
   type LevelSample,
 } from '@/lib/audio-levels';
@@ -15,6 +15,7 @@ import {
 interface AudioLevelUpdate {
   levels: Array<{
     device_name: string;
+    device_type?: string;
     rms_level: number;
     peak_level: number;
   }>;
@@ -35,15 +36,21 @@ interface RecordingLevelMonitorProps {
  * until the meeting was over. This surfaces that within seconds.
  */
 export function RecordingLevelMonitor({ active, className = '' }: RecordingLevelMonitorProps) {
+  const { captureMicrophone, captureSystemAudio, selectedDevices, selectedWindow } = useConfig();
   const [diagnosis, setDiagnosis] = useState<LevelDiagnosis | null>(null);
   const [latest, setLatest] = useState<LevelSample[]>([]);
   const trackerRef = useRef(new LevelTracker());
+  // Levels arrive one device at a time. Keeping only the last event made the
+  // second source disappear as soon as the first one reported again, which is why
+  // the bar could show the microphone and nothing else even while both were live.
+  const [samplesByDevice, setSamplesByDevice] = useState<Record<string, LevelSample & { device_type?: string }>>({});
 
   useEffect(() => {
     if (!active) {
       trackerRef.current.reset();
       setDiagnosis(null);
       setLatest([]);
+      setSamplesByDevice({});
       return;
     }
 
@@ -62,6 +69,20 @@ export function RecordingLevelMonitor({ active, className = '' }: RecordingLevel
 
       trackerRef.current.push(samples);
       setLatest(samples);
+      // Merge rather than replace: each event carries only the device that just
+      // reported, and the other source's last level should stay on screen.
+      setSamplesByDevice((previous) => {
+        const next = { ...previous };
+        levels.forEach((level) => {
+          next[level.device_name] = {
+            device_name: level.device_name,
+            device_type: level.device_type,
+            rms_level: level.rms_level,
+            peak_level: level.peak_level,
+          };
+        });
+        return next;
+      });
       setDiagnosis(trackerRef.current.diagnose());
     })
       .then((fn) => {
@@ -82,20 +103,63 @@ export function RecordingLevelMonitor({ active, className = '' }: RecordingLevel
 
   if (!active) return null;
 
-  const warning = diagnosis ? guidanceFor(diagnosis.verdict, diagnosis.deviceName) : null;
-  const isProblem = diagnosis !== null && diagnosis.verdict !== 'healthy';
+  const deviceSuffix = diagnosis?.deviceName ? ` (${diagnosis.deviceName})` : '';
+  const warning = !diagnosis
+    ? null
+    : diagnosis.verdict === 'silent'
+      ? tr('recordingLevel.silent', { device: deviceSuffix })
+      : diagnosis.verdict === 'quiet'
+        ? tr('recordingLevel.quiet', { device: deviceSuffix })
+        : diagnosis.verdict === 'clipping'
+          ? tr('recordingLevel.clipping', { device: deviceSuffix })
+          : null;
+
+  const samples = Object.values(samplesByDevice);
+  const micSample = samples.find((sample) => sample.device_type !== 'system');
+  const systemSample = samples.find((sample) => sample.device_type === 'system');
+  const visibleSamples = captureMicrophone || captureSystemAudio ? samples : latest;
+
+  const micName = micSample?.device_name
+    || selectedDevices?.micDevice
+    || tr('devices.defaultMicrophone');
+  const systemName = selectedWindow?.title
+    ? tr('live.sourceWindow', { name: selectedWindow.title })
+    : systemSample?.device_name || selectedDevices?.systemDevice || tr('devices.defaultSystemAudio');
 
   return (
     <div className={`space-y-2 ${className}`}>
+      {(captureMicrophone || captureSystemAudio) && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-600">
+          <span className="font-medium text-slate-500">{tr('live.sources')}</span>
+          {captureMicrophone && (
+            <span className="inline-flex items-center gap-1 min-w-0">
+              <Mic className="w-3 h-3 shrink-0 text-gray-500" />
+              <span className="truncate" title={micName}>{micName}</span>
+            </span>
+          )}
+          {captureSystemAudio && (
+            <span className="inline-flex items-center gap-1 min-w-0">
+              <MonitorSpeaker className="w-3 h-3 shrink-0 text-gray-500" />
+              <span className="truncate" title={systemName}>{systemName}</span>
+            </span>
+          )}
+        </div>
+      )}
+
       <div className="flex items-center gap-2">
-        <Mic className="w-4 h-4 text-gray-500 shrink-0" />
         <div className="flex-1 space-y-1">
-          {latest.length === 0 ? (
+          {visibleSamples.length === 0 ? (
             <p className="text-xs text-gray-500">{tr('live.waitingAudio')}</p>
           ) : (
-            latest.map((sample) => (
+            visibleSamples.map((sample) => (
               <LevelBar key={sample.device_name} sample={sample} />
             ))
+          )}
+          {latest.length > 0 && captureMicrophone && !micSample && (
+            <p className="text-[11px] text-amber-700">{tr('live.sourceMicWaiting')}</p>
+          )}
+          {latest.length > 0 && captureSystemAudio && !systemSample && (
+            <p className="text-[11px] text-amber-700">{tr('live.sourceSystemWaiting')}</p>
           )}
         </div>
         {diagnosis && (

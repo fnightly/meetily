@@ -139,7 +139,7 @@ pub struct RecordingState {
     /// anything was being captured. The capture path already holds the samples, so
     /// it measures them here instead and hands the result to the app, which turns it
     /// into the `audio-levels` event the interface already listens for.
-    level_callback: Mutex<Option<Box<dyn Fn(&str, f32, f32) + Send + Sync>>>,
+    level_callback: Mutex<Option<Box<dyn Fn(&str, &str, f32, f32) + Send + Sync>>>,
 
     // Statistics
     stats: Mutex<RecordingStats>,
@@ -379,7 +379,7 @@ impl RecordingState {
     /// Install the sink that receives per-device levels while recording.
     pub fn set_level_callback<F>(&self, callback: F)
     where
-        F: Fn(&str, f32, f32) + Send + Sync + 'static,
+        F: Fn(&str, &str, f32, f32) + Send + Sync + 'static,
     {
         *self.level_callback.lock().unwrap() = Some(Box::new(callback));
     }
@@ -388,9 +388,9 @@ impl RecordingState {
     ///
     /// Called from the capture callback on the audio thread, so it stays cheap: one
     /// uncontended lock and a call out. Callers throttle before getting here.
-    pub fn report_level(&self, device_name: &str, rms: f32, peak: f32) {
+    pub fn report_level(&self, device_name: &str, device_type: &str, rms: f32, peak: f32) {
         if let Some(callback) = self.level_callback.lock().unwrap().as_ref() {
-            callback(device_name, rms, peak);
+            callback(device_name, device_type, rms, peak);
         }
     }
 

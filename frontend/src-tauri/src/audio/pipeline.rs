@@ -521,7 +521,11 @@ impl AudioCapture {
         }
         let rms = (sum_squares / samples.len() as f32).sqrt();
 
-        self.state.report_level(&self.device.name, rms, peak);
+        let device_type = match self.device_type {
+            DeviceType::System => "system",
+            DeviceType::Microphone => "input",
+        };
+        self.state.report_level(&self.device.name, device_type, rms, peak);
     }
 
     /// Process audio data directly from callback

@@ -513,7 +513,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // each is forwarded as its own update rather than being batched; the capture side
     // throttles to something an eye can follow.
     let app_for_levels = app.clone();
-    manager.set_level_callback(move |device_name, rms, peak| {
+    manager.set_level_callback(move |device_name, device_type, rms, peak| {
         let update = super::level_monitor::AudioLevelUpdate {
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -521,7 +521,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
                 .unwrap_or(0),
             levels: vec![super::level_monitor::AudioLevelData {
                 device_name: device_name.to_string(),
-                device_type: "input".to_string(),
+                device_type: device_type.to_string(),
                 rms_level: rms,
                 peak_level: peak,
                 // Far below speech: this only has to separate a device that is
@@ -874,7 +874,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // each is forwarded as its own update rather than being batched; the capture side
     // throttles to something an eye can follow.
     let app_for_levels = app.clone();
-    manager.set_level_callback(move |device_name, rms, peak| {
+    manager.set_level_callback(move |device_name, device_type, rms, peak| {
         let update = super::level_monitor::AudioLevelUpdate {
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -882,7 +882,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
                 .unwrap_or(0),
             levels: vec![super::level_monitor::AudioLevelData {
                 device_name: device_name.to_string(),
-                device_type: "input".to_string(),
+                device_type: device_type.to_string(),
                 rms_level: rms,
                 peak_level: peak,
                 // Far below speech: this only has to separate a device that is
