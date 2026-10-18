@@ -86,6 +86,8 @@ const EN: Record<string, string> = {
 
   'nav.home': 'Home',
   'nav.library': 'Meetings & Recordings',
+  'nav.recent': 'Recent',
+  'nav.viewAllRecordings': 'View all {count} recordings',
   'nav.settings': 'Settings',
   'nav.about': 'About',
   'nav.searchPlaceholder': 'Search meeting content…',
@@ -1062,6 +1064,8 @@ const ZH_CN: Record<string, string> = {
 
   'nav.home': '首页',
   'nav.library': '会议与录音',
+  'nav.recent': '最近',
+  'nav.viewAllRecordings': '查看全部 {count} 条录音',
   'nav.settings': '设置',
   'nav.about': '关于',
   'nav.searchPlaceholder': '搜索会议内容…',

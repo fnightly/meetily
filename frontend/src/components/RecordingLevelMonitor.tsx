@@ -279,7 +279,7 @@ function LevelBar({ sample }: { sample: LevelSample }) {
         className="flex-1 h-2 bg-gray-200 rounded-sm overflow-hidden relative"
       >
         <div
-          className={`h-full ${colour} transition-all duration-150 ease-out`}
+          className={`h-full ${colour} transition-[width,background-color] duration-150 ease-out`}
           style={{ width: `${rmsPercent}%` }}
         />
         {peakPercent > rmsPercent && (

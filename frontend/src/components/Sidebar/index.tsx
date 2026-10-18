@@ -329,6 +329,15 @@ const Sidebar: React.FC = () => {
       .sort((a, b) => (rank.get(a.meetingId ?? '') ?? 999) - (rank.get(b.meetingId ?? '') ?? 999));
   }, [entries, searchQuery, searchResults, labelFilter, labelsByMeeting]);
 
+  // The library is the full archive; the sidebar only needs the most recent rows
+  // for quick switching. Showing every meeting here duplicated the library and
+  // made the sidebar scroll for no navigation benefit. Searching or filtering
+  // still searches the whole set.
+  const RECENT_SIDEBAR_LIMIT = 5;
+  const showingRecentOnly = !searchQuery.trim() && !labelFilter;
+  const listEntries = showingRecentOnly
+    ? visibleEntries.slice(0, RECENT_SIDEBAR_LIMIT)
+    : visibleEntries;
 
   const handleDelete = async (itemId: string) => {
     console.log('Deleting item:', itemId);
@@ -729,7 +738,9 @@ const Sidebar: React.FC = () => {
             <div className="flex-1 flex flex-col min-h-0 pt-4">
               <div className="flex-shrink-0 px-3">
                 <div className="flex items-center justify-between px-1 pb-2">
-                  <span className="eyebrow">{t('nav.library')}</span>
+                  <span className="eyebrow">
+                    {showingRecentOnly ? t('nav.recent') : t('nav.library')}
+                  </span>
                   {searchQuery && isSearching ? (
                     <span className="text-[11px] text-blue-500 animate-pulse">{t('nav.searching')}</span>
                   ) : (
@@ -808,10 +819,21 @@ const Sidebar: React.FC = () => {
                   </div>
                 )}
 
-                {visibleEntries.length > 0 && (
+                {listEntries.length > 0 && (
                   <ul className="mx-2 space-y-px">
-                    {visibleEntries.map(renderEntry)}
+                    {listEntries.map(renderEntry)}
                   </ul>
+                )}
+
+                {showingRecentOnly && visibleEntries.length > RECENT_SIDEBAR_LIMIT && (
+                  <button
+                    type="button"
+                    onClick={() => router.push('/recordings')}
+                    className="mx-3 mt-2 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1 rounded-lg border border-slate-200 px-2 py-1.5 text-[11px] font-medium text-slate-500 transition-colors hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60"
+                  >
+                    {t('nav.viewAllRecordings', { count: visibleEntries.length })}
+                    <ChevronRightCircle className="h-3 w-3" />
+                  </button>
                 )}
               </div>
             </div>
