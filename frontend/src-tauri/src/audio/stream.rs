@@ -371,12 +371,18 @@ impl AudioStreamManager {
         }
     }
 
-    /// Start audio streams for the given devices
+    /// Start the capture streams for the given devices.
+    ///
+    /// `allow_external_source` is for callers that attach a source this manager
+    /// cannot see — a per-process loopback capture started after this returns. With
+    /// it set, starting with no cpal stream is allowed; callers without such a
+    /// source pass `false`, so a session with nothing to record still fails.
     pub async fn start_streams(
         &mut self,
         microphone_device: Option<Arc<AudioDevice>>,
         system_device: Option<Arc<AudioDevice>>,
         recording_sender: Option<mpsc::UnboundedSender<super::recording_state::AudioChunk>>,
+        allow_external_source: bool,
     ) -> Result<()> {
         use super::capture::get_current_backend;
         let backend = get_current_backend();
@@ -418,8 +424,12 @@ impl AudioStreamManager {
             info!("ℹ️ No system device specified, skipping system audio stream");
         }
 
-        // Ensure at least one stream was created
-        if self.microphone_stream.is_none() && self.system_stream.is_none() {
+        // Ensure at least one stream was created, unless the caller vouched for an
+        // external capture that will feed the pipeline instead.
+        if self.microphone_stream.is_none()
+            && self.system_stream.is_none()
+            && !allow_external_source
+        {
             return Err(anyhow::anyhow!("No audio streams could be created"));
         }
 

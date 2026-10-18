@@ -168,33 +168,17 @@ impl ProfessionalAudioMixer {
         let max_len = mic_window.len().max(sys_window.len());
         let mut mixed = Vec::with_capacity(max_len);
 
-        // Professional mixing with soft scaling to prevent distortion
-        // Uses proportional scaling instead of hard clamping to avoid artifacts
+        // Both sources arrive at their natural level: the microphone is already
+        // normalised to -23 LUFS by the capture path, so the sum is left alone and
+        // only overload is shaped.
         for i in 0..max_len {
             let mic = mic_window.get(i).copied().unwrap_or(0.0);
             let sys = sys_window.get(i).copied().unwrap_or(0.0);
 
-            // Pre-scale system audio to 70% to leave headroom
-            // This prevents constant soft scaling which can cause pumping artifacts
-            // Mic is normalized to -23 LUFS (already optimal), system needs reduction
-            let sys_scaled = sys * 1.0;
-            let _mic_scaled = mic * 0.8;  // Reserved for future mic scaling
-
-            // Sum without ducking - mic stays at full volume, system slightly reduced
-            let sum = mic + sys_scaled;
-
-            // CRITICAL FIX: Soft scaling prevents distortion artifacts
-            // If the sum would exceed ±1.0, scale down PROPORTIONALLY
-            // This avoids hard clipping distortion that sounds like "radio breaks"
-            let sum_abs = sum.abs();
-            let mixed_sample = if sum_abs > 1.0 {
-                // Scale down to fit within ±1.0
-                sum / sum_abs
-            } else {
-                sum
-            };
-
-            mixed.push(mixed_sample);
+            // Per-sample hard normalisation turned every overloaded peak into a
+            // full-scale square wave, which is the distortion heard when loud system
+            // audio mixes with the microphone. The soft knee rounds the peak instead.
+            mixed.push(soft_limit(mic + sys));
         }
 
         mixed
@@ -1230,6 +1214,63 @@ mod tests {
     }
 
     #[test]
+    fn mixer_keeps_a_quiet_sum_unchanged() {
+        let mut mixer = ProfessionalAudioMixer::new(48_000);
+        let mic = [0.2f32, -0.3, 0.05, 0.0];
+        let sys = [0.1f32, 0.1, -0.15, 0.4];
+
+        let mixed = mixer.mix_window(&mic, &sys);
+
+        // Below the knee the output is exactly the f32 sum, not a rounded one.
+        assert_eq!(mixed.len(), mic.len());
+        for ((out, mic), sys) in mixed.iter().zip(mic.iter()).zip(sys.iter()) {
+            assert!((mic + sys).abs() <= 0.9, "test input crossed the knee");
+            assert_eq!(*out, mic + sys, "quiet sample was altered");
+        }
+    }
+
+    #[test]
+    fn mixer_soft_limits_instead_of_hard_clipping() {
+        // Sustained overload: the old per-sample normalisation emitted exactly ±1.0
+        // for every one of these samples, i.e. a square wave.
+        let mut mixer = ProfessionalAudioMixer::new(48_000);
+        let mixed = mixer.mix_window(&[1.0; 64], &[1.0; 64]);
+
+        assert_eq!(mixed.len(), 64);
+        for sample in &mixed {
+            assert!(sample.is_finite(), "non-finite mix output: {sample}");
+            assert!(*sample < 1.0, "output hit the hard ceiling: {sample}");
+            assert!(
+                *sample > 0.99,
+                "the limiter removed the whole signal: {sample}"
+            );
+        }
+    }
+
+    #[test]
+    fn mixer_keeps_loud_samples_distinguishable() {
+        // A hard normalisation maps every overloaded sample to the same ±1.0; the
+        // soft knee has to leave the waveform's shape intact instead.
+        let mut mixer = ProfessionalAudioMixer::new(48_000);
+        let mic: Vec<f32> = (0..=120).map(|step| step as f32 * 0.01).collect();
+        let sys = vec![0.2f32; mic.len()];
+
+        let mixed = mixer.mix_window(&mic, &sys);
+        let loud: Vec<f32> = mixed.iter().copied().filter(|s| *s > 0.95).collect();
+
+        assert!(loud.len() > 10, "test input did not reach the knee");
+        for pair in loud.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "flat-topped limiter output: {} -> {}",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert!(mixed.iter().all(|s| s.is_finite() && s.abs() < 1.0));
+    }
+
+    #[test]
     fn soft_limit_is_monotonic_and_finite() {
         let mut previous = f32::NEG_INFINITY;
         let mut sample = -4.0f32;
@@ -1338,5 +1379,152 @@ mod tests {
             "the microphone delivered silence (peak {peak:e}); check the Windows microphone privacy setting and that the selected input is not muted"
         );
         println!("probe captured {} samples, peak {peak:.4}", samples.len());
+    }
+
+    /// Capture the system output through the same cpal loopback path a recording uses.
+    ///
+    /// Ignored by default: it needs something audible. Run
+    /// "cargo test --lib real_system_loopback_probe -- --ignored --nocapture" while a
+    /// tone or music is playing; the raw f32 samples are written next to the test
+    /// binary so the captured waveform can be compared with the source.
+    #[test]
+    #[ignore]
+    fn real_system_loopback_probe_captures_output() {
+        use crate::audio::{get_device_and_config, AudioDevice, DeviceType as AudioDeviceKind};
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        use cpal::SampleFormat;
+        use std::sync::{Arc, Mutex};
+
+        let host = cpal::default_host();
+        let output = host
+            .default_output_device()
+            .expect("no default output device — check the Windows sound settings");
+        let name = output
+            .name()
+            .expect("the default output device reports no name");
+        println!("probing system output '{name}' through the recording loopback path");
+
+        let device = AudioDevice::new(name, AudioDeviceKind::Output);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build a runtime for device lookup");
+        let (cpal_device, config) = runtime
+            .block_on(get_device_and_config(&device))
+            .expect("could not open the output device for loopback capture");
+        println!(
+            "loopback config: {:?}, {} Hz, {} channel(s)",
+            config.sample_format(),
+            config.sample_rate().0,
+            config.channels()
+        );
+
+        let collected: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+        let stream_config = config.config();
+        let error_fn = |err| eprintln!("system loopback probe stream error: {err}");
+
+        let stream = match config.sample_format() {
+            SampleFormat::F32 => {
+                let sink = collected.clone();
+                cpal_device.build_input_stream(
+                    &stream_config,
+                    move |data: &[f32], _| {
+                        if let Ok(mut sink) = sink.lock() {
+                            sink.extend_from_slice(data);
+                        }
+                    },
+                    error_fn,
+                    None,
+                )
+            }
+            SampleFormat::I16 => {
+                let sink = collected.clone();
+                cpal_device.build_input_stream(
+                    &stream_config,
+                    move |data: &[i16], _| {
+                        if let Ok(mut sink) = sink.lock() {
+                            sink.extend(data.iter().map(|&s| s as f32 / 32768.0));
+                        }
+                    },
+                    error_fn,
+                    None,
+                )
+            }
+            SampleFormat::I32 => {
+                let sink = collected.clone();
+                cpal_device.build_input_stream(
+                    &stream_config,
+                    move |data: &[i32], _| {
+                        if let Ok(mut sink) = sink.lock() {
+                            sink.extend(data.iter().map(|&s| s as f32 / 2147483648.0));
+                        }
+                    },
+                    error_fn,
+                    None,
+                )
+            }
+            SampleFormat::U16 => {
+                let sink = collected.clone();
+                cpal_device.build_input_stream(
+                    &stream_config,
+                    move |data: &[u16], _| {
+                        if let Ok(mut sink) = sink.lock() {
+                            sink.extend(data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0));
+                        }
+                    },
+                    error_fn,
+                    None,
+                )
+            }
+            other => panic!("system loopback probe cannot handle sample format {other:?}"),
+        }
+        .expect("could not build a loopback input stream");
+
+        stream.play().expect("could not start the loopback stream");
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        drop(stream);
+
+        let samples = collected.lock().map(|s| s.clone()).unwrap_or_default();
+        assert!(
+            !samples.is_empty(),
+            "the loopback stream delivered no samples at all"
+        );
+        let peak = samples
+            .iter()
+            .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+        let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+        // The raw stream is interleaved and may be multi-channel: duration has to
+        // divide by the channel count, and the waveform must be measured on one
+        // channel or the interleave itself shows up as extra zero crossings.
+        let channels = config.channels() as usize;
+        let seconds =
+            samples.len() as f32 / (config.sample_rate().0 as f32 * channels.max(1) as f32);
+        let channel_zero: Vec<f32> = samples.iter().copied().step_by(channels.max(1)).collect();
+        let zero_crossings = channel_zero
+            .windows(2)
+            .filter(|pair| pair[0].is_sign_positive() != pair[1].is_sign_positive())
+            .count();
+
+        let mut bytes = Vec::with_capacity(samples.len() * 4);
+        for sample in &samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        let probe_path = std::env::temp_dir().join("meetily-system-loopback-probe.f32");
+        std::fs::write(&probe_path, &bytes).expect("write the probe samples");
+
+        println!(
+            "probe captured {} samples ({:.2}s), peak {:.4}, rms {:.4}, zero-crossing rate {:.0} Hz",
+            samples.len(),
+            seconds,
+            peak,
+            rms,
+            zero_crossings as f32 / seconds / 2.0
+        );
+        println!("raw samples: {}", probe_path.display());
+
+        assert!(
+            peak > 1e-4,
+            "loopback delivered silence (peak {peak:e}); check that something is playing"
+        );
     }
 }

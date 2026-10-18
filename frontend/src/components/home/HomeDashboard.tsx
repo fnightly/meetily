@@ -44,7 +44,7 @@ export function HomeDashboard({ hasMicrophone, onStart, isStarting = false }: Ho
   const { t, locale } = useI18n();
   const router = useRouter();
   const { entries, setCurrentMeeting } = useSidebar();
-  const { selectedDevices, selectedWindow, setSelectedWindow, captureSystemAudio, transcriptModelConfig, selectedLanguage, betaFeatures } = useConfig();
+  const { selectedDevices, selectedWindow, setSelectedWindow, captureSystemAudio, captureMicrophone, transcriptModelConfig, selectedLanguage, betaFeatures } = useConfig();
   const { openImportDialog } = useImportDialog();
   const prewarm = usePrewarmSpeechModel();
   const [now, setNow] = useState(() => new Date());
@@ -115,7 +115,11 @@ export function HomeDashboard({ hasMicrophone, onStart, isStarting = false }: Ho
       key: 'mic',
       icon: Mic,
       label: t('home.setup.mic'),
-      value: selectedDevices?.micDevice || t('home.setup.defaultDevice'),
+      // Computer-audio-only recording never opens the microphone, so show that
+      // instead of a device name that will not be used.
+      value: !captureMicrophone
+        ? t('home.setup.micDisabled')
+        : selectedDevices?.micDevice || t('home.setup.defaultDevice'),
     },
     {
       key: 'system',

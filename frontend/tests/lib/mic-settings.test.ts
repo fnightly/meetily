@@ -5,6 +5,7 @@ import {
   MIN_MICROPHONE_GAIN_DB,
   clampGainDb,
   formatGainDb,
+  resolveCaptureMicrophone,
   resolveCaptureSystemAudio,
   resolveEchoCancellation,
   resolveMicrophoneGainDb,
@@ -64,6 +65,13 @@ describe('recording source defaults', () => {
     expect(resolveCaptureSystemAudio(null)).toBe(true);
     expect(resolveCaptureSystemAudio(true)).toBe(true);
     expect(resolveCaptureSystemAudio(false)).toBe(false);
+  });
+
+  test('a backend that omits capture_microphone still recorded the microphone', () => {
+    expect(resolveCaptureMicrophone(undefined)).toBe(true);
+    expect(resolveCaptureMicrophone(null)).toBe(true);
+    expect(resolveCaptureMicrophone(true)).toBe(true);
+    expect(resolveCaptureMicrophone(false)).toBe(false);
   });
 
   test('noise suppression is off unless explicitly enabled', () => {

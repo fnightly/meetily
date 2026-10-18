@@ -40,6 +40,14 @@ export function resolveCaptureSystemAudio(value: boolean | null | undefined): bo
   return value !== false;
 }
 
+/**
+ * Resolve whether the microphone is recorded. Older backends omit the field;
+ * those builds always captured the microphone, so a missing value means true.
+ */
+export function resolveCaptureMicrophone(value: boolean | null | undefined): boolean {
+  return value !== false;
+}
+
 /** Noise suppression is opt-in, so a missing field means off. */
 export function resolveNoiseSuppression(value: boolean | null | undefined): boolean {
   return value === true;

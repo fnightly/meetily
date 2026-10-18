@@ -89,8 +89,17 @@ pub struct RecordingPreferences {
     /// For an external recording (mic on a different device from the speakers) the
     /// system stream carries nothing the microphone does not already pick up, and
     /// opening it adds notification sounds and a second capture path.
-    #[serde(default = "default_capture_system_audio")]
+    #[serde(default = "default_true")]
     pub capture_system_audio: bool,
+
+    /// When false the session records the computer's audio only (内录 / internal
+    /// recording): no microphone is opened.
+    ///
+    /// The microphone is what picks up room noise, keyboard, and any feedback path
+    /// from the speakers back into the built-in mic, so a clean system recording
+    /// should not have it mixed in.
+    #[serde(default = "default_true")]
+    pub capture_microphone: bool,
 
     /// Microphone gain in dB applied by the capture pipeline before the chunk is
     /// written; clamped by recording_state so a stale file cannot break the track.
@@ -131,8 +140,9 @@ fn default_low_disk_warning_mb() -> u32 {
     1024
 }
 
-/// Existing recordings captured the system mix; keep that unless asked otherwise.
-fn default_capture_system_audio() -> bool {
+/// Capture switches default to on: a preferences file saved before a field existed
+/// must keep recording the way it did.
+fn default_true() -> bool {
     true
 }
 
@@ -177,7 +187,8 @@ impl Default for RecordingPreferences {
             preferred_system_device: None,
             #[cfg(target_os = "macos")]
             system_audio_backend: Some("coreaudio".to_string()),
-            capture_system_audio: default_capture_system_audio(),
+            capture_system_audio: default_true(),
+            capture_microphone: default_true(),
             microphone_gain_db: default_microphone_gain_db(),
             noise_suppression: false,
             echo_cancellation: false,
@@ -284,12 +295,12 @@ pub async fn load_recording_preferences<R: Runtime>(
 
     // Logs the switches that change what gets written, so the effective settings
     // can be confirmed from a log rather than inferred from behaviour.
-    info!("Loaded recording preferences: save_folder={:?}, auto_save={}, format={}, quality={}, defer_transcription={}, cleanup_after_recording={}, mic={:?}, system={:?}, capture_system_audio={}, mic_gain_db={}, noise_suppression={}, echo_cancellation={}",
+    info!("Loaded recording preferences: save_folder={:?}, auto_save={}, format={}, quality={}, defer_transcription={}, cleanup_after_recording={}, mic={:?}, system={:?}, capture_system_audio={}, capture_microphone={}, mic_gain_db={}, noise_suppression={}, echo_cancellation={}",
           prefs.save_folder, prefs.auto_save, prefs.file_format, prefs.file_quality,
           prefs.defer_transcription, prefs.cleanup_after_recording,
           prefs.preferred_mic_device, prefs.preferred_system_device,
-          prefs.capture_system_audio, prefs.microphone_gain_db, prefs.noise_suppression,
-          prefs.echo_cancellation);
+          prefs.capture_system_audio, prefs.capture_microphone, prefs.microphone_gain_db,
+          prefs.noise_suppression, prefs.echo_cancellation);
     Ok(prefs)
 }
 

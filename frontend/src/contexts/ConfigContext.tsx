@@ -8,7 +8,7 @@ import { configService, ModelConfig } from '@/services/configService';
 import { invoke } from '@tauri-apps/api/core';
 import Analytics from '@/lib/analytics';
 import { BetaFeatures, BetaFeatureKey, loadBetaFeatures, saveBetaFeatures } from '@/types/betaFeatures';
-import { resolveCaptureSystemAudio } from '@/lib/mic-settings';
+import { resolveCaptureMicrophone, resolveCaptureSystemAudio } from '@/lib/mic-settings';
 
 export interface OllamaModel {
   name: string;
@@ -68,6 +68,9 @@ interface ConfigContextType {
   // recording); true also captures the computer's own audio.
   captureSystemAudio: boolean;
   setCaptureSystemAudio: (capture: boolean) => void;
+  /** False = computer-audio-only recording; the microphone is not opened. */
+  captureMicrophone: boolean;
+  setCaptureMicrophone: (capture: boolean) => void;
 
   // Language preference
   selectedLanguage: string;
@@ -158,6 +161,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   // Capture mode is loaded once at startup because the idle home screen renders it
   // before the settings page (which owns the preference) is ever opened.
   const [captureSystemAudio, setCaptureSystemAudio] = useState(true);
+  const [captureMicrophone, setCaptureMicrophone] = useState(true);
 
   // Language preference state
   const [selectedLanguage, setSelectedLanguage] = useState<string>(() => {
@@ -392,8 +396,13 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     let alive = true;
     (async () => {
       try {
-        const prefs = await invoke<{ capture_system_audio?: boolean }>('get_recording_preferences');
-        if (alive) setCaptureSystemAudio(resolveCaptureSystemAudio(prefs?.capture_system_audio));
+        const prefs = await invoke<{ capture_system_audio?: boolean; capture_microphone?: boolean }>(
+          'get_recording_preferences',
+        );
+        if (alive) {
+          setCaptureSystemAudio(resolveCaptureSystemAudio(prefs?.capture_system_audio));
+          setCaptureMicrophone(resolveCaptureMicrophone(prefs?.capture_microphone));
+        }
       } catch (error) {
         // Keep capturing system audio rather than silently narrowing the recording.
         console.error('[ConfigContext] Failed to load recording capture mode:', error);
@@ -572,6 +581,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     setSelectedWindow,
     captureSystemAudio,
     setCaptureSystemAudio,
+    captureMicrophone,
+    setCaptureMicrophone,
     selectedLanguage,
     setSelectedLanguage: handleSetSelectedLanguage,
     showConfidenceIndicator,
@@ -597,6 +608,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     selectedDevices,
     selectedWindow,
     captureSystemAudio,
+    captureMicrophone,
     selectedLanguage,
     handleSetSelectedLanguage,
     showConfidenceIndicator,

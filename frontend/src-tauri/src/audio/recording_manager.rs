@@ -228,6 +228,9 @@ impl RecordingManager {
     /// * `defer_transcription` - When true, capture audio only and skip realtime
     ///   transcription; the recording is expected to be transcribed afterwards.
     /// * `encoding` - Output format and quality for the saved recording.
+    /// * `allow_external_source` - Set when the caller will attach a capture this
+    ///   manager does not own (a per-process loopback); it permits starting with no
+    ///   cpal stream, which is otherwise rejected as "nothing to record".
     pub(crate) async fn start_recording(
         &mut self,
         microphone_device: Option<Arc<AudioDevice>>,
@@ -236,6 +239,7 @@ impl RecordingManager {
         defer_transcription: bool,
         encoding: super::formats::AudioEncodingSettings,
         recordings_folder: Option<std::path::PathBuf>,
+        allow_external_source: bool,
     ) -> std::result::Result<mpsc::UnboundedReceiver<AudioChunk>, RecordingStartError> {
         info!(
             "Starting recording manager (auto_save: {}, defer_transcription: {}, format: {})",
@@ -312,7 +316,14 @@ impl RecordingManager {
 
         // Start audio streams - they send RAW unmixed chunks to pipeline for mixing
         // Pipeline handles mixing and distribution to both recording and transcription
-        self.stream_manager.start_streams(microphone_device.clone(), system_device.clone(), None).await?;
+        self.stream_manager
+            .start_streams(
+                microphone_device.clone(),
+                system_device.clone(),
+                None,
+                allow_external_source,
+            )
+            .await?;
 
         // Start device monitoring to detect disconnects
         if let Some(ref mut monitor) = self.device_monitor {
@@ -324,8 +335,12 @@ impl RecordingManager {
             }
         }
 
-        info!("Recording manager started successfully with {} active streams",
-               self.stream_manager.active_stream_count());
+        if allow_external_source && self.stream_manager.active_stream_count() == 0 {
+            info!("Recording manager started with no cpal streams; waiting for the external process capture");
+        } else {
+            info!("Recording manager started successfully with {} active streams",
+                   self.stream_manager.active_stream_count());
+        }
 
         Ok(transcription_receiver)
     }
