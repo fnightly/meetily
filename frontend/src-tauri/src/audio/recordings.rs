@@ -81,14 +81,48 @@ pub fn is_recording_folder(path: &Path) -> bool {
 }
 
 /// Find the audio file inside a recording folder.
+///
+/// Metadata is consulted first because a rename now names the audio after the
+/// meeting, and then the historical fixed names are tried so recordings made
+/// before that rename still open. As a last resort the folder is scanned for a
+/// file with an audio extension, which keeps a renamed file playable even if the
+/// metadata update failed.
 pub fn find_audio_file(folder: &Path) -> Option<PathBuf> {
+    if let Some(metadata) = super::retention_commands::read_meeting_metadata(folder) {
+        let named = metadata.audio_file.trim();
+        if !named.is_empty() {
+            let path = folder.join(named);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+
     for candidate in AUDIO_FILE_CANDIDATES {
         let path = folder.join(candidate);
         if path.is_file() {
             return Some(path);
         }
     }
-    None
+
+    let mut fallback = std::fs::read_dir(folder)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| {
+                        AUDIO_FILE_CANDIDATES
+                            .iter()
+                            .any(|candidate| candidate.ends_with(&format!(".{extension}")))
+                    })
+        })
+        .collect::<Vec<_>>();
+    fallback.sort();
+    fallback.into_iter().next()
 }
 
 /// Whether a recording folder holds at least one transcribed segment.
@@ -504,6 +538,40 @@ mod tests {
         std::fs::write(folder.join("audio.m4a"), b"new").expect("write");
 
         assert_eq!(find_audio_file(&folder).unwrap().file_name().unwrap(), "audio.m4a");
+    }
+
+    #[test]
+    fn metadata_named_audio_wins_over_the_legacy_fixed_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let folder = tmp.path().join("renamed");
+        write_metadata(&folder, "2026-01-01T00:00:00Z", "Renamed");
+        std::fs::write(folder.join("custom-title.mp3"), b"x").expect("write custom");
+        std::fs::write(folder.join("audio.m4a"), b"old").expect("write legacy");
+
+        let metadata_path = folder.join(METADATA_FILE);
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&metadata_path).unwrap()).unwrap();
+        metadata["audio_file"] = serde_json::json!("custom-title.mp3");
+        std::fs::write(&metadata_path, metadata.to_string()).expect("rewrite metadata");
+
+        assert_eq!(
+            find_audio_file(&folder).unwrap().file_name().unwrap(),
+            "custom-title.mp3"
+        );
+    }
+
+    #[test]
+    fn a_renamed_audio_file_is_found_even_if_metadata_is_stale() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let folder = tmp.path().join("stale");
+        write_metadata(&folder, "2026-01-01T00:00:00Z", "Stale");
+        // Metadata still points at audio.m4a, but the file was renamed.
+        std::fs::write(folder.join("Renamed recording.mp3"), b"x").expect("write renamed");
+
+        assert_eq!(
+            find_audio_file(&folder).unwrap().file_name().unwrap(),
+            "Renamed recording.mp3"
+        );
     }
 
     #[test]

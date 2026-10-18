@@ -99,7 +99,9 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
   const [exportIds, setExportIds] = useState<string[] | null>(null);
   const [exportTitle, setExportTitle] = useState<string | undefined>(undefined);
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
-  const [deleteMeetingsToo, setDeleteMeetingsToo] = useState(false);
+  // Deleting a row from the unified library should remove the row, so the meeting
+  // record goes with the audio by default; unchecking keeps the notes.
+  const [deleteMeetingsToo, setDeleteMeetingsToo] = useState(true);
   const [batchBusy, setBatchBusy] = useState(false);
   /** Folder whose inline audio player is expanded; only one at a time. */
   const [previewFolder, setPreviewFolder] = useState<string | null>(null);
@@ -243,7 +245,11 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
     const errors: string[] = [];
     for (const entry of selectedEntries) {
       try {
-        await invoke('delete_saved_recording', { folderPath: entry.folder_path });
+        // A row whose audio is already gone has no folder to delete; removing the
+        // meeting record is the only way to remove the row.
+        if (entry.audio_file) {
+          await invoke('delete_saved_recording', { folderPath: entry.folder_path });
+        }
         const meetingId = folderToMeeting.get(entry.folder_path);
         if (deleteMeetingsToo && meetingId) {
           await invoke('api_delete_meeting', { meetingId });
@@ -327,7 +333,39 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
     const entry = deleteTarget;
     setDeleteTarget(null);
     if (!entry) return;
-    await runMutation(entry.folder_path, 'delete_saved_recording', {}, (r) => r.detail);
+
+    setBusy(entry.folder_path);
+    try {
+      let removed = false;
+      if (entry.audio_file) {
+        await invoke('delete_saved_recording', { folderPath: entry.folder_path });
+        removed = true;
+      }
+
+      // The list is a view over audio *and* meeting records, so removing only the
+      // folder left the row behind as a missing-audio entry and looked like a
+      // failed delete. Remove the meeting record too.
+      const meetingId = folderToMeeting.get(entry.folder_path);
+      if (meetingId) {
+        await invoke('api_delete_meeting', { meetingId });
+        removed = true;
+      }
+
+      if (!removed) {
+        throw new Error('Nothing to delete for this entry');
+      }
+
+      toast.success(t('library.deleted', { name: entry.meeting_name }));
+      await load();
+      await refetchMeetings();
+      onChanged?.();
+    } catch (error) {
+      toast.error(t('library.operationFailed'), {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setBusy(null);
+    }
   };
 
   const handleRenameConfirm = async () => {
@@ -848,7 +886,7 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
                   variant="ghost"
                   size="sm"
                   onClick={() => setDeleteTarget(entry)}
-                  disabled={isBusy || !entry.audio_file}
+                  disabled={isBusy}
                   className="text-red-600 hover:text-red-700"
                   title={t('library.deleteTitle')}
                 >

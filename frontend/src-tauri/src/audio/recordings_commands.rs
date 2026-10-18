@@ -312,10 +312,41 @@ pub async fn rename_saved_recording(
             .ok_or_else(|| "Recording folder has no parent".to_string())?;
         let new_path = parent.join(&new_folder_name);
 
+        // Rename the audio file with the recording. Keep the extension and fall
+        // back to a numbered name on collision; a failure here must not stop the
+        // folder/metadata rename, and find_audio_file can still recover the file.
+        let audio_rename = find_audio_file(&path).and_then(|audio_path| {
+            let extension = audio_path.extension().and_then(|value| value.to_str())?;
+            let stem = super::audio_processing::sanitize_filename(&trimmed);
+            let stem = stem.trim();
+            if stem.is_empty() {
+                return None;
+            }
+
+            let mut target = path.join(format!("{stem}.{extension}"));
+            let mut counter = 2;
+            while target.exists() && target != audio_path {
+                target = path.join(format!("{stem} ({counter}).{extension}"));
+                counter += 1;
+            }
+
+            if target == audio_path {
+                return Some(audio_path);
+            }
+
+            std::fs::rename(&audio_path, &target).ok()?;
+            Some(target)
+        });
+
         // Update the metadata first: if the rename then fails, the title is still
         // correct and the folder simply keeps its old name.
         if let Some(mut metadata) = super::retention_commands::read_meeting_metadata(&path) {
             metadata.meeting_name = Some(trimmed.clone());
+            if let Some(audio_path) = audio_rename.as_ref() {
+                if let Some(name) = audio_path.file_name().and_then(|value| value.to_str()) {
+                    metadata.audio_file = name.to_string();
+                }
+            }
             let serialized = serde_json::to_string_pretty(&metadata)
                 .map_err(|e| format!("Failed to serialise metadata: {}", e))?;
             std::fs::write(path.join(METADATA_FILE), serialized)
