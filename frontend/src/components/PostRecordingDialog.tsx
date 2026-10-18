@@ -16,6 +16,7 @@ import {
   type PostRecordingInput,
 } from '@/lib/post-recording';
 import { useI18n } from '@/contexts/I18nContext';
+import { transcriptionStageKey } from '@/lib/transcription-queue';
 
 interface PostRecordingDialogProps {
   open: boolean;
@@ -25,6 +26,8 @@ interface PostRecordingDialogProps {
   onChoose: (action: PostRecordingAction) => Promise<void>;
   /** Called when the user dismisses without choosing (treated as "keep"). */
   onDismiss: () => void;
+  /** Live transcription progress while a chosen action runs, when available. */
+  progress?: { percentage: number; stage: string } | null;
 }
 
 /**
@@ -41,6 +44,7 @@ export function PostRecordingDialog({
   input,
   onChoose,
   onDismiss,
+  progress = null,
 }: PostRecordingDialogProps) {
   const { t } = useI18n();
   const [busyAction, setBusyAction] = useState<PostRecordingAction | null>(null);
@@ -147,9 +151,29 @@ export function PostRecordingDialog({
         </div>
 
         {busy && (
-          <p className="text-xs text-gray-500 mt-1">
-            {busyAction === 'keep' ? t('postRecording.finishing') : t('postRecording.working')}
-          </p>
+          <div className="mt-2 space-y-1.5">
+            <p className="text-xs text-gray-500">
+              {busyAction === 'keep' ? t('postRecording.finishing') : t('postRecording.working')}
+            </p>
+            {progress && (
+              <>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-blue-100">
+                  <div
+                    className="h-full rounded-full bg-blue-600 transition-[width] duration-300"
+                    style={{ width: `${progress.percentage}%` }}
+                  />
+                </div>
+                <p className="text-xs tabular-nums text-blue-700">
+                  {(() => {
+                    const key = transcriptionStageKey(progress.stage);
+                    return key ? t(key) : progress.stage;
+                  })()}
+                  {' · '}
+                  {progress.percentage}%
+                </p>
+              </>
+            )}
+          </div>
         )}
       </DialogContent>
     </Dialog>

@@ -301,7 +301,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       setPurgePreview(`${result.detail}${listed}`);
     } catch (error) {
       console.error('Failed to preview retention sweep:', error);
-      toast.error('Could not check which recordings would be deleted');
+      toast.error(t('recording.previewFailed'));
     } finally {
       setPreviewing(false);
     }
@@ -418,11 +418,11 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       const picked = await invoke<string | null>('select_recording_folder');
       if (!picked) return; // cancelled
       setPreferences(prev => ({ ...prev, save_folder: picked }));
-      toast.success('Recordings folder updated', { description: picked });
+      toast.success(t('recording.folderUpdated'), { description: picked });
       await Analytics.track('recordings_folder_changed', { changed: 'true' });
     } catch (error) {
       console.error('Failed to change recordings folder:', error);
-      toast.error('Failed to change recordings folder', {
+      toast.error(t('recording.folderChangeFailed'), {
         description: error instanceof Error ? error.message : String(error)
       });
     }
@@ -435,13 +435,13 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       const store = await Store.load('preferences.json');
       await store.set('show_recording_notification', enabled);
       await store.save();
-      toast.success('Preference saved');
+      toast.success(t('recSet.preferenceSaved'));
       await Analytics.track('recording_notification_preference_changed', {
         enabled: enabled.toString()
       });
     } catch (error) {
       console.error('Failed to save notification preference:', error);
-      toast.error('Failed to save preference');
+      toast.error(t('recSet.preferenceSaveFailed'));
     }
   };
 
@@ -791,10 +791,8 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       {/* Recording Notification Toggle */}
       <div className="flex items-center justify-between surface-card p-5">
         <div className="flex-1">
-          <div className="font-medium">Recording Start Notification</div>
-          <div className="text-sm text-gray-600">
-            Show reminder to inform participants when recording starts
-          </div>
+          <div className="font-medium">{t('recSet.notificationTitle')}</div>
+          <div className="text-sm text-gray-600">{t('recSet.notificationHint')}</div>
         </div>
         <Switch
           checked={showRecordingNotification}
@@ -965,10 +963,8 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       {/* Device Preferences */}
       <div className="space-y-4">
         <div className="border-t pt-6">
-          <h4 className="text-base font-medium text-gray-900 mb-4">Default Audio Devices</h4>
-          <p className="text-sm text-gray-600 mb-4">
-            Set your preferred microphone and system audio devices for recording. These will be automatically selected when starting new recordings.
-          </p>
+          <h4 className="text-base font-medium text-gray-900 mb-4">{t('recSet.defaultDevices')}</h4>
+          <p className="text-sm text-gray-600 mb-4">{t('recSet.defaultDevicesHint')}</p>
 
           {isRecording && (
             <p
@@ -976,7 +972,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
               aria-live="polite"
               className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-2 mb-4"
             >
-              Device selection is locked while a recording is in progress. Connecting a new device mid-recording will not switch to it. Stop the current meeting to change devices.
+              {t('recSet.devicesLocked')}
             </p>
           )}
 

@@ -35,6 +35,8 @@ interface UseRecordingStopReturn {
   pendingPostRecording: { meetingId: string } | null;
   /** Apply the user's choice for the pending recording. */
   handlePostRecordingChoice: (action: PostRecordingAction) => Promise<void>;
+  /** Live progress while the post-recording choice runs, when it transcribes. */
+  postRecordingProgress: { percentage: number; stage: string } | null;
 }
 
 /**
@@ -71,6 +73,10 @@ export function useRecordingStop(
    */
   const [pendingPostRecording, setPendingPostRecording] = useState<{
     meetingId: string;
+  } | null>(null);
+  const [postRecordingProgress, setPostRecordingProgress] = useState<{
+    percentage: number;
+    stage: string;
   } | null>(null);
 
   const {
@@ -612,16 +618,22 @@ export function useRecordingStop(
    * still lets the UI finish rather than hanging on the dialog.
    */
   const waitForRetranscription = useCallback(
-    async (meetingId: string, timeoutMs = 30 * 60 * 1000): Promise<void> => {
+    async (
+      meetingId: string,
+      onProgress?: (progress: { percentage: number; stage: string }) => void,
+      timeoutMs = 30 * 60 * 1000,
+    ): Promise<void> => {
       await new Promise<void>((resolve) => {
         let settled = false;
-        let unlisten: (() => void) | undefined;
+        let unlistenComplete: (() => void) | undefined;
+        let unlistenProgress: (() => void) | undefined;
 
         const finish = () => {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
-          unlisten?.();
+          unlistenComplete?.();
+          unlistenProgress?.();
           resolve();
         };
 
@@ -629,6 +641,22 @@ export function useRecordingStop(
           console.warn('Retranscription wait timed out; continuing');
           finish();
         }, timeoutMs);
+
+        listen<{ meeting_id?: string; progress_percentage?: number; stage?: string }>(
+          'retranscription-progress',
+          (event) => {
+            if (event.payload?.meeting_id && event.payload.meeting_id !== meetingId) return;
+            onProgress?.({
+              percentage: Math.max(0, Math.min(100, Math.round(event.payload?.progress_percentage ?? 0))),
+              stage: event.payload?.stage ?? '',
+            });
+          },
+        )
+          .then((fn) => {
+            if (settled) fn();
+            else unlistenProgress = fn;
+          })
+          .catch((error) => console.error('Failed to subscribe to retranscription-progress:', error));
 
         listen<{ meeting_id?: string }>('retranscription-complete', (event) => {
           // Only react to this meeting's completion.
@@ -638,7 +666,7 @@ export function useRecordingStop(
         })
           .then((fn) => {
             if (settled) fn();
-            else unlisten = fn;
+            else unlistenComplete = fn;
           })
           .catch((error) => {
             console.error('Failed to subscribe to retranscription-complete:', error);
@@ -669,43 +697,50 @@ export function useRecordingStop(
   const handlePostRecordingChoice = useCallback(
     async (action: PostRecordingAction) => {
       const pending = pendingPostRecording;
-      setPendingPostRecording(null);
-
       if (!pending) return;
 
-      const { meetingId } = pending;
-      const folderPath = sessionStorage.getItem('last_recording_folder_path');
+      // Keep the dialog open while the work runs: closing it immediately made the
+      // busy state and progress invisible, so a long transcription looked like a
+      // frozen click. It closes in the finally block (navigation unmounts it).
+      setPostRecordingProgress(null);
+      try {
+        const { meetingId } = pending;
+        const folderPath = sessionStorage.getItem('last_recording_folder_path');
 
-      if (action !== 'keep' && actionNeedsTranscription(action) && folderPath) {
-        try {
-          toast.info(tr('toast.transcribing'), {
-            description: tr('toast.transcribingHint'),
-          });
+        if (action !== 'keep' && actionNeedsTranscription(action) && folderPath) {
+          try {
+            toast.info(tr('toast.transcribing'), {
+              description: tr('toast.transcribingHint'),
+            });
 
-          await invoke('start_retranscription_command', {
-            meetingId,
-            meetingFolderPath: folderPath,
-            ...(await resolveBatchTarget()),
-          });
+            await invoke('start_retranscription_command', {
+              meetingId,
+              meetingFolderPath: folderPath,
+              ...(await resolveBatchTarget()),
+            });
 
-          await waitForRetranscription(meetingId);
-          toast.success(tr('toast.transcriptionComplete'));
-        } catch (error) {
-          console.error('Post-recording follow-up failed:', error);
-          toast.error(tr('toast.transcriptionFailed'), {
-            description: error instanceof Error ? error.message : String(error),
-          });
+            await waitForRetranscription(meetingId, setPostRecordingProgress);
+            toast.success(tr('toast.transcriptionComplete'));
+          } catch (error) {
+            console.error('Post-recording follow-up failed:', error);
+            toast.error(tr('toast.transcriptionFailed'), {
+              description: error instanceof Error ? error.message : String(error),
+            });
+          }
         }
-      }
 
-      // The summary itself is generated on the meeting page, which owns the model
-      // configuration and the transcript payload. A one-shot request tells that
-      // page the user asked for it here, even when auto-summary is switched off.
-      if (actionNeedsSummary(action)) {
-        sessionStorage.setItem('meetily.requestedSummaryMeeting', meetingId);
-      }
+        // The summary itself is generated on the meeting page, which owns the model
+        // configuration and the transcript payload. A one-shot request tells that
+        // page the user asked for it here, even when auto-summary is switched off.
+        if (actionNeedsSummary(action)) {
+          sessionStorage.setItem('meetily.requestedSummaryMeeting', meetingId);
+        }
 
-      navigateToMeeting(meetingId);
+        navigateToMeeting(meetingId);
+      } finally {
+        setPostRecordingProgress(null);
+        setPendingPostRecording(null);
+      }
     },
     [pendingPostRecording, navigateToMeeting, resolveBatchTarget, waitForRetranscription],
   );
@@ -741,5 +776,6 @@ export function useRecordingStop(
     },
     pendingPostRecording,
     handlePostRecordingChoice,
+    postRecordingProgress,
   };
 }

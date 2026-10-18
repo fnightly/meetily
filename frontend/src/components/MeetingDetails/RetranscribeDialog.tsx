@@ -23,6 +23,7 @@ import { useConfig } from '@/contexts/ConfigContext';
 import { LANGUAGES } from '@/constants/languages';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
 import { useI18n } from '@/contexts/I18nContext';
+import { transcriptionStageKey } from '@/lib/transcription-queue';
 import Analytics from '@/lib/analytics';
 
 interface RetranscribeDialogProps {
@@ -158,9 +159,7 @@ export function RetranscribeDialog({
             });
 
             setIsProcessing(false);
-            toast.success(
-              `Retranscription complete! ${event.payload.segments_count} segments created.`
-            );
+            toast.success(t('retranscribe.complete', { count: event.payload.segments_count }));
             onCompleteRef.current?.();
             onOpenChangeRef.current(false);
           }
@@ -203,7 +202,7 @@ export function RetranscribeDialog({
 
   const handleStartRetranscription = async () => {
     if (!meetingFolderPath) {
-      setError('Meeting folder path not available');
+      setError(t('retranscribe.noFolder'));
       return;
     }
 
@@ -241,7 +240,7 @@ export function RetranscribeDialog({
         await invoke('cancel_retranscription_command');
         setIsProcessing(false);
         setProgress(null);
-        toast.info('Retranscription cancelled');
+        toast.info(t('retranscribe.cancelled'));
       } catch (err) {
         console.error('Failed to cancel retranscription:', err);
       }
@@ -314,11 +313,11 @@ export function RetranscribeDialog({
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
                   <Globe className="h-4 w-4 text-muted-foreground" />
-                  <span className="text-sm font-medium">Language</span>
+                  <span className="text-sm font-medium">{t('retranscribe.language')}</span>
                 </div>
                 <Select value={selectedLang} onValueChange={setSelectedLang}>
                   <SelectTrigger className="w-full">
-                    <SelectValue placeholder="Select language" />
+                    <SelectValue placeholder={t('retranscribe.languagePlaceholder')} />
                   </SelectTrigger>
                   <SelectContent className="max-h-60">
                     {LANGUAGES.map((lang) => (
@@ -328,19 +327,15 @@ export function RetranscribeDialog({
                     ))}
                   </SelectContent>
                 </Select>
-                <p className="text-xs text-muted-foreground">
-                  Select a specific language to improve accuracy, or use auto-detect
-                </p>
+                <p className="text-xs text-muted-foreground">{t('retranscribe.languageHint')}</p>
               </div>
             ) : (
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
                   <Globe className="h-4 w-4 text-muted-foreground" />
-                  <span className="text-sm font-medium">Language</span>
+                  <span className="text-sm font-medium">{t('retranscribe.language')}</span>
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  Language selection isn't supported for Parakeet. It always uses automatic detection.
-                </p>
+                <p className="text-xs text-muted-foreground">{t('retranscribe.parakeetLanguage')}</p>
               </div>
             )
           )}
@@ -349,11 +344,11 @@ export function RetranscribeDialog({
             <div className="space-y-3">
               <div className="flex items-center gap-2">
                 <Cpu className="h-4 w-4 text-muted-foreground" />
-                <span className="text-sm font-medium">Model</span>
+                <span className="text-sm font-medium">{t('retranscribe.model')}</span>
               </div>
               <Select value={selectedModelKey} onValueChange={setSelectedModelKey} disabled={loadingModels}>
                 <SelectTrigger className="w-full">
-                  <SelectValue placeholder={loadingModels ? "Loading models..." : "Select model"} />
+                  <SelectValue placeholder={loadingModels ? t('retranscribe.loadingModels') : t('retranscribe.selectModel')} />
                 </SelectTrigger>
                 <SelectContent>
                   {availableModels.map((model) => (
@@ -363,9 +358,7 @@ export function RetranscribeDialog({
                   ))}
                 </SelectContent>
               </Select>
-              <p className="text-xs text-muted-foreground">
-                Choose a transcription model
-              </p>
+              <p className="text-xs text-muted-foreground">{t('retranscribe.modelHint')}</p>
             </div>
           )}
 
@@ -379,7 +372,12 @@ export function RetranscribeDialog({
                   />
                 </div>
                 <div className="flex justify-between text-xs text-gray-600 mt-1">
-                  <span>{progress.stage}</span>
+                  <span>
+                    {(() => {
+                      const key = transcriptionStageKey(progress.stage);
+                      return key ? t(key) : progress.stage;
+                    })()}
+                  </span>
                   <span>{Math.round(progress.progress_percentage)}%</span>
                 </div>
               </div>
