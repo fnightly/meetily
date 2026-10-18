@@ -101,6 +101,13 @@ pub struct RecordingPreferences {
     #[serde(default = "default_true")]
     pub capture_microphone: bool,
 
+    /// Keep the computer's audio as two channels in internal recordings.
+    ///
+    /// Only takes effect in system-audio-only mode. Modes that also record the
+    /// microphone mix both sources into one track, so they stay mono.
+    #[serde(default = "default_true")]
+    pub stereo_internal_recording: bool,
+
     /// Microphone gain in dB applied by the capture pipeline before the chunk is
     /// written; clamped by recording_state so a stale file cannot break the track.
     #[serde(default = "default_microphone_gain_db")]
@@ -189,6 +196,7 @@ impl Default for RecordingPreferences {
             system_audio_backend: Some("coreaudio".to_string()),
             capture_system_audio: default_true(),
             capture_microphone: default_true(),
+            stereo_internal_recording: default_true(),
             microphone_gain_db: default_microphone_gain_db(),
             noise_suppression: false,
             echo_cancellation: false,
@@ -295,11 +303,12 @@ pub async fn load_recording_preferences<R: Runtime>(
 
     // Logs the switches that change what gets written, so the effective settings
     // can be confirmed from a log rather than inferred from behaviour.
-    info!("Loaded recording preferences: save_folder={:?}, auto_save={}, format={}, quality={}, defer_transcription={}, cleanup_after_recording={}, mic={:?}, system={:?}, capture_system_audio={}, capture_microphone={}, mic_gain_db={}, noise_suppression={}, echo_cancellation={}",
+    info!("Loaded recording preferences: save_folder={:?}, auto_save={}, format={}, quality={}, defer_transcription={}, cleanup_after_recording={}, mic={:?}, system={:?}, capture_system_audio={}, capture_microphone={}, stereo_internal_recording={}, mic_gain_db={}, noise_suppression={}, echo_cancellation={}",
           prefs.save_folder, prefs.auto_save, prefs.file_format, prefs.file_quality,
           prefs.defer_transcription, prefs.cleanup_after_recording,
           prefs.preferred_mic_device, prefs.preferred_system_device,
-          prefs.capture_system_audio, prefs.capture_microphone, prefs.microphone_gain_db,
+          prefs.capture_system_audio, prefs.capture_microphone,
+          prefs.stereo_internal_recording, prefs.microphone_gain_db,
           prefs.noise_suppression, prefs.echo_cancellation);
     Ok(prefs)
 }

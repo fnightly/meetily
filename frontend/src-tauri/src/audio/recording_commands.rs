@@ -350,16 +350,18 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         recordings_folder,
         capture_system_audio,
         capture_microphone,
+        stereo_internal_recording,
         microphone_gain_db,
         noise_suppression,
         echo_cancellation,
     ) = match super::recording_preferences::load_recording_preferences(&app).await {
         Ok(prefs) => {
-            info!("📋 Loaded recording preferences: auto_save={}, defer_transcription={}, format={}, quality={}, preferred_mic={:?}, preferred_system={:?}, capture_system_audio={}, capture_microphone={}, mic_gain_db={}, noise_suppression={}, echo_cancellation={}",
+            info!("📋 Loaded recording preferences: auto_save={}, defer_transcription={}, format={}, quality={}, preferred_mic={:?}, preferred_system={:?}, capture_system_audio={}, capture_microphone={}, stereo_internal_recording={}, mic_gain_db={}, noise_suppression={}, echo_cancellation={}",
                   prefs.auto_save, prefs.defer_transcription, prefs.file_format, prefs.file_quality,
                   prefs.preferred_mic_device, prefs.preferred_system_device,
                   prefs.capture_system_audio, prefs.capture_microphone,
-                  prefs.microphone_gain_db, prefs.noise_suppression, prefs.echo_cancellation);
+                  prefs.stereo_internal_recording, prefs.microphone_gain_db,
+                  prefs.noise_suppression, prefs.echo_cancellation);
             (
                 prefs.auto_save,
                 prefs.defer_transcription,
@@ -369,6 +371,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
                 Some(prefs.save_folder.clone()),
                 prefs.capture_system_audio,
                 prefs.capture_microphone,
+                prefs.stereo_internal_recording,
                 prefs.microphone_gain_db,
                 prefs.noise_suppression,
                 prefs.echo_cancellation,
@@ -383,6 +386,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
                 None,
                 None,
                 None,
+                true,
                 true,
                 true,
                 0.0,
@@ -421,6 +425,15 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         }
         false
     };
+
+    // Stereo only applies when the computer audio is the sole source; any session
+    // with a microphone stays on the existing mono pipeline byte for byte.
+    let recording_channels = if capture_system_audio && !capture_microphone && stereo_internal_recording {
+        2u16
+    } else {
+        1u16
+    };
+    info!("🎚️ Recording {} channel(s)", recording_channels);
 
     // Loading the speech model and preparing the audio hardware are independent,
     // so they run concurrently instead of back to back. With the model already
@@ -524,6 +537,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     manager.get_state().set_microphone_gain_db(microphone_gain_db);
     manager.get_state().set_noise_suppression(noise_suppression);
     manager.get_state().set_echo_cancellation(echo_cancellation);
+    manager.get_state().set_recording_channels(recording_channels);
 
     // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
     let transcription_receiver = manager
@@ -677,16 +691,18 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         recordings_folder,
         capture_system_audio,
         capture_microphone,
+        stereo_internal_recording,
         microphone_gain_db,
         noise_suppression,
         echo_cancellation,
     ) = match super::recording_preferences::load_recording_preferences(&app).await {
         Ok(prefs) => {
             info!(
-                "📋 Loaded recording preferences: auto_save={}, defer_transcription={}, format={}, quality={}, capture_system_audio={}, capture_microphone={}, mic_gain_db={}, noise_suppression={}, echo_cancellation={}",
+                "📋 Loaded recording preferences: auto_save={}, defer_transcription={}, format={}, quality={}, capture_system_audio={}, capture_microphone={}, stereo_internal_recording={}, mic_gain_db={}, noise_suppression={}, echo_cancellation={}",
                 prefs.auto_save, prefs.defer_transcription, prefs.file_format, prefs.file_quality,
                 prefs.capture_system_audio, prefs.capture_microphone,
-                prefs.microphone_gain_db, prefs.noise_suppression, prefs.echo_cancellation
+                prefs.stereo_internal_recording, prefs.microphone_gain_db,
+                prefs.noise_suppression, prefs.echo_cancellation
             );
             (
                 prefs.auto_save,
@@ -695,6 +711,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
                 Some(prefs.save_folder.clone()),
                 prefs.capture_system_audio,
                 prefs.capture_microphone,
+                prefs.stereo_internal_recording,
                 prefs.microphone_gain_db,
                 prefs.noise_suppression,
                 prefs.echo_cancellation,
@@ -707,6 +724,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
                 false,
                 super::formats::AudioEncodingSettings::default(),
                 None,
+                true,
                 true,
                 true,
                 0.0,
@@ -746,6 +764,15 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         }
         false
     };
+
+    // Stereo only applies when the computer audio is the sole source; any session
+    // with a microphone stays on the existing mono pipeline byte for byte.
+    let recording_channels = if capture_system_audio && !capture_microphone && stereo_internal_recording {
+        2u16
+    } else {
+        1u16
+    };
+    info!("🎚️ Recording {} channel(s)", recording_channels);
 
     // A chosen application replaces the system device rather than joining it:
     // both reach the mixer as `DeviceType::System`, so capturing the whole system
@@ -871,6 +898,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     manager.get_state().set_microphone_gain_db(microphone_gain_db);
     manager.get_state().set_noise_suppression(noise_suppression);
     manager.get_state().set_echo_cancellation(echo_cancellation);
+    manager.get_state().set_recording_channels(recording_channels);
 
     // Start recording with specified devices and auto_save setting.
     //

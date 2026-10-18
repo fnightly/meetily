@@ -37,7 +37,18 @@ pub struct MeetingMetadata {
     pub audio_file: String,
     pub transcript_file: String,
     pub sample_rate: u32,
+    /// Channel count of the stored audio: 1 for mono, 2 for stereo.
+    ///
+    /// Defaulted on deserialization so metadata files written before stereo
+    /// recordings existed still load, and read as mono.
+    #[serde(default = "default_channels")]
+    pub channels: u16,
     pub status: String,  // "recording", "completed", "error"
+}
+
+/// Channel count to assume when a metadata file predates the field.
+fn default_channels() -> u16 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +69,11 @@ pub struct RecordingSaver {
     encoding: super::formats::AudioEncodingSettings,
     /// Base folder this session writes into, taken from the user's preference.
     recordings_folder: Option<PathBuf>,
+    /// Channel count of the chunks this session receives (1 mono, 2 stereo).
+    ///
+    /// `AudioChunk` carries no channel information, so without this the writer
+    /// has no way to know whether interleaved samples are mono or stereo.
+    recording_channels: u16,
 }
 
 impl RecordingSaver {
@@ -71,6 +87,7 @@ impl RecordingSaver {
             is_saving: Arc::new(Mutex::new(false)),
             encoding: super::formats::AudioEncodingSettings::default(),
             recordings_folder: None,
+            recording_channels: 1,
         }
     }
 
@@ -93,6 +110,17 @@ impl RecordingSaver {
     /// "recordings save location" setting had no effect on where audio landed.
     pub fn set_recordings_folder(&mut self, folder: std::path::PathBuf) {
         self.recordings_folder = Some(folder);
+    }
+
+    /// Set how many interleaved channels this session's audio has.
+    ///
+    /// Must be called before `start_accumulation`, which constructs the
+    /// incremental saver that encodes every chunk: the channel count defines how
+    /// those chunks' samples are interpreted and how long the audio really is.
+    pub fn set_recording_channels(&mut self, channels: u16) {
+        // Zero would make every frame/duration calculation zero; the recording
+        // contract only ever sends 1 or 2.
+        self.recording_channels = channels.max(1);
     }
 
     /// Set the meeting name for this recording session
@@ -168,7 +196,10 @@ impl RecordingSaver {
         mut receiver: mpsc::UnboundedReceiver<AudioChunk>,
     ) {
         if auto_save {
-            info!("Initializing incremental audio saver for recording (auto-save ENABLED)");
+            info!(
+                "Initializing incremental audio saver for recording (auto-save ENABLED, {} channel(s))",
+                self.recording_channels
+            );
         } else {
             info!("Starting recording without audio saving (auto-save DISABLED - transcripts only)");
         }
@@ -275,14 +306,20 @@ impl RecordingSaver {
                     &chrono::Utc::now().to_rfc3339(),
                 ));
 
+            let channels = self.recording_channels;
             info!(
-                "Incremental audio saver encoding: {} @ {} kbps",
+                "Incremental audio saver encoding: {} @ {} kbps, {} channel(s)",
                 encoding.format.id(),
-                encoding.quality.bitrate_kbps()
+                encoding.lossy_bitrate_kbps(channels),
+                channels
             );
 
-            let incremental_saver =
-                IncrementalAudioSaver::with_encoding(meeting_folder.clone(), 48000, encoding)?;
+            let incremental_saver = IncrementalAudioSaver::with_encoding(
+                meeting_folder.clone(),
+                48000,
+                channels,
+                encoding,
+            )?;
             self.incremental_saver = Some(Arc::new(AsyncMutex::new(incremental_saver)));
             info!("✅ Incremental audio saver initialized for meeting: {}", meeting_name);
         } else {
@@ -310,6 +347,7 @@ impl RecordingSaver {
             },
             transcript_file: "transcripts.json".to_string(),
             sample_rate: 48000,
+            channels: self.recording_channels,
             status: "recording".to_string(),
         };
 
@@ -533,5 +571,65 @@ impl RecordingSaver {
 impl Default for RecordingSaver {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Metadata as written before the channel field existed.
+    fn legacy_metadata_json() -> serde_json::Value {
+        serde_json::json!({
+            "version": "1.0",
+            "meeting_id": null,
+            "meeting_name": "Old Recording",
+            "created_at": "2026-10-14T09:30:00Z",
+            "completed_at": "2026-10-14T09:40:00Z",
+            "duration_seconds": 600.0,
+            "devices": { "microphone": "Mic", "system_audio": null },
+            "audio_file": "audio.m4a",
+            "transcript_file": "transcripts.json",
+            "sample_rate": 48000,
+            "status": "completed"
+        })
+    }
+
+    #[test]
+    fn metadata_written_before_stereo_reads_as_mono() {
+        // The field is new: an existing recording must still load, and a missing
+        // channel count must mean mono rather than the whole file failing.
+        let metadata: MeetingMetadata =
+            serde_json::from_value(legacy_metadata_json()).expect("legacy metadata must deserialize");
+
+        assert_eq!(metadata.channels, 1);
+        assert_eq!(metadata.sample_rate, 48000);
+    }
+
+    #[test]
+    fn metadata_round_trips_the_channel_count() {
+        let mut value = legacy_metadata_json();
+        value["channels"] = serde_json::json!(2);
+
+        let metadata: MeetingMetadata = serde_json::from_value(value).expect("metadata");
+        assert_eq!(metadata.channels, 2);
+
+        let round_tripped: MeetingMetadata =
+            serde_json::from_str(&serde_json::to_string(&metadata).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(round_tripped.channels, 2);
+    }
+
+    #[test]
+    fn the_saver_defaults_to_mono_until_told_otherwise() {
+        let mut saver = RecordingSaver::new();
+        assert_eq!(saver.recording_channels, 1, "mono is the historical default");
+
+        saver.set_recording_channels(2);
+        assert_eq!(saver.recording_channels, 2);
+
+        // Zero would make the frame and duration maths meaningless.
+        saver.set_recording_channels(0);
+        assert_eq!(saver.recording_channels, 1);
     }
 }

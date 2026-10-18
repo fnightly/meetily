@@ -15,13 +15,25 @@ pub struct AudioInput {
     pub device: Arc<AudioDevice>,
 }
 
+/// Encode interleaved `f32le` samples straight into AAC/MP4.
+///
+/// `channels` is the interleaving of `data` and `bitrate_kbps` the total budget
+/// for all channels: the caller passes a channel-aware value rather than a mono
+/// figure so a stereo recording is not encoded at half its intended quality.
 pub fn encode_single_audio(
     data: &[u8],
     sample_rate: u32,
     channels: u16,
+    bitrate_kbps: u32,
     output_path: &PathBuf,
 ) -> anyhow::Result<()> {
-    debug!("Starting FFmpeg process for {} bytes of audio data", data.len());
+    debug!(
+        "Starting FFmpeg process for {} bytes of audio data ({} Hz, {} ch, {} kbps)",
+        data.len(),
+        sample_rate,
+        channels,
+        bitrate_kbps
+    );
 
     if data.is_empty() {
         return Err(anyhow::anyhow!("No audio data provided for encoding"));
@@ -32,6 +44,8 @@ pub fn encode_single_audio(
     })?;
 
     debug!("Using FFmpeg at: {:?}", ffmpeg_path);
+
+    let bitrate_arg = format!("{}k", bitrate_kbps);
 
     let mut command = Command::new(ffmpeg_path);
     command
@@ -47,7 +61,7 @@ pub fn encode_single_audio(
             "-c:a",
             "aac",
             "-b:a",
-            "192k", // Increased from 64k for better audio quality (especially for speech)
+            bitrate_arg.as_str(),
             "-profile:a",
             "aac_low", // Use AAC-LC profile for better compatibility
             "-movflags",
@@ -110,10 +124,15 @@ pub fn encode_single_audio(
 ///
 /// Returns an error (rather than silently keeping the intermediate file) so the
 /// caller can fall back explicitly and tell the user what happened.
+///
+/// `channels` is the channel count of `input` and of the output: it scales the
+/// lossy bitrate and is written explicitly for PCM, so a stereo recording is
+/// not silently folded to mono on the way out.
 pub fn transcode_audio(
     input: &std::path::Path,
     output: &std::path::Path,
     settings: super::formats::AudioEncodingSettings,
+    channels: u16,
 ) -> anyhow::Result<()> {
     if !input.exists() {
         return Err(anyhow::anyhow!(
@@ -126,7 +145,7 @@ pub fn transcode_audio(
         anyhow::anyhow!("FFmpeg not found. Please install FFmpeg to save recordings.")
     })?;
 
-    let codec_args = settings.ffmpeg_codec_args();
+    let codec_args = settings.ffmpeg_codec_args(channels);
     let metadata_args = settings.ffmpeg_metadata_args();
 
     let mut command = Command::new(&ffmpeg_path);
@@ -175,12 +194,18 @@ pub fn transcode_audio(
         ));
     }
 
+    let bitrate_label = if settings.format.is_lossless() {
+        "lossless".to_string()
+    } else {
+        format!("{} kbps", settings.lossy_bitrate_kbps(channels))
+    };
     tracing::info!(
-        "Transcoded {} -> {} ({} @ {} kbps)",
+        "Transcoded {} -> {} ({} @ {}, {} ch)",
         input.display(),
         output.display(),
         settings.format.id(),
-        settings.quality.bitrate_kbps()
+        bitrate_label,
+        channels.max(1)
     );
 
     Ok(())

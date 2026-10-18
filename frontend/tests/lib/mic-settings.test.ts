@@ -9,6 +9,7 @@ import {
   resolveCaptureSystemAudio,
   resolveEchoCancellation,
   resolveMicrophoneGainDb,
+  resolveStereoInternalRecording,
   resolveNoiseSuppression,
 } from '@/lib/mic-settings';
 
@@ -79,6 +80,13 @@ describe('recording source defaults', () => {
     expect(resolveNoiseSuppression(null)).toBe(false);
     expect(resolveNoiseSuppression(true)).toBe(true);
     expect(resolveNoiseSuppression(false)).toBe(false);
+  });
+
+  test('stereo internal recording is on unless explicitly disabled', () => {
+    expect(resolveStereoInternalRecording(undefined)).toBe(true);
+    expect(resolveStereoInternalRecording(null)).toBe(true);
+    expect(resolveStereoInternalRecording(true)).toBe(true);
+    expect(resolveStereoInternalRecording(false)).toBe(false);
   });
 
   test('experimental echo cancellation is off unless explicitly enabled', () => {

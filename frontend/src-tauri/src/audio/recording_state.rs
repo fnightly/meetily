@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -165,6 +165,10 @@ pub struct RecordingState {
     /// Runtime switch for echo cancellation. The pipeline builds its canceller when
     /// the pipeline starts, so it must be set before recording starts.
     echo_cancellation: AtomicBool,
+    /// Channel count the recorder writes: 1 for every microphone/mixed session, 2 for
+    /// a stereo internal (system-audio-only) recording. Read by the capture pipeline
+    /// and the saver, so it must be set before recording starts.
+    recording_channels: AtomicU16,
 }
 
 impl RecordingState {
@@ -189,6 +193,7 @@ impl RecordingState {
             microphone_gain_db: AtomicU32::new(0.0f32.to_bits()),
             noise_suppression: AtomicBool::new(false),
             echo_cancellation: AtomicBool::new(false),
+            recording_channels: AtomicU16::new(1),
         })
     }
 
@@ -236,6 +241,19 @@ impl RecordingState {
 
     pub fn echo_cancellation_enabled(&self) -> bool {
         self.echo_cancellation.load(Ordering::SeqCst)
+    }
+
+    /// Set the channel count the recorder writes for this session.
+    ///
+    /// Only mono and stereo exist; the capture and saver paths both branch on 2, so
+    /// an out-of-range value is clamped rather than stored.
+    pub fn set_recording_channels(&self, channels: u16) {
+        self.recording_channels
+            .store(channels.clamp(1, 2), Ordering::SeqCst);
+    }
+
+    pub fn recording_channels(&self) -> u16 {
+        self.recording_channels.load(Ordering::SeqCst)
     }
 
     // Recording control
@@ -520,6 +538,7 @@ impl Default for RecordingState {
             microphone_gain_db: AtomicU32::new(0.0f32.to_bits()),
             noise_suppression: AtomicBool::new(false),
             echo_cancellation: AtomicBool::new(false),
+            recording_channels: AtomicU16::new(1),
         }
     }
 }
@@ -567,6 +586,21 @@ mod tests {
 
         state.set_microphone_gain_db(f32::INFINITY);
         assert_eq!(state.microphone_gain_db(), 0.0);
+    }
+
+    #[test]
+    fn recording_channels_round_trip_and_clamp() {
+        let state = RecordingState::new();
+        assert_eq!(state.recording_channels(), 1, "sessions default to mono");
+
+        state.set_recording_channels(2);
+        assert_eq!(state.recording_channels(), 2);
+
+        state.set_recording_channels(0);
+        assert_eq!(state.recording_channels(), 1);
+
+        state.set_recording_channels(7);
+        assert_eq!(state.recording_channels(), 2);
     }
 
     #[test]

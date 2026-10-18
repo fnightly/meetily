@@ -58,6 +58,11 @@ export function resolveEchoCancellation(value: boolean | null | undefined): bool
   return value === true;
 }
 
+/** Stereo internal recording is on by default; an explicit false disables it. */
+export function resolveStereoInternalRecording(value: boolean | null | undefined): boolean {
+  return value !== false;
+}
+
 /**
  * Format a gain for display with an explicit sign on positive values.
  *

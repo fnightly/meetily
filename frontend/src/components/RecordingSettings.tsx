@@ -21,6 +21,7 @@ import {
   formatGainDb,
   resolveCaptureMicrophone,
   resolveCaptureSystemAudio,
+  resolveStereoInternalRecording,
   resolveMicrophoneGainDb,
   resolveEchoCancellation,
   resolveNoiseSuppression,
@@ -57,6 +58,8 @@ export interface RecordingPreferences {
   noise_suppression?: boolean;
   /** Experimental WebRTC AEC3 echo suppression on the microphone track. */
   echo_cancellation?: boolean;
+  /** Save computer-audio-only recordings as stereo. Ignored in other modes. */
+  stereo_internal_recording?: boolean;
 }
 
 /** What a recording captures: both sources, external (mic), or internal (system). */
@@ -110,7 +113,8 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     capture_microphone: true,
     microphone_gain_db: DEFAULT_MICROPHONE_GAIN_DB,
     noise_suppression: false,
-    echo_cancellation: false
+    echo_cancellation: false,
+    stereo_internal_recording: true
   });
   const [encodingOptions, setEncodingOptions] = useState<RecordingEncodingOptions | null>(null);
   const [purgePreview, setPurgePreview] = useState<string | null>(null);
@@ -155,6 +159,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
           microphone_gain_db: resolveMicrophoneGainDb(prefs.microphone_gain_db),
           noise_suppression: resolveNoiseSuppression(prefs.noise_suppression),
           echo_cancellation: resolveEchoCancellation(prefs.echo_cancellation),
+          stereo_internal_recording: resolveStereoInternalRecording(prefs.stereo_internal_recording),
         };
         setPreferences(normalized);
         persistedGainRef.current = normalized.microphone_gain_db ?? DEFAULT_MICROPHONE_GAIN_DB;
@@ -339,6 +344,16 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     await savePreferences(newPreferences);
 
     await Analytics.track('recording_source_changed', { source });
+  };
+
+  const handleStereoInternalToggle = async (enabled: boolean) => {
+    const newPreferences = { ...preferences, stereo_internal_recording: enabled };
+    setPreferences(newPreferences);
+    await savePreferences(newPreferences);
+
+    await Analytics.track('stereo_internal_recording_toggled', {
+      enabled: enabled.toString()
+    });
   };
 
   // Dragging the slider only touches local state; the backend is written on
@@ -859,6 +874,21 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
                 </span>
               </label>
             </fieldset>
+
+            {recordingSource === 'system' && (
+              <div className="space-y-1">
+                <div className="flex items-center justify-between gap-4">
+                  <Label htmlFor="rec-stereo-internal">{t('recording.stereoInternal')}</Label>
+                  <Switch
+                    id="rec-stereo-internal"
+                    checked={preferences.stereo_internal_recording !== false}
+                    onCheckedChange={handleStereoInternalToggle}
+                    disabled={controlsLocked}
+                  />
+                </div>
+                <p className="text-xs text-slate-500">{t('recording.stereoInternalHint')}</p>
+              </div>
+            )}
 
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-3">

@@ -37,10 +37,15 @@ pub fn spawn_process_capture(
     use crate::audio::recording_state::{AudioChunk, DeviceType};
     use std::time::Duration;
 
+    // The session decides once, before recording starts, whether the file is mono or
+    // stereo; asking WASAPI for stereo only when the recorder writes stereo keeps the
+    // microphone-involving paths byte-identical to before.
+    let channels = state.recording_channels();
+
     std::thread::Builder::new()
         .name("app-audio-capture".to_string())
         .spawn(move || {
-            let capture = match start_process_capture(process_id) {
+            let capture = match start_process_capture(process_id, channels) {
                 Ok(capture) => capture,
                 Err(e) => {
                     // Reported through the log rather than the recording error channel:
@@ -51,7 +56,9 @@ pub fn spawn_process_capture(
                 }
             };
 
-            log::info!("Capturing application {process_id} as system audio");
+            log::info!(
+                "Capturing application {process_id} as system audio ({channels} channel(s))"
+            );
             let mut chunk_id: u64 = 0;
 
             // Keep draining while paused: the buffer would otherwise overflow and
@@ -161,6 +168,8 @@ mod imp {
         /// Held so the stream stays open; dropping it stops capture.
         _client: IAudioClient,
         capture: IAudioCaptureClient,
+        /// Interleaved channel count requested from WASAPI (1 or 2).
+        channels: u16,
     }
 
     impl ProcessCapture {
@@ -184,13 +193,15 @@ mod imp {
                     break;
                 }
 
-                // The requested format is f32 mono, so the buffer holds `frames` samples.
+                // The requested format is f32 interleaved, so the buffer holds
+                // `frames * channels` samples.
                 // 0x2 is AUDCLNT_BUFFERFLAGS_SILENT: a silent packet carries no audio, and
                 // keeping it would look like the application went quiet.
                 let silent = flags & 0x2 != 0;
                 if !data.is_null() && !silent {
+                    let sample_count = frames as usize * self.channels as usize;
                     let slice =
-                        unsafe { std::slice::from_raw_parts(data as *const f32, frames as usize) };
+                        unsafe { std::slice::from_raw_parts(data as *const f32, sample_count) };
                     samples.extend_from_slice(slice);
                 }
 
@@ -249,7 +260,8 @@ mod imp {
     /// `process_id` should come from `app_audio::list_audio_apps`. The tree scope includes
     /// audio played by that process's children, which is what makes a meeting app whose
     /// playback lives in a helper process actually recordable.
-    pub fn start_process_capture(process_id: u32) -> Result<ProcessCapture, String> {
+    pub fn start_process_capture(process_id: u32, channels: u16) -> Result<ProcessCapture, String> {
+        let channels = channels.clamp(1, 2);
         // The activation needs COM on the calling thread, and on Windows the callback is
         // delivered through a multi-threaded apartment. Without this the call is made on
         // an uninitialised apartment and corrupts the heap rather than returning an error.
@@ -293,13 +305,14 @@ mod imp {
             .map_err(|_| "the process loopback activation timed out".to_string())??;
         // Process loopback clients take a plain PCM format and do not use a shared-mode
         // period, unlike device clients.
+        let block_align = 4u16 * channels;
         let mut format = windows::Win32::Media::Audio::WAVEFORMATEX {
             wFormatTag: 3, // WAVE_FORMAT_IEEE_FLOAT
-            nChannels: 1,
+            nChannels: channels,
             nSamplesPerSec: CAPTURE_SAMPLE_RATE,
             wBitsPerSample: 32,
-            nBlockAlign: 4,
-            nAvgBytesPerSec: CAPTURE_SAMPLE_RATE * 4,
+            nBlockAlign: block_align,
+            nAvgBytesPerSec: CAPTURE_SAMPLE_RATE * block_align as u32,
             cbSize: 0,
         };
 
@@ -326,6 +339,7 @@ mod imp {
             Ok(ProcessCapture {
                 _client: client,
                 capture,
+                channels,
             })
         }
     }
@@ -347,7 +361,7 @@ mod tests {
         let target = apps.first().expect("nothing is playing audio right now");
         println!("capturing from {} (pid {})", target.display_name, target.process_ids[0]);
 
-        let capture = start_process_capture(target.process_ids[0]).expect("start capture");
+        let capture = start_process_capture(target.process_ids[0], 1).expect("start capture");
         println!("capture stream started");
 
 

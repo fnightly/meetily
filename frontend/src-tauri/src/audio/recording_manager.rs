@@ -241,16 +241,26 @@ impl RecordingManager {
         recordings_folder: Option<std::path::PathBuf>,
         allow_external_source: bool,
     ) -> std::result::Result<mpsc::UnboundedReceiver<AudioChunk>, RecordingStartError> {
+        // The session's channel count decides how the writer interprets every
+        // chunk it receives; the pipeline reads the same value to decide whether
+        // to send interleaved stereo. It is published before the pipeline starts.
+        let recording_channels = self.state.recording_channels();
+
         info!(
-            "Starting recording manager (auto_save: {}, defer_transcription: {}, format: {})",
+            "Starting recording manager (auto_save: {}, defer_transcription: {}, format: {}, channels: {})",
             auto_save,
             defer_transcription,
-            encoding.format.id()
+            encoding.format.id(),
+            recording_channels
         );
 
         // Must be set before `start_accumulation`, which constructs the saver
         // that performs the encoding.
         self.recording_saver.set_encoding_settings(encoding);
+
+        // Same reason: the channel count is read when the incremental saver is
+        // built, and defines how the interleaved samples are interpreted.
+        self.recording_saver.set_recording_channels(recording_channels);
 
         // Where the audio lands. Set here for the same reason as the encoding: the
         // saver reads it once, when it builds the meeting folder.

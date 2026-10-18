@@ -185,6 +185,81 @@ impl ProfessionalAudioMixer {
     }
 }
 
+/// Average interleaved L/R pairs into a mono stream.
+///
+/// The internal recording keeps the untouched stereo chunks; this copy exists only so
+/// VAD and transcription still see the single channel they expect.
+fn downmix_interleaved_stereo(interleaved: &[f32]) -> Vec<f32> {
+    interleaved
+        .chunks_exact(2)
+        .map(|pair| (pair[0] + pair[1]) * 0.5)
+        .collect()
+}
+
+/// Duplicate a mono stream into interleaved L/R pairs.
+fn mono_to_interleaved_stereo(mono: &[f32]) -> Vec<f32> {
+    let mut stereo = Vec::with_capacity(mono.len() * 2);
+    for &sample in mono {
+        stereo.push(sample);
+        stereo.push(sample);
+    }
+    stereo
+}
+
+/// Average every frame of an interleaved stream with `channels` channels into mono.
+fn downmix_frames_to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
+    let channels = channels.max(1);
+    interleaved
+        .chunks_exact(channels)
+        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+        .collect()
+}
+
+/// Resample interleaved stereo by resampling each channel, returning the input
+/// unchanged at 48 kHz.
+fn resample_interleaved_stereo(interleaved: &[f32], from: u32, to: u32) -> Vec<f32> {
+    if from == to {
+        return interleaved.to_vec();
+    }
+    let left: Vec<f32> = interleaved.iter().copied().step_by(2).collect();
+    let right: Vec<f32> = interleaved.iter().copied().skip(1).step_by(2).collect();
+    let left = super::audio_processing::resample_audio(&left, from, to);
+    let right = super::audio_processing::resample_audio(&right, from, to);
+
+    let frames = left.len().min(right.len());
+    let mut stereo = Vec::with_capacity(frames * 2);
+    for index in 0..frames {
+        stereo.push(left[index]);
+        stereo.push(right[index]);
+    }
+    stereo
+}
+
+/// Resampling parameters for one device rate.
+///
+/// Kept in one place so the mono and stereo persistent resamplers cannot drift apart;
+/// this mirrors the choice made by `audio_processing::resample_audio`.
+fn sinc_params_for_ratio(ratio: f64) -> SincInterpolationParameters {
+    let (sinc_len, interpolation, oversampling) = if ratio >= 2.0 {
+        (512, SincInterpolationType::Cubic, 512)
+    } else if ratio >= 1.5 {
+        (384, SincInterpolationType::Cubic, 384)
+    } else if ratio > 1.0 {
+        (256, SincInterpolationType::Linear, 256)
+    } else if ratio <= 0.5 {
+        (512, SincInterpolationType::Cubic, 512)
+    } else {
+        (384, SincInterpolationType::Linear, 384)
+    };
+    SincInterpolationParameters {
+        sinc_len,
+        f_cutoff: 0.95,
+        interpolation,
+        oversampling_factor: oversampling,
+        window: WindowFunction::BlackmanHarris2,
+    }
+}
+
 /// Simplified audio capture without broadcast channels
 #[derive(Clone)]
 pub struct AudioCapture {
@@ -200,6 +275,11 @@ pub struct AudioCapture {
     // Buffering for variable-size chunks → fixed-size resampler input
     resampler_input_buffer: Arc<std::sync::Mutex<Vec<f32>>>,
     resampler_chunk_size: usize,  // Fixed chunk size for resampler (512 samples)
+    // Interleaved stereo system capture for internal recordings: rubato needs one
+    // buffer per channel, and the output is interleaved again before sending.
+    stereo_recording: bool,
+    stereo_resampler: Arc<std::sync::Mutex<Option<SincFixedIn<f32>>>>,
+    stereo_resampler_input: Arc<std::sync::Mutex<Vec<Vec<f32>>>>,
     // Audio enhancement processors (microphone only)
     noise_suppressor: Arc<std::sync::Mutex<Option<NoiseSuppressionProcessor>>>,
     high_pass_filter: Arc<std::sync::Mutex<Option<HighPassFilter>>>,
@@ -224,6 +304,17 @@ impl AudioCapture {
         // Pipeline expects 48kHz, but Bluetooth devices often report 8kHz, 16kHz, or 44.1kHz
         const TARGET_SAMPLE_RATE: u32 = 48000;
         let needs_resampling = sample_rate != TARGET_SAMPLE_RATE;
+
+        // Only a system capture in a stereo internal recording produces stereo; every
+        // mode that involves the microphone keeps the mono path exactly as it was.
+        let stereo_recording =
+            device_type == DeviceType::System && state.recording_channels() == 2;
+        if stereo_recording {
+            info!(
+                "🎧 System capture '{}' will be recorded as interleaved stereo",
+                device.name
+            );
+        }
 
         // Detect device kind (Bluetooth vs Wired) for adaptive processing
         // Use reasonable defaults for buffer size (512 samples is typical)
@@ -315,29 +406,9 @@ impl AudioCapture {
         // Use fixed chunk size of 512 samples with buffering for variable-size input
         const RESAMPLER_CHUNK_SIZE: usize = 512;
 
-        let resampler = if needs_resampling {
+        let resampler = if needs_resampling && !stereo_recording {
             let ratio = TARGET_SAMPLE_RATE as f64 / sample_rate as f64;
-
-            // Adaptive parameters based on sample rate ratio (same logic as resample_audio)
-            let (sinc_len, interpolation_type, oversampling) = if ratio >= 2.0 {
-                (512, SincInterpolationType::Cubic, 512)
-            } else if ratio >= 1.5 {
-                (384, SincInterpolationType::Cubic, 384)
-            } else if ratio > 1.0 {
-                (256, SincInterpolationType::Linear, 256)
-            } else if ratio <= 0.5 {
-                (512, SincInterpolationType::Cubic, 512)
-            } else {
-                (384, SincInterpolationType::Linear, 384)
-            };
-
-            let params = SincInterpolationParameters {
-                sinc_len,
-                f_cutoff: 0.95,
-                interpolation: interpolation_type,
-                oversampling_factor: oversampling,
-                window: WindowFunction::BlackmanHarris2,
-            };
+            let params = sinc_params_for_ratio(ratio);
 
             match SincFixedIn::<f32>::new(
                 ratio,
@@ -361,6 +432,32 @@ impl AudioCapture {
             None
         };
 
+        // The persistent two-channel resampler is only useful for the stereo system
+        // path; it also gets its own per-channel buffers, since rubato wants
+        // deinterleaved input.
+        let stereo_resampler = if needs_resampling && stereo_recording {
+            let ratio = TARGET_SAMPLE_RATE as f64 / sample_rate as f64;
+            let params = sinc_params_for_ratio(ratio);
+            match SincFixedIn::<f32>::new(ratio, 2.0, params, RESAMPLER_CHUNK_SIZE, 2) {
+                Ok(resampler) => {
+                    info!(
+                        "✅ Stereo resampler initialized for '{}' ({}Hz → {}Hz, 2 channels)",
+                        device.name, sample_rate, TARGET_SAMPLE_RATE
+                    );
+                    Some(resampler)
+                }
+                Err(e) => {
+                    warn!(
+                        "⚠️ Failed to create stereo resampler: {}, will use per-chunk fallback",
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Self {
             device,
             state,
@@ -372,6 +469,12 @@ impl AudioCapture {
             resampler: Arc::new(std::sync::Mutex::new(resampler)),
             resampler_input_buffer: Arc::new(std::sync::Mutex::new(Vec::with_capacity(RESAMPLER_CHUNK_SIZE * 2))),
             resampler_chunk_size: RESAMPLER_CHUNK_SIZE,
+            stereo_recording,
+            stereo_resampler: Arc::new(std::sync::Mutex::new(stereo_resampler)),
+            stereo_resampler_input: Arc::new(std::sync::Mutex::new(vec![
+                Vec::with_capacity(RESAMPLER_CHUNK_SIZE * 2),
+                Vec::with_capacity(RESAMPLER_CHUNK_SIZE * 2),
+            ])),
             noise_suppressor: Arc::new(std::sync::Mutex::new(noise_suppressor)),
             high_pass_filter: Arc::new(std::sync::Mutex::new(high_pass_filter)),
             normalizer: Arc::new(std::sync::Mutex::new(normalizer)),
@@ -425,6 +528,13 @@ impl AudioCapture {
     pub fn process_audio_data(&self, data: &[f32]) {
         // Check if still recording
         if !self.state.is_recording() {
+            return;
+        }
+
+        // Internal recordings keep the system stream interleaved and stereo end to
+        // end; the mixer exists to combine two sources and there is only one here.
+        if self.stereo_recording {
+            self.process_stereo_system_audio(data);
             return;
         }
 
@@ -698,6 +808,117 @@ impl AudioCapture {
         }
     }
 
+    /// Build and send one interleaved 48 kHz stereo chunk from the system device.
+    ///
+    /// Nothing else in the capture path touches this stream: stereo recording exists
+    /// to keep the computer audio as it arrived, so no gain, filter or normaliser is
+    /// applied here.
+    fn process_stereo_system_audio(&self, data: &[f32]) {
+        if data.is_empty() {
+            return;
+        }
+
+        // The meter reads what the device delivered, matching the mono path.
+        self.report_level(data);
+
+        let channels = self.channels.max(1) as usize;
+        let frames = data.len() / channels;
+        let stereo = match channels {
+            1 => mono_to_interleaved_stereo(&data[..frames]),
+            2 => data[..frames * 2].to_vec(),
+            // More than two channels: collapse to mono, then keep the file stereo with
+            // identical channels. Mapping surround channels onto L/R would need a
+            // downmix matrix this pipeline has no business inventing.
+            _ => mono_to_interleaved_stereo(&downmix_frames_to_mono(
+                &data[..frames * channels],
+                channels,
+            )),
+        };
+
+        let stereo = if self.needs_resampling {
+            match self.resample_stereo(&stereo) {
+                Some(resampled) => resampled,
+                // The resampler is buffering a partial chunk; the rest arrives next call.
+                None => return,
+            }
+        } else {
+            stereo
+        };
+        if stereo.is_empty() {
+            return;
+        }
+
+        let chunk_id = self
+            .chunk_counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let chunk = AudioChunk {
+            data: stereo,
+            sample_rate: 48_000,
+            timestamp: self.state.get_recording_duration().unwrap_or(0.0),
+            chunk_id,
+            device_type: DeviceType::System,
+        };
+
+        match self.state.send_audio_chunk(chunk) {
+            Ok(()) => debug!("Sent stereo system chunk {} ({} samples)", chunk_id, data.len()),
+            Err(e) => {
+                if !e.to_string().contains("Audio pipeline not ready") {
+                    warn!("Failed to send stereo system chunk: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Resample interleaved stereo to 48 kHz through the persistent two-channel
+    /// resampler, buffering whole 512-frame chunks.
+    fn resample_stereo(&self, interleaved: &[f32]) -> Option<Vec<f32>> {
+        let Ok(mut resampler_guard) = self.stereo_resampler.lock() else {
+            return Some(resample_interleaved_stereo(interleaved, self.sample_rate, 48_000));
+        };
+        let Some(resampler) = resampler_guard.as_mut() else {
+            // Building the persistent resampler failed at startup; per-chunk
+            // resampling still produces the right samples, just with less state.
+            return Some(resample_interleaved_stereo(interleaved, self.sample_rate, 48_000));
+        };
+
+        let Ok(mut buffers) = self.stereo_resampler_input.lock() else {
+            return None;
+        };
+        for frame in interleaved.chunks_exact(2) {
+            buffers[0].push(frame[0]);
+            buffers[1].push(frame[1]);
+        }
+
+        let mut output = Vec::with_capacity(interleaved.len());
+        while buffers[0].len() >= self.resampler_chunk_size {
+            let chunk: Vec<Vec<f32>> = buffers
+                .iter_mut()
+                .map(|channel| channel.drain(0..self.resampler_chunk_size).collect())
+                .collect();
+            match resampler.process(&chunk, None) {
+                Ok(mut waves) if waves.len() == 2 => {
+                    let right = waves.pop()?;
+                    let left = waves.pop()?;
+                    for (left, right) in left.iter().zip(right.iter()) {
+                        output.push(*left);
+                        output.push(*right);
+                    }
+                }
+                Ok(_) => return None,
+                Err(e) => {
+                    warn!("⚠️ Stereo resampler failed: {}", e);
+                    return None;
+                }
+            }
+        }
+
+        if output.is_empty() {
+            None
+        } else {
+            Some(output)
+        }
+    }
+
     /// Handle stream errors with enhanced disconnect detection
     pub fn handle_stream_error(&self, error: cpal::StreamError) {
         error!("Audio stream error for {}: {}", self.device.name, error);
@@ -749,6 +970,9 @@ pub struct AudioPipeline {
     echo_canceller: Arc<std::sync::Mutex<Option<EchoCanceller>>>,
     // Recording sender for pre-mixed audio
     recording_sender_for_mixed: Option<mpsc::UnboundedSender<AudioChunk>>,
+    /// Channels the recorder writes for this session, read once at construction so the
+    /// hot path never consults session state.
+    recording_channels: u16,
 }
 
 impl AudioPipeline {
@@ -825,6 +1049,11 @@ impl AudioPipeline {
         // Note: target_chunk_duration_ms is ignored - VAD controls segmentation now
         let _ = target_chunk_duration_ms;
 
+        let recording_channels = state.recording_channels();
+        if recording_channels == 2 {
+            info!("🎧 Pipeline using the stereo internal-recording path");
+        }
+
         Ok(Self {
             receiver,
             transcription_sender,
@@ -838,6 +1067,7 @@ impl AudioPipeline {
             mixer,
             echo_canceller,
             recording_sender_for_mixed: None,  // Will be set by manager
+            recording_channels,
         })
     }
 
@@ -893,10 +1123,28 @@ impl AudioPipeline {
                         self.last_summary_time = std::time::Instant::now();
                     }
 
-                    // STEP 1: Add raw audio to ring buffer for mixing
-                    // Microphone audio is already normalized at capture level (AudioCapture)
-                    // System audio remains raw
-                    self.ring_buffer.add_samples(chunk.device_type.clone(), chunk.data);
+                    // STEP 1: A stereo internal recording bypasses the mixer: the
+                    // untouched interleaved chunks go straight to the recorder, and a
+                    // mono downmix feeds the ring buffer so VAD/transcription keep
+                    // working as they do for every other session.
+                    let stereo_system =
+                        self.recording_channels == 2 && chunk.device_type == DeviceType::System;
+                    let chunk_data = if stereo_system {
+                        if let Some(ref sender) = self.recording_sender_for_mixed {
+                            let stereo_chunk = AudioChunk {
+                                data: chunk.data.clone(),
+                                sample_rate: 48_000,
+                                timestamp: chunk.timestamp,
+                                chunk_id: chunk.chunk_id,
+                                device_type: DeviceType::System,
+                            };
+                            let _ = sender.send(stereo_chunk);
+                        }
+                        downmix_interleaved_stereo(&chunk.data)
+                    } else {
+                        chunk.data
+                    };
+                    self.ring_buffer.add_samples(chunk.device_type.clone(), chunk_data);
 
                     // STEP 2: Mix audio in fixed windows when both streams have sufficient data
                     while self.ring_buffer.can_mix() {
@@ -949,16 +1197,20 @@ impl AudioPipeline {
                                 }
                             }
 
-                            // STEP 4: Send mixed audio for recording (WAV file)
-                            if let Some(ref sender) = self.recording_sender_for_mixed {
-                                let recording_chunk = AudioChunk {
-                                    data: mixed_with_gain.clone(),
-                                    sample_rate: self.sample_rate,
-                                    timestamp: chunk.timestamp,
-                                    chunk_id: self.chunk_id_counter,
-                                    device_type: DeviceType::Microphone,  // Mixed audio
-                                };
-                                let _ = sender.send(recording_chunk);
+                            // STEP 4: Send mixed audio for recording (WAV file). The
+                            // stereo internal recording has no mixer output to save: its
+                            // interleaved source was forwarded before the downmix.
+                            if !stereo_system {
+                                if let Some(ref sender) = self.recording_sender_for_mixed {
+                                    let recording_chunk = AudioChunk {
+                                        data: mixed_with_gain.clone(),
+                                        sample_rate: self.sample_rate,
+                                        timestamp: chunk.timestamp,
+                                        chunk_id: self.chunk_id_counter,
+                                        device_type: DeviceType::Microphone,  // Mixed audio
+                                    };
+                                    let _ = sender.send(recording_chunk);
+                                }
                             }
                         }
                     }
@@ -1268,6 +1520,69 @@ mod tests {
             );
         }
         assert!(mixed.iter().all(|s| s.is_finite() && s.abs() < 1.0));
+    }
+
+    #[test]
+    fn downmix_averages_interleaved_stereo_pairs() {
+        let stereo = [0.4f32, 1.0, -0.2, 0.0, 0.6, 0.2];
+        let mono = downmix_interleaved_stereo(&stereo);
+        let expected = [0.7f32, -0.1, 0.4];
+
+        assert_eq!(mono.len(), expected.len());
+        for (mono, expected) in mono.iter().zip(expected.iter()) {
+            assert!((mono - expected).abs() < 1e-6, "{mono} != {expected}");
+        }
+    }
+
+    #[test]
+    fn mono_is_duplicated_into_interleaved_stereo() {
+        let mono = [0.1f32, -0.2, 0.3];
+        assert_eq!(
+            mono_to_interleaved_stereo(&mono),
+            vec![0.1, 0.1, -0.2, -0.2, 0.3, 0.3]
+        );
+    }
+
+    #[test]
+    fn wide_devices_downmix_to_mono_before_duplication() {
+        // 4-channel device: each frame becomes the average of its channels.
+        let interleaved = [1.0f32, 0.0, 0.0, 0.0, 0.2, 0.2, 0.2, 0.2];
+        let mono = downmix_frames_to_mono(&interleaved, 4);
+
+        assert_eq!(mono.len(), 2);
+        assert!((mono[0] - 0.25).abs() < 1e-6, "frame 0: {}", mono[0]);
+        assert!((mono[1] - 0.2).abs() < 1e-6, "frame 1: {}", mono[1]);
+    }
+
+    #[test]
+    fn stereo_resampling_is_a_passthrough_at_48k() {
+        let stereo = [0.1f32, -0.1, 0.2, -0.2];
+        assert_eq!(resample_interleaved_stereo(&stereo, 48_000, 48_000), stereo);
+    }
+
+    #[test]
+    fn stereo_resampling_preserves_channel_order() {
+        // The fallback resamples each channel independently; a constant left channel
+        // and a silent right channel must keep that layout.
+        let frames = 2_000;
+        let mut stereo = Vec::with_capacity(frames * 2);
+        for _ in 0..frames {
+            stereo.push(0.5);
+            stereo.push(0.0);
+        }
+
+        let resampled = resample_interleaved_stereo(&stereo, 44_100, 48_000);
+
+        assert!(!resampled.is_empty());
+        assert_eq!(resampled.len() % 2, 0, "output must stay interleaved");
+        for pair in resampled.chunks_exact(2) {
+            assert!(pair[0] > 0.4, "left channel was lost: {}", pair[0]);
+            assert!(
+                pair[1].abs() < 0.01,
+                "left channel leaked into the right: {}",
+                pair[1]
+            );
+        }
     }
 
     #[test]

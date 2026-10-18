@@ -318,7 +318,22 @@ impl AudioEncodingSettings {
         args
     }
 
+    /// Target bitrate for a lossy encoding of `channels` channels.
+    ///
+    /// Bitrate is per audio stream, so stereo needs roughly twice the mono
+    /// budget to sound the same. The 320 kbit/s ceiling keeps the value inside
+    /// what AAC and MP3 encoders accept and matches the UI's quality labels;
+    /// mono is unchanged (64/128/192/256).
+    pub fn lossy_bitrate_kbps(&self, channels: u16) -> u32 {
+        (self.quality.bitrate_kbps() * channels.max(1) as u32).min(320)
+    }
+
     /// FFmpeg arguments that select the codec and quality for this format.
+    ///
+    /// `channels` is the session's channel count: it scales the lossy bitrate
+    /// and is written explicitly for PCM, where omitting it would let FFmpeg
+    /// keep the input layout and where the old hardcoded `-ac 1` folded stereo
+    /// back to mono.
     ///
     /// Lossless formats deliberately omit `-b:a`: passing a bitrate to FLAC or
     /// PCM is either rejected or silently ignored, and omitting it keeps the
@@ -326,16 +341,20 @@ impl AudioEncodingSettings {
     ///
     /// When [`Self::copy_stream`] is set, the audio is copied untouched and only
     /// the container and tags are rewritten.
-    pub fn ffmpeg_codec_args(&self) -> Vec<String> {
+    pub fn ffmpeg_codec_args(&self, channels: u16) -> Vec<String> {
         if self.copy_stream {
             return vec!["-c:a".to_string(), "copy".to_string()];
         }
+
+        // Zero would ask for a zero-channel output; the recording contract only
+        // ever sends 1 or 2, and mono is the safe reading of a missing value.
+        let channels = channels.max(1);
 
         let mut args = vec!["-c:a".to_string(), self.format.ffmpeg_encoder().to_string()];
 
         if !self.format.is_lossless() {
             args.push("-b:a".to_string());
-            args.push(format!("{}k", self.quality.bitrate_kbps()));
+            args.push(format!("{}k", self.lossy_bitrate_kbps(channels)));
         }
 
         match self.format {
@@ -359,8 +378,10 @@ impl AudioEncodingSettings {
                 args.push("on".to_string());
             }
             RecordingFormat::Wav => {
+                // Without an explicit count FFmpeg keeps the input layout; a
+                // hardcoded mono here silently folded stereo recordings down.
                 args.push("-ac".to_string());
-                args.push("1".to_string());
+                args.push(channels.to_string());
             }
             RecordingFormat::Flac => {
                 args.push("-compression_level".to_string());
@@ -415,7 +436,7 @@ mod tests {
     fn lossless_formats_omit_the_bitrate_flag() {
         for format in [RecordingFormat::Wav, RecordingFormat::Flac] {
             assert!(format.is_lossless());
-            let args = AudioEncodingSettings::new(format, RecordingQuality::Best).ffmpeg_codec_args();
+            let args = AudioEncodingSettings::new(format, RecordingQuality::Best).ffmpeg_codec_args(1);
             assert!(
                 !args.iter().any(|a| a == "-b:a"),
                 "{} must not pass a bitrate",
@@ -428,7 +449,7 @@ mod tests {
     fn lossy_formats_pass_a_bitrate() {
         for format in [RecordingFormat::M4a, RecordingFormat::Mp3, RecordingFormat::Ogg] {
             assert!(!format.is_lossless());
-            let args = AudioEncodingSettings::new(format, RecordingQuality::High).ffmpeg_codec_args();
+            let args = AudioEncodingSettings::new(format, RecordingQuality::High).ffmpeg_codec_args(1);
             let position = args.iter().position(|a| a == "-b:a");
             assert!(position.is_some(), "{} must pass a bitrate", format.id());
             assert_eq!(args[position.unwrap() + 1], "192k");
@@ -439,17 +460,17 @@ mod tests {
     fn codec_args_start_with_the_expected_encoder() {
         assert_eq!(
             AudioEncodingSettings::new(RecordingFormat::Mp3, RecordingQuality::Medium)
-                .ffmpeg_codec_args()[..2],
+                .ffmpeg_codec_args(1)[..2],
             ["-c:a".to_string(), "libmp3lame".to_string()]
         );
         assert_eq!(
             AudioEncodingSettings::new(RecordingFormat::Ogg, RecordingQuality::Medium)
-                .ffmpeg_codec_args()[..2],
+                .ffmpeg_codec_args(1)[..2],
             ["-c:a".to_string(), "libopus".to_string()]
         );
         assert_eq!(
             AudioEncodingSettings::new(RecordingFormat::M4a, RecordingQuality::Medium)
-                .ffmpeg_codec_args()[..2],
+                .ffmpeg_codec_args(1)[..2],
             ["-c:a".to_string(), "aac".to_string()]
         );
     }
@@ -457,7 +478,7 @@ mod tests {
     #[test]
     fn m4a_keeps_streaming_optimisation() {
         let args = AudioEncodingSettings::new(RecordingFormat::M4a, RecordingQuality::Medium)
-            .ffmpeg_codec_args();
+            .ffmpeg_codec_args(1);
         assert!(args.iter().any(|a| a == "+faststart"));
         assert!(args.iter().any(|a| a == "aac_low"));
     }
@@ -590,7 +611,7 @@ mod tests {
         let mut settings =
             AudioEncodingSettings::new(RecordingFormat::M4a, RecordingQuality::Best);
         assert_eq!(
-            settings.ffmpeg_codec_args()[..2],
+            settings.ffmpeg_codec_args(1)[..2],
             ["-c:a".to_string(), "aac".to_string()]
         );
 
@@ -598,7 +619,7 @@ mod tests {
         // Remuxing must not re-encode: otherwise finalizing a long recording
         // would cost a full decode/encode pass for a container-only change.
         assert_eq!(
-            settings.ffmpeg_codec_args(),
+            settings.ffmpeg_codec_args(1),
             vec!["-c:a".to_string(), "copy".to_string()]
         );
     }
@@ -612,5 +633,97 @@ mod tests {
         assert_eq!(settings.quality, RecordingQuality::Low);
         assert!(settings.tags.is_some());
         assert!(!settings.copy_stream);
+    }
+
+    fn bitrate_arg(args: &[String]) -> Option<&str> {
+        let index = args.iter().position(|a| a == "-b:a")?;
+        args.get(index + 1).map(|value| value.as_str())
+    }
+
+    #[test]
+    fn stereo_scales_the_lossy_bitrate() {
+        // Bitrate is per audio stream, so stereo needs roughly twice the mono
+        // budget to sound the same.
+        let mono = AudioEncodingSettings::new(RecordingFormat::M4a, RecordingQuality::Medium)
+            .ffmpeg_codec_args(1);
+        assert_eq!(bitrate_arg(&mono), Some("128k"));
+
+        let stereo = AudioEncodingSettings::new(RecordingFormat::M4a, RecordingQuality::Medium)
+            .ffmpeg_codec_args(2);
+        assert_eq!(bitrate_arg(&stereo), Some("256k"));
+
+        let low_stereo = AudioEncodingSettings::new(RecordingFormat::Mp3, RecordingQuality::Low)
+            .ffmpeg_codec_args(2);
+        assert_eq!(bitrate_arg(&low_stereo), Some("128k"));
+    }
+
+    #[test]
+    fn stereo_bitrate_is_capped_at_320() {
+        // High (192) and Best (256) double past what AAC/MP3 encoders accept.
+        for quality in [RecordingQuality::High, RecordingQuality::Best] {
+            let args = AudioEncodingSettings::new(RecordingFormat::M4a, quality)
+                .ffmpeg_codec_args(2);
+            assert_eq!(bitrate_arg(&args), Some("320k"), "quality {quality:?}");
+        }
+    }
+
+    #[test]
+    fn wav_writes_the_requested_channel_count() {
+        let mono = AudioEncodingSettings::new(RecordingFormat::Wav, RecordingQuality::Best)
+            .ffmpeg_codec_args(1);
+        let stereo = AudioEncodingSettings::new(RecordingFormat::Wav, RecordingQuality::Best)
+            .ffmpeg_codec_args(2);
+
+        // `-ac` is what stops a stereo recording from being folded to mono.
+        fn channel_arg(args: &[String]) -> String {
+            let index = args
+                .iter()
+                .position(|a| a == "-ac")
+                .expect("WAV must pass -ac");
+            args[index + 1].clone()
+        }
+
+        assert_eq!(channel_arg(&mono), "1");
+        assert_eq!(channel_arg(&stereo), "2");
+        // PCM has no bitrate, stereo or not.
+        assert!(!stereo.iter().any(|a| a == "-b:a"));
+    }
+
+    #[test]
+    fn zero_channels_read_as_mono() {
+        // Defensive: a missing channel count must not request zero channels.
+        let args = AudioEncodingSettings::new(RecordingFormat::Wav, RecordingQuality::Medium)
+            .ffmpeg_codec_args(0);
+        let index = args
+            .iter()
+            .position(|a| a == "-ac")
+            .expect("WAV must pass -ac");
+        assert_eq!(args[index + 1], "1");
+
+        let lossy = AudioEncodingSettings::new(RecordingFormat::M4a, RecordingQuality::Medium)
+            .ffmpeg_codec_args(0);
+        assert_eq!(bitrate_arg(&lossy), Some("128k"));
+    }
+
+    #[test]
+    fn lossless_formats_do_not_gain_channel_flags() {
+        // FLAC keeps the input layout; only WAV spells the channel count out.
+        let flac = AudioEncodingSettings::new(RecordingFormat::Flac, RecordingQuality::Best)
+            .ffmpeg_codec_args(2);
+        assert!(!flac.iter().any(|a| a == "-b:a"));
+        assert!(!flac.iter().any(|a| a == "-ac"));
+    }
+
+    #[test]
+    fn copy_stream_stays_a_plain_stream_copy_for_stereo() {
+        let mut settings =
+            AudioEncodingSettings::new(RecordingFormat::M4a, RecordingQuality::Best);
+        settings.copy_stream = true;
+
+        // Remuxing must not gain channel or bitrate flags: it re-encodes nothing.
+        assert_eq!(
+            settings.ffmpeg_codec_args(2),
+            vec!["-c:a".to_string(), "copy".to_string()]
+        );
     }
 }
