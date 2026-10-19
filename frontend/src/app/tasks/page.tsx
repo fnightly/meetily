@@ -1,15 +1,16 @@
 'use client';
 
-import { Suspense, useEffect } from 'react';
+import { Suspense } from 'react';
 import { ListChecks } from 'lucide-react';
 import { useI18n } from '@/contexts/I18nContext';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { ActionItemsPanel } from '@/components/workspace/ActionItemsPanel';
-import { backfillActionItems } from '@/lib/action-items-sync';
 
 function TasksPageContent() {
   const { t } = useI18n();
-  useEffect(() => { void backfillActionItems(); }, []);
+  // No backfill here: the one-per-session pass is scheduled from the app's
+  // landing screen and runs after it goes idle. The panel paints from the stored
+  // list straight away, so opening Tasks no longer waits on a library walk.
   return (
     <div className="flex h-screen flex-col bg-background">
       <PageHeader icon={<ListChecks />} title={t('tasks.pageTitle')} description={t('tasks.pageDesc')} maxWidthClass="max-w-4xl" />

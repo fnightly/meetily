@@ -28,20 +28,56 @@ export async function summaryMarkdownFor(meetingId: string): Promise<string | nu
   }
 }
 
+/**
+ * Meetings inspected per session. The pass exists for summaries generated before
+ * action items were mined automatically; a bounded sample covers the likely ones
+ * without walking the whole library, and any meeting still gets synced when it is
+ * opened (meeting details runs the same import for its own summary).
+ */
+const BACKFILL_MAX_MEETINGS = 10;
+
+/** Wait before starting, so the page that triggered the pass has painted and loaded. */
+const BACKFILL_DELAY_MS = 2000;
+
 let backfillStarted = false;
 
 /**
- * One pass per app session over meetings that have a summary but were never
- * mined for action items (summaries generated before this feature existed).
+ * Run `run` on the next idle period. Chrome/Edge expose requestIdleCallback;
+ * elsewhere the delay above has already elapsed and a timer is enough.
  */
-export async function backfillActionItems(maxMeetings = 40): Promise<void> {
-  if (backfillStarted) return;
+function whenIdle(run: () => void): void {
+  const idleWindow = window as Window & {
+    requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
+  };
+  if (typeof idleWindow.requestIdleCallback === 'function') {
+    idleWindow.requestIdleCallback(run, { timeout: 1000 });
+    return;
+  }
+  setTimeout(run, 0);
+}
+
+/**
+ * One pass per app session over meetings that have a summary but were never
+ * mined for action items.
+ *
+ * Deferred on purpose: callers invoke this from a page mount, where the initial
+ * action-item list is still loading. Waiting for idle and then processing a
+ * bounded number of meetings keeps opening Tasks/Ask responsive instead of
+ * queueing dozens of `api_get_summary` calls ahead of the first paint.
+ */
+export async function backfillActionItems(maxMeetings = BACKFILL_MAX_MEETINGS): Promise<void> {
+  if (typeof window === 'undefined' || backfillStarted) return;
   backfillStarted = true;
+
+  await new Promise<void>((resolve) => setTimeout(resolve, BACKFILL_DELAY_MS));
+  await new Promise<void>((resolve) => whenIdle(() => resolve()));
+
   try {
     const meetings = await invoke<Array<{ id: string }>>('api_get_meetings');
-    for (const m of meetings.slice(0, maxMeetings)) {
-      const md = await summaryMarkdownFor(m.id);
-      if (md) await syncActionItemsFromMarkdown(m.id, md, false).catch(() => {});
+    const bounded = meetings.slice(0, Math.max(0, maxMeetings));
+    for (const meeting of bounded) {
+      const markdown = await summaryMarkdownFor(meeting.id);
+      if (markdown) await syncActionItemsFromMarkdown(meeting.id, markdown, false).catch(() => {});
     }
   } catch {
     // Best effort; the user can still extract per meeting.

@@ -56,6 +56,16 @@ fn apply<R: Runtime>(app: &AppHandle<R>) {
     let _guard = WINDOW_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
     if let Some(window) = app.get_webview_window(LABEL) {
+        // The bar is a second WebView. Keeping it alive after a recording ends
+        // pins its renderer memory for the rest of the session; destroy it once
+        // there is no recording left, and recreate it on the next one.
+        if !recording {
+            if let Err(e) = window.destroy() {
+                log::error!("Failed to destroy recording bar: {}", e);
+            }
+            return;
+        }
+
         let visible = window.is_visible().unwrap_or(false);
         if should_show && !visible {
             position_bar(app, &window);
@@ -77,7 +87,7 @@ fn apply<R: Runtime>(app: &AppHandle<R>) {
     }
 
     let builder = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("recording-bar".into()))
-        .title("Meetily recording")
+        .title("会见 · 录音中")
         .inner_size(BAR_WIDTH, BAR_HEIGHT)
         .resizable(false)
         .maximizable(false)

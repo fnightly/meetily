@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -38,6 +38,17 @@ pub struct SidecarManager {
     /// Shutdown flag
     should_shutdown: Arc<AtomicBool>,
 
+    /// Which process generation the health/idle loops belong to.
+    ///
+    /// Every spawn bumps this. A loop whose generation is stale exits on its next
+    /// tick, so restarting the sidecar does not leave a monitor loop behind for
+    /// every previous process.
+    lifecycle_generation: Arc<AtomicU64>,
+
+    /// Serialises check-and-spawn so two concurrent requests cannot start two
+    /// children (or orphan the slower one).
+    spawn_lock: Arc<Mutex<()>>,
+
     /// Active request count (for graceful shutdown)
     active_request_count: Arc<AtomicUsize>,
 
@@ -70,6 +81,15 @@ impl Drop for RequestGuard {
     }
 }
 
+/// Whether a background monitor belongs to a process that is no longer current.
+///
+/// `generation` is the process generation the loop was started for; `current` is
+/// the manager's newest generation. A mismatch means the loop's process has been
+/// replaced or shut down, so the loop must exit instead of monitoring the next one.
+fn loop_should_stop(should_shutdown: bool, generation: u64, current: u64) -> bool {
+    should_shutdown || generation != current
+}
+
 impl SidecarManager {
     /// Create a new sidecar manager
     pub fn new(_app_data_dir: PathBuf) -> Result<Self> {
@@ -94,6 +114,8 @@ impl SidecarManager {
             last_activity: Arc::new(RwLock::new(Instant::now())),
             is_healthy: Arc::new(AtomicBool::new(false)),
             should_shutdown: Arc::new(AtomicBool::new(false)),
+            lifecycle_generation: Arc::new(AtomicU64::new(0)),
+            spawn_lock: Arc::new(Mutex::new(())),
             active_request_count: Arc::new(AtomicUsize::new(0)),
             helper_binary_path,
             current_model_path: Arc::new(RwLock::new(None)),
@@ -258,6 +280,12 @@ impl SidecarManager {
 
     /// Ensure sidecar is running, spawn if needed
     pub async fn ensure_running(&self, model_path: PathBuf) -> Result<()> {
+        // Serialise the whole check-and-spawn. Two requests arriving together
+        // both used to find no process and both call spawn(); spawn() shuts the
+        // previous process down, so the interleaving could overwrite the handles
+        // while the first child was never killed - an orphan llama-helper per race.
+        let _spawn_guard = self.spawn_lock.lock().await;
+
         // Check if already running with correct model
         {
             let current_model = self.current_model_path.read().await;
@@ -303,6 +331,10 @@ impl SidecarManager {
             command.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
         }
 
+        // Last-resort orphan guard: if the manager is dropped without a graceful
+        // shutdown, dropping the child still terminates the helper.
+        command.kill_on_drop(true);
+
         let mut child = command
             .spawn()
             .with_context(|| format!("Failed to spawn llama-helper at {:?}", self.helper_binary_path))?;
@@ -338,9 +370,15 @@ impl SidecarManager {
 
         log::info!("Sidecar spawned successfully");
 
+        // Monitors belong to this process only: bumping the generation makes any
+        // loop left over from an earlier process exit on its next tick. Without
+        // it every restart leaked one health loop and one idle loop, each holding
+        // the shared handles and possibly double-shutting-down later.
+        let generation = self.lifecycle_generation.fetch_add(1, Ordering::SeqCst) + 1;
+
         // Start background tasks
-        self.start_health_check_loop();
-        self.start_idle_check_loop();
+        self.start_health_check_loop(generation);
+        self.start_idle_check_loop(generation);
 
         Ok(())
     }
@@ -474,6 +512,10 @@ impl SidecarManager {
         // Set shutdown flag
         self.should_shutdown.store(true, Ordering::SeqCst);
 
+        // Invalidate the monitors of the process being stopped, so they exit even
+        // if a later spawn resets the shutdown flag before they next tick.
+        self.lifecycle_generation.fetch_add(1, Ordering::SeqCst);
+
         // Send shutdown command
         if self.is_healthy() {
             let request = serde_json::json!({"type": "shutdown"}).to_string();
@@ -551,7 +593,7 @@ impl SidecarManager {
     }
 
     /// Start health check loop (runs in background)
-    fn start_health_check_loop(&self) {
+    fn start_health_check_loop(&self, generation: u64) {
         let manager = Self {
             child_process: self.child_process.clone(),
             stdin_writer: self.stdin_writer.clone(),
@@ -559,6 +601,8 @@ impl SidecarManager {
             last_activity: self.last_activity.clone(),
             is_healthy: self.is_healthy.clone(),
             should_shutdown: self.should_shutdown.clone(),
+            lifecycle_generation: self.lifecycle_generation.clone(),
+            spawn_lock: self.spawn_lock.clone(),
             active_request_count: self.active_request_count.clone(),
             helper_binary_path: self.helper_binary_path.clone(),
             current_model_path: self.current_model_path.clone(),
@@ -572,8 +616,12 @@ impl SidecarManager {
             loop {
                 interval.tick().await;
 
-                if manager.should_shutdown.load(Ordering::SeqCst) {
-                    log::debug!("Health check loop: shutdown flag set, exiting");
+                if loop_should_stop(
+                    manager.should_shutdown.load(Ordering::SeqCst),
+                    generation,
+                    manager.lifecycle_generation.load(Ordering::SeqCst),
+                ) {
+                    log::debug!("Health check loop: process ended or replaced, exiting");
                     break;
                 }
 
@@ -599,7 +647,7 @@ impl SidecarManager {
     }
 
     /// Start idle check loop (runs in background)
-    fn start_idle_check_loop(&self) {
+    fn start_idle_check_loop(&self, generation: u64) {
         let manager = Self {
             child_process: self.child_process.clone(),
             stdin_writer: self.stdin_writer.clone(),
@@ -607,6 +655,8 @@ impl SidecarManager {
             last_activity: self.last_activity.clone(),
             is_healthy: self.is_healthy.clone(),
             should_shutdown: self.should_shutdown.clone(),
+            lifecycle_generation: self.lifecycle_generation.clone(),
+            spawn_lock: self.spawn_lock.clone(),
             active_request_count: self.active_request_count.clone(),
             helper_binary_path: self.helper_binary_path.clone(),
             current_model_path: self.current_model_path.clone(),
@@ -620,8 +670,12 @@ impl SidecarManager {
             loop {
                 interval.tick().await;
 
-                if manager.should_shutdown.load(Ordering::SeqCst) {
-                    log::debug!("Idle check loop: shutdown flag set, exiting");
+                if loop_should_stop(
+                    manager.should_shutdown.load(Ordering::SeqCst),
+                    generation,
+                    manager.lifecycle_generation.load(Ordering::SeqCst),
+                ) {
+                    log::debug!("Idle check loop: process ended or replaced, exiting");
                     break;
                 }
 
@@ -657,11 +711,31 @@ impl SidecarManager {
 
 impl Drop for SidecarManager {
     fn drop(&mut self) {
-        // Set shutdown flag
+        // Set shutdown flag and invalidate the monitors so they stop holding the
+        // child/stdin/stdout handles once the manager is gone.
         self.should_shutdown.store(true, Ordering::SeqCst);
+        self.lifecycle_generation.fetch_add(1, Ordering::SeqCst);
 
         // Note: Actual cleanup happens in shutdown() method
         // We can't do async work in Drop, so this is best-effort
         log::debug!("SidecarManager dropped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::loop_should_stop;
+
+    #[test]
+    fn monitor_stops_when_its_process_is_replaced() {
+        // Same process, still running: the loop keeps going.
+        assert!(!loop_should_stop(false, 3, 3));
+
+        // A restart bumped the generation: the old loop must exit instead of
+        // monitoring - and possibly shutting down - the new process.
+        assert!(loop_should_stop(false, 2, 3));
+
+        // An explicit shutdown stops every loop, whatever its generation.
+        assert!(loop_should_stop(true, 3, 3));
     }
 }

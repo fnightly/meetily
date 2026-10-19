@@ -3,7 +3,7 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { usePrewarmSpeechModel } from '@/hooks/usePrewarmSpeechModel';
 import { tr } from '@/lib/i18n';
-import { File, Settings, ChevronLeftCircle, ChevronRightCircle, StickyNote, Home, Trash2, Mic, Square, Search, Pencil, NotebookPen, SearchIcon, X, Upload, AudioLines, Loader2, RefreshCw, PanelLeftClose, PanelLeftOpen, MessageCircleQuestion, ListChecks, Briefcase, Hash } from 'lucide-react';
+import { File, Settings, ChevronLeftCircle, ChevronRightCircle, Home, Trash2, Mic, Square, Search, Pencil, NotebookPen, SearchIcon, X, Upload, AudioLines, Loader2, RefreshCw, PanelLeftClose, PanelLeftOpen, MessageCircleQuestion, ListChecks, Briefcase, Hash } from 'lucide-react';
 import { useI18n } from '@/contexts/I18nContext';
 import { useRouter, usePathname } from 'next/navigation';
 import { useSidebar } from './SidebarProvider';
@@ -501,7 +501,6 @@ const Sidebar: React.FC = () => {
           </Tooltip>
 
           {navItems.map((item) => railButton(item.key, item.label, item.icon, item.onClick, item.active))}
-          {railButton('meetings', t('nav.library'), NotebookPen, toggleCollapse, isMeetingPage)}
           {betaFeatures.importAndRetranscribe && railButton('import', t('nav.importAudio'), Upload, () => openImportDialog())}
 
           <div className="mt-auto flex flex-col items-center gap-1.5 pb-3">
@@ -622,15 +621,6 @@ const Sidebar: React.FC = () => {
             // Hidden until the row is hovered or anything inside it has keyboard focus, so the
             // list stays calm without locking keyboard users out of these actions.
             <div className={`absolute right-1 top-1.5 flex items-center gap-0.5 rounded-md pl-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 ${isActive ? 'bg-blue-50' : 'bg-slate-50'}`}>
-              <button
-                type="button"
-                onClick={() => router.push(`/notes?id=${encodeURIComponent(entry.meetingId as string)}`)}
-                className={`${actionBtn} hover:text-amber-600 hover:bg-amber-50 focus-visible:ring-amber-500`}
-                aria-label={t('nav.openNotes', { title: entry.title })}
-                title={t('nav.notes')}
-              >
-                <StickyNote className="w-3.5 h-3.5" />
-              </button>
               <button
                 type="button"
                 onClick={() => handleEditStart(entry.meetingId as string, entry.title)}

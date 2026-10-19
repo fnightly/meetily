@@ -574,36 +574,57 @@ impl AudioCapture {
             let mut used_persistent_resampler = false;
 
             if let Ok(mut buffer_lock) = self.resampler_input_buffer.lock() {
-                // Add new samples to buffer
-                buffer_lock.extend_from_slice(&mono_data);
+                let mut resampler_failed = false;
 
-                // Process complete chunks through the resampler
-                if let Ok(mut resampler_lock) = self.resampler.lock() {
-                    if let Some(ref mut resampler) = *resampler_lock {
-                        used_persistent_resampler = true;
+                match self.resampler.lock() {
+                    Ok(mut resampler_lock) => {
+                        if let Some(ref mut resampler) = *resampler_lock {
+                            used_persistent_resampler = true;
 
-                        // Process as many complete chunks as we have
-                        while buffer_lock.len() >= self.resampler_chunk_size {
-                            // Extract exactly chunk_size samples
-                            let chunk: Vec<f32> = buffer_lock.drain(0..self.resampler_chunk_size).collect();
+                            // Buffer only while a resampler exists. Appending
+                            // unconditionally used to strand every chunk of the
+                            // recording in this buffer whenever the resampler was
+                            // absent (startup failure) or had just failed.
+                            buffer_lock.extend_from_slice(&mono_data);
 
-                            // Rubato expects input as Vec<Vec<f32>> (one Vec per channel)
-                            let waves_in = vec![chunk];
+                            // Process as many complete chunks as we have
+                            while buffer_lock.len() >= self.resampler_chunk_size {
+                                // Extract exactly chunk_size samples
+                                let chunk: Vec<f32> = buffer_lock.drain(0..self.resampler_chunk_size).collect();
 
-                            match resampler.process(&waves_in, None) {
-                                Ok(mut waves_out) => {
-                                    if let Some(output) = waves_out.pop() {
-                                        resampled_output.extend_from_slice(&output);
+                                // Rubato expects input as Vec<Vec<f32>> (one Vec per channel)
+                                let waves_in = vec![chunk];
+
+                                match resampler.process(&waves_in, None) {
+                                    Ok(mut waves_out) => {
+                                        if let Some(output) = waves_out.pop() {
+                                            resampled_output.extend_from_slice(&output);
+                                        }
                                     }
-                                }
-                                Err(e) => {
-                                    warn!("⚠️ Persistent resampler processing failed: {}", e);
-                                    used_persistent_resampler = false;
-                                    break;
+                                    Err(e) => {
+                                        warn!("⚠️ Persistent resampler processing failed: {}", e);
+                                        used_persistent_resampler = false;
+                                        resampler_failed = true;
+                                        break;
+                                    }
                                 }
                             }
                         }
-                        // Remaining samples in buffer will be processed in next iteration
+
+                        // A resampler that failed once fails on every later chunk,
+                        // and each attempt would leave its input behind. Drop both
+                        // it and the backlog: the per-chunk fallback below then
+                        // produces the audio with bounded memory.
+                        if resampler_failed {
+                            warn!("🔄 Falling back to per-chunk resampling; dropping the buffered resampler");
+                            *resampler_lock = None;
+                            buffer_lock.clear();
+                        }
+                    }
+                    Err(_) => {
+                        // A poisoned lock can never be used again, so buffered
+                        // samples would accumulate for the rest of the session.
+                        buffer_lock.clear();
                     }
                 }
             }
@@ -894,6 +915,8 @@ impl AudioCapture {
         }
 
         let mut output = Vec::with_capacity(interleaved.len());
+        let mut resampler_failed = false;
+
         while buffers[0].len() >= self.resampler_chunk_size {
             let chunk: Vec<Vec<f32>> = buffers
                 .iter_mut()
@@ -908,12 +931,27 @@ impl AudioCapture {
                         output.push(*right);
                     }
                 }
-                Ok(_) => return None,
+                Ok(_) => {
+                    resampler_failed = true;
+                    break;
+                }
                 Err(e) => {
                     warn!("⚠️ Stereo resampler failed: {}", e);
-                    return None;
+                    resampler_failed = true;
+                    break;
                 }
             }
+        }
+
+        // A resampler that failed or produced the wrong shape keeps failing, and
+        // each attempt leaves its input in the per-channel buffers. Drop both the
+        // resampler and the backlog so the stateless fallback takes over and the
+        // buffers cannot grow for the rest of the session.
+        if resampler_failed {
+            *resampler_guard = None;
+            buffers[0].clear();
+            buffers[1].clear();
+            return None;
         }
 
         if output.is_empty() {
@@ -1524,6 +1562,37 @@ mod tests {
             );
         }
         assert!(mixed.iter().all(|s| s.is_finite() && s.abs() < 1.0));
+    }
+
+    #[test]
+    fn ring_buffer_backlog_is_bounded_and_windows_drain_it() {
+        // The 600 ms mixing window keeps at most eight windows of audio; a long
+        // recording must never grow the backlog past that.
+        let mut ring = AudioMixerRingBuffer::new(48_000);
+        let max = ring.max_buffer_size;
+        assert_eq!(ring.window_size_samples, 48_000 * 600 / 1000);
+
+        for _ in 0..200 {
+            ring.add_samples(DeviceType::Microphone, vec![0.1; 480]);
+            ring.add_samples(DeviceType::System, vec![0.1; 480]);
+        }
+
+        assert!(
+            ring.mic_buffer.len() <= max,
+            "microphone backlog grew to {}",
+            ring.mic_buffer.len()
+        );
+        assert!(
+            ring.system_buffer.len() <= max,
+            "system backlog grew to {}",
+            ring.system_buffer.len()
+        );
+
+        // Extracting a window consumes exactly one window from each full buffer.
+        let (mic, sys) = ring.extract_window().expect("buffers are mixable");
+        assert_eq!(mic.len(), ring.window_size_samples);
+        assert_eq!(sys.len(), ring.window_size_samples);
+        assert!(ring.mic_buffer.len() <= max);
     }
 
     #[test]

@@ -1,18 +1,44 @@
 'use client';
 
-import { useState, type ReactNode } from 'react';
-import { ListChecks, MessageCircleQuestion, Sparkles } from 'lucide-react';
+import { useEffect, useState, type ReactNode } from 'react';
+import dynamic from 'next/dynamic';
+import { ListChecks, Loader2, MessageCircleQuestion, Sparkles, StickyNote } from 'lucide-react';
 import { useI18n } from '@/contexts/I18nContext';
-import { useActionItems } from '@/hooks/useActionItems';
-import { ActionItemsPanel } from './ActionItemsPanel';
-import { AskPanel } from './AskPanel';
+import { MeetingNotesEditor } from '@/app/notes/MeetingNotesEditor';
 
-export type SidePaneTab = 'summary' | 'tasks' | 'ask';
+export type SidePaneTab = 'summary' | 'notes' | 'tasks' | 'ask';
+
+function PaneLoading() {
+  const { t } = useI18n();
+  return (
+    <div
+      role="status"
+      className="flex h-full items-center justify-center gap-2 p-6 text-sm text-slate-500"
+    >
+      <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+      {t('common.loading')}
+    </div>
+  );
+}
+
+// Only needed when their tab is opened: importing them lazily keeps the code
+// (and, for tasks, the action-item query) out of every meeting page load.
+const ActionItemsPanel = dynamic(
+  () => import('./ActionItemsPanel').then((mod) => mod.ActionItemsPanel),
+  { ssr: false, loading: () => <PaneLoading /> },
+);
+const AskPanel = dynamic(
+  () => import('./AskPanel').then((mod) => mod.AskPanel),
+  { ssr: false, loading: () => <PaneLoading /> },
+);
 
 /**
- * Right-hand pane of a meeting: the summary editor plus the meeting's
- * follow-ups and a Q&A box. The summary stays mounted while hidden so the
- * editor keeps its unsaved state and generation progress.
+ * Right-hand pane of a meeting: the summary editor, the user's own notes, the
+ * meeting's follow-ups, and a Q&A box.
+ *
+ * The summary stays mounted while hidden so the editor keeps its unsaved state
+ * and generation progress. Notes are mounted on first open and then kept
+ * mounted for the same reason; before that opening the tab, no notes are read.
  */
 export function MeetingSidePane({
   meetingId,
@@ -24,39 +50,74 @@ export function MeetingSidePane({
   summaryMarkdown: string | null;
 }) {
   const { t } = useI18n();
-  const [tab, setTab] = useState<SidePaneTab>('summary');
-  const { items } = useActionItems(meetingId);
-  const openCount = items.filter((it) => !it.done).length;
+  // Tabs are scoped to a meeting: carrying them across a meeting switch would
+  // leave the pane on 笔记 with no editor mounted for the new meeting.
+  const [tabState, setTabState] = useState<{ meetingId: string; tab: SidePaneTab }>({
+    meetingId,
+    tab: 'summary',
+  });
+  const tab: SidePaneTab = tabState.meetingId === meetingId ? tabState.tab : 'summary';
+  const [notesMeetingId, setNotesMeetingId] = useState<string | null>(null);
+  const [notesDirty, setNotesDirty] = useState(false);
+  const notesMounted = notesMeetingId === meetingId;
 
-  const tabs: Array<{ id: SidePaneTab; label: string; icon: typeof Sparkles; badge?: number }> = [
+  // A different meeting needs a fresh editor: otherwise one meeting's blocks
+  // could be saved into another's note.
+  useEffect(() => {
+    setNotesMeetingId(null);
+    setNotesDirty(false);
+  }, [meetingId]);
+
+  const selectTab = (next: SidePaneTab) => {
+    if (next === 'notes') setNotesMeetingId(meetingId);
+    setTabState({ meetingId, tab: next });
+  };
+
+  const tabs: Array<{ id: SidePaneTab; label: string; icon: typeof Sparkles }> = [
     { id: 'summary', label: t('meeting.pane.summary'), icon: Sparkles },
-    { id: 'tasks', label: t('meeting.pane.tasks'), icon: ListChecks, badge: openCount },
+    { id: 'notes', label: t('meeting.pane.notes'), icon: StickyNote },
+    { id: 'tasks', label: t('meeting.pane.tasks'), icon: ListChecks },
     { id: 'ask', label: t('meeting.pane.ask'), icon: MessageCircleQuestion },
   ];
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col">
       <div role="tablist" aria-label={t('meeting.summaryPane')} className="flex shrink-0 items-center gap-1 border-b border-slate-200 bg-white px-3 pt-2">
-        {tabs.map(({ id, label, icon: Icon, badge }) => (
+        {tabs.map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             type="button"
             role="tab"
             aria-selected={tab === id}
-            onClick={() => setTab(id)}
+            onClick={() => selectTab(id)}
             className={`relative -mb-px inline-flex items-center gap-1.5 border-b-2 px-3 pb-2 pt-1 text-sm font-medium transition-colors ${
               tab === id ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500 hover:text-slate-800'
             }`}
           >
             <Icon className="h-4 w-4" />
             {label}
-            {!!badge && badge > 0 && (
-              <span className="rounded-full bg-blue-100 px-1.5 text-[11px] font-semibold tabular-nums text-blue-700">{badge}</span>
+            {id === 'notes' && notesMounted && notesDirty && (
+              <span
+                role="img"
+                aria-label={t('notes.unsaved')}
+                title={t('notes.unsaved')}
+                className="h-1.5 w-1.5 rounded-full bg-amber-500"
+              />
             )}
           </button>
         ))}
       </div>
       <div className={tab === 'summary' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>{summary}</div>
+      {notesMounted && (
+        <div className={tab === 'notes' ? 'flex min-h-0 flex-1 flex-col overflow-hidden bg-white' : 'hidden'}>
+          <MeetingNotesEditor
+            key={meetingId}
+            meetingId={meetingId}
+            embedded
+            onDirtyChange={setNotesDirty}
+          />
+        </div>
+      )}
       {tab === 'tasks' && (
         <div className="min-h-0 flex-1 overflow-hidden bg-slate-50/40 p-4">
           <ActionItemsPanel meetingId={meetingId} summaryMarkdown={summaryMarkdown} />

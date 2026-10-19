@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
-import { CalendarDays, Check, ChevronLeft, Clock, Download, FileText, Pencil, Share2, Sparkles, StickyNote, X } from 'lucide-react';
+import { CalendarDays, Check, ChevronLeft, Clock, Download, FileText, Pencil, Share2, Sparkles, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useI18n } from '@/contexts/I18nContext';
 import { formatDuration } from '@/lib/recordings';
@@ -119,10 +119,6 @@ export function MeetingHeader({
         </div>
 
         <div className="flex flex-shrink-0 items-center gap-2">
-          <Button variant="ghost" size="sm" onClick={() => router.push(`/notes?id=${encodeURIComponent(meetingId)}`)}>
-            <StickyNote />
-            <span className="hidden lg:inline">{t('nav.notes')}</span>
-          </Button>
           <Button
             variant="ghost"
             size="sm"
