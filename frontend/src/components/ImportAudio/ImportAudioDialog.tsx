@@ -4,8 +4,6 @@ import {
   Globe,
   Loader2,
   AlertCircle,
-  CheckCircle2,
-  X,
   Cpu,
   FileAudio,
   Clock,
@@ -32,9 +30,9 @@ import {
 } from '../ui/select';
 import { toast } from 'sonner';
 import { useConfig } from '@/contexts/ConfigContext';
-import { useImportAudio, ImportResult } from '@/hooks/useImportAudio';
-import { useRouter } from 'next/navigation';
-import { useSidebar } from '../Sidebar/SidebarProvider';
+import { useImportAudio } from '@/hooks/useImportAudio';
+import { enqueueImport } from '@/lib/background-transcription';
+import { tr } from '@/lib/i18n';
 import { LANGUAGES } from '@/constants/languages';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
 
@@ -70,8 +68,6 @@ export function ImportAudioDialog({
   preselectedFile,
   onComplete,
 }: ImportAudioDialogProps) {
-  const router = useRouter();
-  const { refetchMeetings } = useSidebar();
   const { selectedLanguage, transcriptModelConfig } = useConfig();
 
   const [title, setTitle] = useState('');
@@ -94,16 +90,6 @@ export function ImportAudioDialog({
     resetSelection,
   } = useTranscriptionModels(transcriptModelConfig);
 
-  const handleImportComplete = useCallback((result: ImportResult) => {
-    toast.success(`Import complete! ${result.segments_count} segments created.`);
-
-    // Refresh meetings list then navigate to the imported meeting
-    refetchMeetings();
-    onComplete?.();
-    onOpenChange(false);
-    router.push(`/meeting-details?id=${result.meeting_id}`);
-  }, [router, refetchMeetings, onComplete, onOpenChange]);
-
   const handleImportError = useCallback((error: string) => {
     toast.error('Import failed', { description: error });
   }, []);
@@ -111,17 +97,11 @@ export function ImportAudioDialog({
   const {
     status,
     fileInfo,
-    progress,
     error,
-    isProcessing,
-    isBusy,
     selectFile,
     validateFile,
-    startImport,
-    cancelImport,
     reset,
   } = useImportAudio({
-    onComplete: handleImportComplete,
     onError: handleImportError,
   });
 
@@ -184,69 +164,31 @@ export function ImportAudioDialog({
     }
   };
 
-  const handleStartImport = async () => {
+  // The import runs in the background: queue it and give the window back.
+  const handleStartImport = () => {
     if (!fileInfo) return;
 
-    await startImport(
-      fileInfo.path,
-      title || fileInfo.filename,
-      isParakeetModel ? null : selectedLang === 'auto' ? null : selectedLang,
-      selectedModel?.name || null,
-      selectedModel?.provider || null
-    );
-  };
-
-  const handleCancel = async () => {
-    if (isProcessing) {
-      await cancelImport();
-      toast.info('Import cancelled');
-    }
+    enqueueImport({
+      sourcePath: fileInfo.path,
+      title: title || fileInfo.filename,
+      language: isParakeetModel ? null : selectedLang === 'auto' ? null : selectedLang,
+      model: selectedModel?.name || null,
+      provider: selectedModel?.provider || null,
+    });
+    toast.success(tr('bgTranscribe.importStarted'), { description: tr('bgTranscribe.startedDetail') });
+    onComplete?.();
     onOpenChange(false);
   };
 
-  // Prevent closing during processing
-  const handleOpenChange = (newOpen: boolean) => {
-    if (!newOpen && isProcessing) {
-      return;
-    }
-    onOpenChange(newOpen);
-  };
-
-  const handleEscapeKeyDown = (event: KeyboardEvent) => {
-    if (isProcessing) {
-      event.preventDefault();
-    }
-  };
-
-  const handleInteractOutside = (event: Event) => {
-    if (isProcessing) {
-      event.preventDefault();
-    }
-  };
-
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent
-        className="sm:max-w-[500px]"
-        onEscapeKeyDown={handleEscapeKeyDown}
-        onInteractOutside={handleInteractOutside}
-      >
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-[500px]">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            {isProcessing ? (
-              <>
-                <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
-                Importing Audio...
-              </>
-            ) : error ? (
+            {error ? (
               <>
                 <AlertCircle className="h-5 w-5 text-red-600" />
                 Import Failed
-              </>
-            ) : status === 'complete' ? (
-              <>
-                <CheckCircle2 className="h-5 w-5 text-green-600" />
-                Import Complete
               </>
             ) : (
               <>
@@ -256,9 +198,7 @@ export function ImportAudioDialog({
             )}
           </DialogTitle>
           <DialogDescription>
-            {isProcessing
-              ? progress?.message || 'Processing audio...'
-              : error
+            {error
               ? 'An error occurred during import'
               : 'Import an audio file to create a new meeting with transcripts'}
           </DialogDescription>
@@ -266,7 +206,7 @@ export function ImportAudioDialog({
 
         <div className="space-y-4 py-4">
           {/* File selection / info */}
-          {!isProcessing && !error && (
+          {!error && (
             <>
               {fileInfo ? (
                 <div className="bg-gray-50 rounded-lg p-4 space-y-3">
@@ -410,25 +350,6 @@ export function ImportAudioDialog({
             </>
           )}
 
-          {/* Progress display */}
-          {isProcessing && progress && (
-            <div className="space-y-2">
-              <div className="relative">
-                <div className="w-full bg-gray-200 rounded-full h-3">
-                  <div
-                    className="bg-blue-600 h-3 rounded-full transition-all duration-300 ease-out"
-                    style={{ width: `${Math.min(progress.progress_percentage, 100)}%` }}
-                  />
-                </div>
-                <div className="flex justify-between text-xs text-gray-600 mt-1">
-                  <span>{progress.stage}</span>
-                  <span>{Math.round(progress.progress_percentage)}%</span>
-                </div>
-              </div>
-              <p className="text-sm text-muted-foreground text-center">{progress.message}</p>
-            </div>
-          )}
-
           {/* Error display */}
           {error && (
             <div className="bg-red-50 border border-red-200 rounded-lg p-3">
@@ -438,7 +359,7 @@ export function ImportAudioDialog({
         </div>
 
         <DialogFooter>
-          {!isProcessing && !error && (
+          {!error && (
             <>
               <Button variant="outline" onClick={() => onOpenChange(false)}>
                 Cancel
@@ -452,12 +373,6 @@ export function ImportAudioDialog({
                 Import
               </Button>
             </>
-          )}
-          {isProcessing && (
-            <Button variant="outline" onClick={handleCancel}>
-              <X className="h-4 w-4 mr-2" />
-              Cancel
-            </Button>
           )}
           {error && (
             <>

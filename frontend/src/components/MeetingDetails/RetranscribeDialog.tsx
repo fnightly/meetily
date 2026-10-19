@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { RefreshCw, Globe, Loader2, AlertCircle, CheckCircle2, X, Cpu } from 'lucide-react';
+import { RefreshCw, Globe, Cpu } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -16,57 +16,41 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../ui/select';
-import { invoke } from '@tauri-apps/api/core';
-import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { useConfig } from '@/contexts/ConfigContext';
 import { LANGUAGES } from '@/constants/languages';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
 import { useI18n } from '@/contexts/I18nContext';
-import { transcriptionStageKey } from '@/lib/transcription-queue';
+import { enqueueTranscription } from '@/lib/background-transcription';
 
 interface RetranscribeDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   meetingId: string;
   meetingFolderPath: string | null;
+  /** Shown in the progress and completion messages. */
+  meetingTitle?: string;
   /** The recording has no transcript yet: the dialog is a first transcription. */
   emptyTranscript?: boolean;
-  onComplete?: () => void;
 }
 
-interface RetranscriptionProgress {
-  meeting_id: string;
-  stage: string;
-  progress_percentage: number;
-  message: string;
-}
-
-interface RetranscriptionResult {
-  meeting_id: string;
-  segments_count: number;
-  duration_seconds: number;
-  language: string | null;
-}
-
-interface RetranscriptionError {
-  meeting_id: string;
-  error: string;
-}
-
+/**
+ * Pick a language and model, then hand the recording to the background queue.
+ *
+ * The dialog used to stay open, and refuse to close, until the transcription
+ * finished. It now closes as soon as the job is queued; progress shows in a
+ * toast and on the transcript button, and the result is announced when done.
+ */
 export function RetranscribeDialog({
   open,
   onOpenChange,
   meetingId,
   meetingFolderPath,
+  meetingTitle,
   emptyTranscript = false,
-  onComplete,
 }: RetranscribeDialogProps) {
   const { t } = useI18n();
   const { selectedLanguage, transcriptModelConfig } = useConfig();
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [progress, setProgress] = useState<RetranscriptionProgress | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [selectedLang, setSelectedLang] = useState(selectedLanguage || 'auto');
 
   // Use centralized model fetching hook
@@ -78,12 +62,6 @@ export function RetranscribeDialog({
     fetchModels,
     resetSelection,
   } = useTranscriptionModels(transcriptModelConfig);
-
-  // Stable refs for callbacks to avoid listener re-registration
-  const onCompleteRef = useRef(onComplete);
-  const onOpenChangeRef = useRef(onOpenChange);
-  useEffect(() => { onCompleteRef.current = onComplete; }, [onComplete]);
-  useEffect(() => { onOpenChangeRef.current = onOpenChange; }, [onOpenChange]);
 
   // Track previous open state to only reset on closed→open transition
   const prevOpenRef = useRef(false);
@@ -113,9 +91,6 @@ export function RetranscribeDialog({
 
     if (open && !wasOpen) {
       resetSelection();
-      setIsProcessing(false);
-      setProgress(null);
-      setError(null);
       setSelectedLang(selectedLanguage || 'auto');
 
       // Fetch available models using centralized hook
@@ -123,211 +98,72 @@ export function RetranscribeDialog({
     }
   }, [open, selectedLanguage, transcriptModelConfig, fetchModels]);
 
-  // Listen for retranscription events
-  useEffect(() => {
-    if (!open) return;
-
-    const unlisteners: UnlistenFn[] = [];
-    const cleanedUpRef = { current: false };
-
-    const setupListeners = async () => {
-      // Progress events
-      const unlistenProgress = await listen<RetranscriptionProgress>(
-        'retranscription-progress',
-        (event) => {
-          if (event.payload.meeting_id === meetingId) {
-            setProgress(event.payload);
-          }
-        }
-      );
-      if (cleanedUpRef.current) {
-        unlistenProgress();
-        return;
-      }
-      unlisteners.push(unlistenProgress);
-
-      // Completion event
-      const unlistenComplete = await listen<RetranscriptionResult>(
-        'retranscription-complete',
-        async (event) => {
-          if (event.payload.meeting_id === meetingId) {
-
-            setIsProcessing(false);
-            toast.success(t('retranscribe.complete', { count: event.payload.segments_count }));
-            onCompleteRef.current?.();
-            onOpenChangeRef.current(false);
-          }
-        }
-      );
-      if (cleanedUpRef.current) {
-        unlistenComplete();
-        unlisteners.forEach(u => u());
-        return;
-      }
-      unlisteners.push(unlistenComplete);
-
-      // Error event
-      const unlistenError = await listen<RetranscriptionError>(
-        'retranscription-error',
-        async (event) => {
-          if (event.payload.meeting_id === meetingId) {
-
-            setIsProcessing(false);
-            setError(event.payload.error);
-          }
-        }
-      );
-      if (cleanedUpRef.current) {
-        unlistenError();
-        unlisteners.forEach(u => u());
-        return;
-      }
-      unlisteners.push(unlistenError);
-    };
-
-    setupListeners();
-
-    return () => {
-      cleanedUpRef.current = true;
-      unlisteners.forEach((unlisten) => unlisten());
-    };
-  }, [open, meetingId]);
-
-  const handleStartRetranscription = async () => {
+  const handleStartRetranscription = () => {
     if (!meetingFolderPath) {
-      setError(t('retranscribe.noFolder'));
+      toast.error(t('retranscribe.noFolder'));
       return;
     }
 
-    setIsProcessing(true);
-    setError(null);
-    setProgress(null);
-
-    try {
-      const languageToSend = isParakeetModel ? null : selectedLang === 'auto' ? null : selectedLang;
-
-      await invoke('start_retranscription_command', {
-        meetingId,
-        meetingFolderPath,
-        language: languageToSend,
-        model: selectedModelDetails?.name || null,
-        provider: selectedModelDetails?.provider || null,
-      });
-    } catch (err: any) {
-      setIsProcessing(false);
-      const errorMsg = typeof err === 'string' ? err : (err?.message || String(err));
-      setError(errorMsg);
-
-    }
-  };
-
-  const handleCancel = async () => {
-    if (isProcessing) {
-      try {
-        await invoke('cancel_retranscription_command');
-        setIsProcessing(false);
-        setProgress(null);
-        toast.info(t('retranscribe.cancelled'));
-      } catch (err) {
-        console.error('Failed to cancel retranscription:', err);
-      }
-    }
+    enqueueTranscription([{
+      folderPath: meetingFolderPath,
+      meetingId,
+      title: meetingTitle,
+      model: selectedModelDetails,
+      language: isParakeetModel || selectedLang === 'auto' ? null : selectedLang,
+    }]);
+    toast.success(t('bgTranscribe.started'), { description: t('bgTranscribe.startedDetail') });
     onOpenChange(false);
   };
 
-  // Prevent closing during processing
-  const handleOpenChange = (newOpen: boolean) => {
-    if (!newOpen && isProcessing) {
-      return;
-    }
-    onOpenChange(newOpen);
-  };
-
-  const handleEscapeKeyDown = (event: KeyboardEvent) => {
-    if (isProcessing) {
-      event.preventDefault();
-    }
-  };
-
-  const handleInteractOutside = (event: Event) => {
-    if (isProcessing) {
-      event.preventDefault();
-    }
-  };
-
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent
-        className="sm:max-w-[450px]"
-        onEscapeKeyDown={handleEscapeKeyDown}
-        onInteractOutside={handleInteractOutside}
-      >
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-[450px]">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            {isProcessing ? (
-              <>
-                <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
-                {t('retranscribe.processingTitle')}
-              </>
-            ) : error ? (
-              <>
-                <AlertCircle className="h-5 w-5 text-red-600" />
-                {t('retranscribe.failedTitle')}
-              </>
-            ) : (
-              <>
-                <RefreshCw className="h-5 w-5 text-blue-600" />
-                {emptyTranscript
-                  ? t('transcriptActions.transcribeRecording')
-                  : t('retranscribe.title')}
-              </>
-            )}
+            <RefreshCw className="h-5 w-5 text-blue-600" />
+            {emptyTranscript
+              ? t('transcriptActions.transcribeRecording')
+              : t('retranscribe.title')}
           </DialogTitle>
           <DialogDescription>
-            {isProcessing
-              ? progress?.message || t('retranscribe.processingDescription')
-              : error
-                ? t('retranscribe.failedDescription')
-                : emptyTranscript
-                  ? t('retranscribe.emptyDescription')
-                  : t('retranscribe.description')}
+            {emptyTranscript
+              ? t('retranscribe.emptyDescription')
+              : t('retranscribe.description')}
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4 py-4">
-          {!isProcessing && !error && (
-            !isParakeetModel ? (
-              <div className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <Globe className="h-4 w-4 text-muted-foreground" />
-                  <span className="text-sm font-medium">{t('retranscribe.language')}</span>
-                </div>
-                <Select value={selectedLang} onValueChange={setSelectedLang}>
-                  <SelectTrigger className="w-full">
-                    <SelectValue placeholder={t('retranscribe.languagePlaceholder')} />
-                  </SelectTrigger>
-                  <SelectContent className="max-h-60">
-                    {LANGUAGES.map((lang) => (
-                      <SelectItem key={lang.code} value={lang.code}>
-                        {lang.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">{t('retranscribe.languageHint')}</p>
+          {!isParakeetModel ? (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <Globe className="h-4 w-4 text-muted-foreground" />
+                <span className="text-sm font-medium">{t('retranscribe.language')}</span>
               </div>
-            ) : (
-              <div className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <Globe className="h-4 w-4 text-muted-foreground" />
-                  <span className="text-sm font-medium">{t('retranscribe.language')}</span>
-                </div>
-                <p className="text-xs text-muted-foreground">{t('retranscribe.parakeetLanguage')}</p>
+              <Select value={selectedLang} onValueChange={setSelectedLang}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder={t('retranscribe.languagePlaceholder')} />
+                </SelectTrigger>
+                <SelectContent className="max-h-60">
+                  {LANGUAGES.map((lang) => (
+                    <SelectItem key={lang.code} value={lang.code}>
+                      {lang.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">{t('retranscribe.languageHint')}</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <Globe className="h-4 w-4 text-muted-foreground" />
+                <span className="text-sm font-medium">{t('retranscribe.language')}</span>
               </div>
-            )
+              <p className="text-xs text-muted-foreground">{t('retranscribe.parakeetLanguage')}</p>
+            </div>
           )}
 
-          {!isProcessing && !error && availableModels.length > 0 && (
+          {availableModels.length > 0 && (
             <div className="space-y-3">
               <div className="flex items-center gap-2">
                 <Cpu className="h-4 w-4 text-muted-foreground" />
@@ -349,76 +185,20 @@ export function RetranscribeDialog({
             </div>
           )}
 
-          {isProcessing && progress && (
-            <div className="space-y-2">
-              <div className="relative">
-                <div className="w-full bg-gray-200 rounded-full h-3">
-                  <div
-                    className="bg-blue-600 h-3 rounded-full transition-all duration-300 ease-out"
-                    style={{ width: `${Math.min(progress.progress_percentage, 100)}%` }}
-                  />
-                </div>
-                <div className="flex justify-between text-xs text-gray-600 mt-1">
-                  <span>
-                    {(() => {
-                      const key = transcriptionStageKey(progress.stage);
-                      return key ? t(key) : progress.stage;
-                    })()}
-                  </span>
-                  <span>{Math.round(progress.progress_percentage)}%</span>
-                </div>
-              </div>
-              <p className="text-sm text-muted-foreground text-center">
-                {progress.message}
-              </p>
-            </div>
-          )}
-
-          {error && (
-            <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-              <p className="text-sm text-red-800">{error}</p>
-            </div>
-          )}
         </div>
 
         <DialogFooter>
-          {!isProcessing && !error && (
-            <>
-              <Button variant="outline" onClick={() => onOpenChange(false)}>
-                {t('common.cancel')}
-              </Button>
-              <Button
-                onClick={handleStartRetranscription}
-                className="bg-blue-600 hover:bg-blue-700"
-                disabled={!meetingFolderPath}
-              >
-                <RefreshCw className="h-4 w-4 mr-2" />
-                {t('retranscribe.start')}
-              </Button>
-            </>
-          )}
-          {isProcessing && (
-            <Button variant="outline" onClick={handleCancel}>
-              <X className="h-4 w-4 mr-2" />
-              {t('common.cancel')}
-            </Button>
-          )}
-          {error && (
-            <>
-              <Button variant="outline" onClick={() => onOpenChange(false)}>
-                {t('common.close')}
-              </Button>
-              <Button
-                onClick={() => {
-                  setError(null);
-                  setProgress(null);
-                }}
-                variant="outline"
-              >
-                {t('common.retry')}
-              </Button>
-            </>
-          )}
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            {t('common.cancel')}
+          </Button>
+          <Button
+            onClick={handleStartRetranscription}
+            className="bg-blue-600 hover:bg-blue-700"
+            disabled={!meetingFolderPath}
+          >
+            <RefreshCw className="h-4 w-4 mr-2" />
+            {t('retranscribe.start')}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

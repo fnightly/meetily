@@ -32,6 +32,8 @@ interface TranscriptPanelProps {
   // Retranscription props
   meetingId?: string;
   meetingFolderPath?: string | null;
+  /** Names the recording in background transcription messages. */
+  meetingTitle?: string;
   /** Absolute audio path for the saved recording, when it still exists. */
   audioPath?: string | null;
   onRefetchTranscripts?: () => Promise<void>;
@@ -62,6 +64,7 @@ export function TranscriptPanel({
   onLoadMore,
   meetingId,
   meetingFolderPath,
+  meetingTitle,
   audioPath = null,
   onRefetchTranscripts,
   onExportMarkdown,
@@ -106,6 +109,7 @@ export function TranscriptPanel({
           onOpenMeetingFolder={onOpenMeetingFolder}
           meetingId={meetingId}
           meetingFolderPath={meetingFolderPath}
+          meetingTitle={meetingTitle}
           onRefetchTranscripts={onRefetchTranscripts}
           onExportMarkdown={onExportMarkdown}
           isExporting={isExporting}

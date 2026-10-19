@@ -54,7 +54,6 @@ export default function Home() {
     setIsStopping,
     pendingPostRecording,
     handlePostRecordingChoice,
-    postRecordingProgress,
   } = useRecordingStop(
     setIsRecordingState,
     setIsRecordingDisabled
@@ -264,7 +263,6 @@ export default function Home() {
         }}
         onChoose={handlePostRecordingChoice}
         onDismiss={() => void handlePostRecordingChoice('keep')}
-        progress={postRecordingProgress}
       />
       <div className="flex flex-1 overflow-hidden">
         {showDashboard ? (
