@@ -12,8 +12,6 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::{Mutex, RwLock};
 
-#[cfg(target_os = "windows")]
-
 use super::models;
 
 // ============================================================================

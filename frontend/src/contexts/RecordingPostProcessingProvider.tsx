@@ -3,6 +3,7 @@
 import React, { useEffect } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useRecordingStop } from '@/hooks/useRecordingStop';
+import { ensureRecordingSessionListeners } from '@/lib/background-finalize';
 
 /**
  * RecordingPostProcessingProvider
@@ -26,6 +27,11 @@ export function RecordingPostProcessingProvider({ children }: { children: React.
   const {
     handleRecordingStop,
   } = useRecordingStop(setIsRecording, setIsRecordingDisabled);
+
+  // Mounted for the app's lifetime, so session events are never missed.
+  useEffect(() => {
+    void ensureRecordingSessionListeners();
+  }, []);
 
   useEffect(() => {
     let unlistenFn: (() => void) | undefined;

@@ -118,6 +118,11 @@ pub struct TranscriptUpdate {
     pub audio_start_time: f64, // Seconds from recording start (e.g., 125.3)
     pub audio_end_time: f64,   // Seconds from recording start (e.g., 128.6)
     pub duration: f64,          // Segment duration in seconds (e.g., 3.3)
+    /// Recording session this segment belongs to. A stopped session keeps
+    /// transcribing its queued audio in the background while the next one
+    /// records, so listeners use this to keep the two transcripts apart.
+    #[serde(default)]
+    pub session_id: String,
 }
 
 // NOTE: get_transcript_history and get_recording_meeting_name functions
@@ -133,6 +138,7 @@ pub fn start_transcription_task<R: Runtime>(
     app: AppHandle<R>,
     mut transcription_receiver: tokio::sync::mpsc::UnboundedReceiver<AudioChunk>,
     defer_transcription: bool,
+    session_id: String,
 ) -> tokio::task::JoinHandle<()> {
     if defer_transcription {
         return tokio::spawn(async move {
@@ -263,6 +269,7 @@ pub fn start_transcription_task<R: Runtime>(
             let chunks_completed_clone = chunks_completed.clone();
             let input_finished_clone = input_finished.clone();
             let chunks_queued_clone = chunks_queued.clone();
+            let session_id_clone = session_id.clone();
 
             let worker_handle = tokio::spawn(async move {
                 info!("👷 Worker {} started", worker_id);
@@ -344,10 +351,13 @@ pub fn start_transcription_task<R: Runtime>(
 
                                         // Emit speech-detected event for frontend UX (only on first detection per session)
                                         // This is lightweight and provides better user feedback
+                                        // A stopped session still draining in the background must not
+                                        // flip the latch for the recording that replaced it.
                                         let current_flag = SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst);
-                                        info!("🔍 Checking speech-detected flag: current={}, will_emit={}", current_flag, !current_flag);
+                                        let is_live_session = crate::audio::recording_commands::is_current_session(&session_id_clone);
+                                        info!("🔍 Checking speech-detected flag: current={}, live_session={}", current_flag, is_live_session);
 
-                                        if !current_flag {
+                                        if !current_flag && is_live_session {
                                             SPEECH_DETECTED_EMITTED.store(true, Ordering::SeqCst);
                                             match app_clone.emit("speech-detected", serde_json::json!({
                                                 "message": "Speech activity detected"
@@ -385,6 +395,7 @@ pub fn start_transcription_task<R: Runtime>(
                                             audio_start_time,
                                             audio_end_time,
                                             duration: chunk_duration,
+                                            session_id: session_id_clone.clone(),
                                         };
 
                                         if let Err(e) = app_clone.emit("transcript-update", &update)

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useSyncExternalStore } from 'react';
 import { tr } from '@/lib/i18n';
 import { useRouter } from 'next/navigation';
 import { invoke } from '@tauri-apps/api/core';
@@ -16,11 +16,21 @@ import {
   type PostRecordingAction,
 } from '@/lib/post-recording';
 import { batchTranscriptionTarget, type ActiveSpeechSettings } from '@/lib/transcription-target';
-import type { TranscriptSegmentData } from '@/types';
+import type { Transcript } from '@/types';
 import {
   applyPinnedSummaryLanguageToMeeting,
   detectAndCacheSummaryLanguage,
 } from '@/lib/summary-language-preferences';
+import {
+  enqueueFinalization,
+  ensureRecordingSessionListeners,
+  getPendingPostRecording,
+  segmentsToTranscripts,
+  setPendingPostRecording,
+  subscribePendingPostRecording,
+  takeStoppedRecording,
+  waitForFinalizedRecording,
+} from '@/lib/background-finalize';
 
 type SummaryStatus = 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
 
@@ -41,16 +51,12 @@ interface UseRecordingStopReturn {
 
 /**
  * Custom hook for managing recording stop lifecycle.
- * Handles the complex stop sequence: transcription wait → buffer flush → SQLite save → navigation.
  *
- * Features:
- * - Transcription completion polling (60s max, 500ms interval)
- * - Transcript buffer flush coordination
- * - SQLite meeting save with folder_path from sessionStorage
- * - Comprehensive analytics tracking (duration, word count, activation)
- * - Auto-navigation to meeting details
- * - Toast notifications for success/error
- * - Window exposure for Rust callbacks
+ * Stopping returns the UI to idle as soon as the capture is closed, so the next
+ * meeting can be recorded right away. The rest runs in the background, one
+ * recording at a time (lib/background-finalize): wait for the backend to finish
+ * transcribing the queued audio, optional cleanup, SQLite save, analytics, and
+ * a toast that links to the meeting.
  */
 export function useRecordingStop(
   setIsRecording: (value: boolean) => void,
@@ -71,9 +77,11 @@ export function useRecordingStop(
    *
    * Non-null while the post-recording dialog should be shown.
    */
-  const [pendingPostRecording, setPendingPostRecording] = useState<{
-    meetingId: string;
-  } | null>(null);
+  const pendingPostRecording = useSyncExternalStore(
+    subscribePendingPostRecording,
+    getPendingPostRecording,
+    () => null,
+  );
   const [postRecordingProgress, setPostRecordingProgress] = useState<{
     percentage: number;
     stage: string;
@@ -85,6 +93,7 @@ export function useRecordingStop(
     clearTranscripts,
     meetingTitle,
     markMeetingAsSaved,
+    currentMeetingId,
   } = useTranscripts();
 
   const {
@@ -100,58 +109,9 @@ export function useRecordingStop(
   // Guard to prevent duplicate/concurrent stop calls (e.g., from UI and tray simultaneously)
   const stopInProgressRef = useRef(false);
 
-  // Promise to track recording-stopped event data (fixes race condition with recording-stop-complete)
-  const recordingStoppedDataRef = useRef<Promise<void> | null>(null);
-
-  // Set up recording-stopped listener for meeting navigation
   useEffect(() => {
-    let unlistenFn: (() => void) | undefined;
-
-    const setupRecordingStoppedListener = async () => {
-      try {
-        console.log('Setting up recording-stopped listener for navigation...');
-        unlistenFn = await listen<{
-          message: string;
-          folder_path?: string;
-          meeting_name?: string;
-          transcription_deferred?: boolean;
-        }>('recording-stopped', async (event) => {
-          // Create promise that resolves when sessionStorage is set (prevents race condition)
-          recordingStoppedDataRef.current = (async () => {
-            const { folder_path, meeting_name, transcription_deferred } = event.payload;
-
-            // Store folder_path and meeting_name for later use in handleRecordingStop
-            if (folder_path) {
-              sessionStorage.setItem('last_recording_folder_path', folder_path);
-            }
-            if (meeting_name) {
-              sessionStorage.setItem('last_recording_meeting_name', meeting_name);
-            }
-            // Recorded per session, not read from preferences at stop time: the
-            // user may have changed the setting while recording, and the stop path
-            // must reflect what this recording actually did.
-            sessionStorage.setItem(
-              'last_recording_deferred',
-              transcription_deferred ? 'true' : 'false',
-            );
-          })();
-
-        });
-        console.log('Recording stopped listener setup complete');
-      } catch (error) {
-        console.error('Failed to setup recording stopped listener:', error);
-      }
-    };
-
-    setupRecordingStoppedListener();
-
-    return () => {
-      console.log('Cleaning up recording stopped listener...');
-      if (unlistenFn) {
-        unlistenFn();
-      }
-    };
-  }, [router]);
+    void ensureRecordingSessionListeners();
+  }, []);
 
   /**
    * Navigate to a saved meeting.
@@ -200,8 +160,6 @@ export function useRecordingStop(
       }
 
       try {
-        setStatus(RecordingStatus.PROCESSING_TRANSCRIPTS, 'Cleaning up the transcript...');
-
         const joined = segments.map((segment) => segment.text).join('\n');
         const outcome = await invoke<{
           cleaned: string | null;
@@ -262,330 +220,78 @@ export function useRecordingStop(
         return segments;
       }
     },
-    [setStatus],
+    [],
   );
 
   // Main recording stop handler
   const handleRecordingStop = useCallback(async (isCallApi: boolean) => {
-    if (recordingStoppedDataRef.current) {
-      await recordingStoppedDataRef.current;
-    }
-
     // Guard: prevent duplicate/concurrent stop calls
     if (stopInProgressRef.current) {
       return;
     }
     stopInProgressRef.current = true;
 
-    // Set status to STOPPING immediately
-    setStatus(RecordingStatus.STOPPING);
-    setIsRecording(false);
-    setIsRecordingDisabled(true);
-    const stopStartTime = Date.now();
-
     try {
-      console.log('Post-stop processing (new implementation)...', {
-        stop_initiated_at: new Date(stopStartTime).toISOString(),
-        current_transcript_count: transcriptsRef.current.length
-      });
+      await ensureRecordingSessionListeners();
 
       // Note: stop_recording is already called by RecordingControls.stopRecordingAction
-      // This function only handles post-stop processing (transcription wait, API call, navigation)
-      console.log('Recording already stopped by RecordingControls, processing transcription...');
+      // (or by the tray / floating bar). By now the capture is closed and the
+      // backend is finishing this session in the background.
+      // Only a real stop consumes the event: an error path (callApi false) must
+      // not take the one belonging to a stop that follows it.
+      const stopped = isCallApi ? await takeStoppedRecording() : null;
+      const sessionId = stopped?.session_id ?? null;
 
-      // Whether this recording skipped realtime transcription. Read from the stop
-      // event rather than preferences: the setting may have changed mid-recording.
-      const deferred =
-        sessionStorage.getItem('last_recording_deferred') === 'true';
-
-      // Wait for transcription to complete
-      setStatus(RecordingStatus.PROCESSING_TRANSCRIPTS, 'Waiting for transcription...');
-      console.log('Waiting for transcription to complete...');
-
-      const MAX_WAIT_TIME = 60000; // 60 seconds maximum wait (increased for longer processing)
-      const POLL_INTERVAL = 500; // Check every 500ms
-      let elapsedTime = 0;
-      // In deferred mode no chunks were ever queued for transcription, so there is
-      // nothing to wait for: going through the poll loop would stall the stop
-      // sequence for the "no recent activity" grace period on every recording.
-      let transcriptionComplete = deferred;
-
-      // Listen for transcription-complete event
-      const unlistenComplete = await listen('transcription-complete', () => {
-        console.log('Received transcription-complete event');
-        transcriptionComplete = true;
-      });
-
-      // Poll for transcription status
-      while (elapsedTime < MAX_WAIT_TIME && !transcriptionComplete) {
-        try {
-          const status = await transcriptService.getTranscriptionStatus();
-          console.log('Transcription status:', status);
-
-          // Check if transcription is complete
-          if (!status.is_processing && status.chunks_in_queue === 0) {
-            console.log('Transcription complete - no active processing and no chunks in queue');
-            transcriptionComplete = true;
-            break;
-          }
-
-          // If no activity for more than 8 seconds and no chunks in queue, consider it done (increased from 5s to 8s)
-          if (status.last_activity_ms > 8000 && status.chunks_in_queue === 0) {
-            console.log('Transcription likely complete - no recent activity and empty queue');
-            transcriptionComplete = true;
-            break;
-          }
-
-          // Update user with current status
-          if (status.chunks_in_queue > 0) {
-            console.log(`Processing ${status.chunks_in_queue} remaining audio chunks...`);
-            setStatus(RecordingStatus.PROCESSING_TRANSCRIPTS, `Processing ${status.chunks_in_queue} remaining chunks...`);
-          }
-
-          // Wait before next check
-          await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
-          elapsedTime += POLL_INTERVAL;
-        } catch (error) {
-          console.error('Error checking transcription status:', error);
-          break;
-        }
-      }
-
-      // Clean up listener
-      console.log('🧹 CLEANUP: Cleaning up transcription-complete listener');
-      unlistenComplete();
-
-      if (deferred) {
-        // No live transcription happened, so there are no late segments to wait
-        // for and nothing in the buffer to flush.
-        console.log('⏩ Transcription was deferred; skipping the post-wait grace period');
-      } else if (!transcriptionComplete && elapsedTime >= MAX_WAIT_TIME) {
-        console.warn('⏰ Transcription wait timeout reached after', elapsedTime, 'ms');
-      } else {
-        console.log('✅ Transcription completed after', elapsedTime, 'ms');
-        // Wait longer for any late transcript segments (increased from 1s to 4s)
-        console.log('⏳ Waiting for late transcript segments...');
-        await new Promise(resolve => setTimeout(resolve, 4000));
-      }
-
-      // Final buffer flush: process ALL remaining transcripts regardless of timing
-      const flushStartTime = Date.now();
-      console.log('🔄 Final buffer flush: forcing processing of any remaining transcripts...', {
-        flush_started_at: new Date(flushStartTime).toISOString(),
-        time_since_stop: flushStartTime - stopStartTime,
-        current_transcript_count: transcriptsRef.current.length
-      });
-      setStatus(RecordingStatus.PROCESSING_TRANSCRIPTS, 'Flushing transcript buffer...');
+      // Snapshot what is on screen: the fallback transcript if the backend result
+      // never arrives, and the recovery entry that belongs to this recording.
       flushBuffer();
-      const flushEndTime = Date.now();
-      console.log('✅ Final buffer flush completed', {
-        flush_duration: flushEndTime - flushStartTime,
-        total_time_since_stop: flushEndTime - stopStartTime,
-        final_transcript_count: transcriptsRef.current.length
-      });
+      const onScreenTranscripts = [...transcriptsRef.current];
+      const recoveryMeetingId =
+        currentMeetingId || sessionStorage.getItem('indexeddb_current_meeting_id');
+      const titleAtStop = stopped?.meeting_name || meetingTitle || 'New Meeting';
 
-      // NOTE: Status remains PROCESSING_TRANSCRIPTS until we start saving
+      // Back to idle now, so the next meeting can start while this one finishes.
+      setStatus(RecordingStatus.IDLE);
+      setIsRecording(false);
+      setIsMeetingActive(false);
+      setIsRecordingDisabled(false);
 
-      // Wait a bit more to ensure all transcript state updates have been processed
-      console.log('Waiting for transcript state updates to complete...');
-      await new Promise(resolve => setTimeout(resolve, 500));
-
-      // Save to SQLite
-      // NOTE: enabled to save COMPLETE transcripts after frontend receives all updates
-      // This ensures user sees all transcripts streaming in before database save
-      //
-      // In deferred mode the meeting is saved even though it has no transcript rows:
-      // without a meeting record the audio on disk is unreachable from the UI, so it
-      // could never be transcribed afterwards. An empty transcript list is a valid
-      // state for a saved recording.
-      if (isCallApi && (transcriptionComplete || deferred)) {
-
-        setStatus(RecordingStatus.SAVING, 'Saving meeting to database...');
-
-        // Get fresh transcript state (ALL transcripts including late ones)
-        let freshTranscripts = [...transcriptsRef.current];
-
-        // Cleanup runs before saving so the database stores the cleaned text and
-        // the user never sees the raw version replaced afterwards.
-        freshTranscripts = await applyTranscriptCleanup(freshTranscripts);
-
-        // Get folder_path and meeting_name from recording-stopped event
-        const folderPath = sessionStorage.getItem('last_recording_folder_path');
-        const savedMeetingName = sessionStorage.getItem('last_recording_meeting_name');
-
-        console.log('💾 Saving COMPLETE transcripts to database...', {
-          transcript_count: freshTranscripts.length,
-          meeting_name: savedMeetingName || meetingTitle,
-          folder_path: folderPath,
-          sample_text: freshTranscripts.length > 0 ? freshTranscripts[0].text.substring(0, 50) + '...' : 'none',
-          last_transcript: freshTranscripts.length > 0 ? freshTranscripts[freshTranscripts.length - 1].text.substring(0, 30) + '...' : 'none',
-        });
-
-        try {
-          const responseData = await storageService.saveMeeting(
-            savedMeetingName || meetingTitle || 'New Meeting',  // PREFER savedMeetingName (backend source)
-            freshTranscripts,
-            folderPath
-          );
-
-          const meetingId = responseData.meeting_id;
-          if (!meetingId) {
-            console.error('No meeting_id in response:', responseData);
-            throw new Error('No meeting ID received from save operation');
-          }
-
-          let shouldDetectSummaryLanguage = false;
-          try {
-            shouldDetectSummaryLanguage = !(await applyPinnedSummaryLanguageToMeeting(meetingId));
-          } catch (error) {
-            console.warn('Failed to apply pinned summary language preference for new meeting:', error);
-            toast.warning(tr('toast.defaultLangFailed'), {
-              description: tr('toast.defaultLangFailedHint'),
-            });
-          }
-
-          if (shouldDetectSummaryLanguage) {
-            try {
-              await detectAndCacheSummaryLanguage(
-                meetingId,
-                freshTranscripts.map(t => t.text)
-              );
-            } catch (error) {
-              console.warn('Failed to detect summary language for new meeting:', error);
-              toast.warning(tr('toast.detectLangFailed'), {
-                description: tr('toast.detectLangFailedHint'),
-              });
-            }
-          }
-
-          console.log('✅ Successfully saved COMPLETE meeting with ID:', meetingId);
-          console.log('   Transcripts:', freshTranscripts.length);
-          console.log('   folder_path:', folderPath);
-
-          // Mark meeting as saved in IndexedDB (for recovery system)
-          await markMeetingAsSaved();
-
-          // Clean up session storage
-          sessionStorage.removeItem('last_recording_folder_path');
-          sessionStorage.removeItem('last_recording_meeting_name');
-          // Clean up IndexedDB meeting ID (redundant with markMeetingAsSaved cleanup, but ensures cleanup)
-          sessionStorage.removeItem('indexeddb_current_meeting_id');
-
-          // Refetch meetings and set current meeting
-          await refetchMeetings();
-
-          try {
-            const meetingData = await storageService.getMeeting(meetingId);
-            if (meetingData) {
-              setCurrentMeeting({
-                id: meetingId,
-                title: meetingData.title
-              });
-              console.log('✅ Current meeting set:', meetingData.title);
-            }
-          } catch (error) {
-            console.warn('Could not fetch meeting details, using ID only:', error);
-            setCurrentMeeting({ id: meetingId, title: savedMeetingName || meetingTitle || 'New Meeting' });
-          }
-
-          // Mark as completed
-          setStatus(RecordingStatus.COMPLETED);
-
-          if (deferred) {
-            // Deferred transcription has no live text, so the sensible next step is
-            // a choice rather than a silent save. Ask, then act on the answer.
-            toast.success(tr('toast.recordingSaved'), {
-              description: tr('toast.recordingSavedChoose'),
-            });
-            setPendingPostRecording({ meetingId });
-          } else {
-            // Show success toast with navigation option
-            toast.success(tr('toast.recordingSavedOk'), {
-              description: tr('toast.segmentsSaved', { count: freshTranscripts.length }),
-              action: {
-                label: tr('toast.viewMeeting'),
-                onClick: () => {
-                  router.push(`/meeting-details?id=${meetingId}`);
-                  Analytics.trackButtonClick('view_meeting_from_toast', 'recording_complete');
-                }
-              },
-              duration: 10000,
-            });
-
-            // Auto-navigate after a short delay with source parameter
-            setTimeout(() => navigateToMeeting(meetingId), 2000);
-          }
-          // Track meeting completion analytics
-          try {
-            // Calculate meeting duration from transcript timestamps
-            let durationSeconds = 0;
-            if (freshTranscripts.length > 0 && freshTranscripts[0].audio_start_time !== undefined) {
-              // Use audio_end_time of last transcript if available
-              const lastTranscript = freshTranscripts[freshTranscripts.length - 1];
-              durationSeconds = lastTranscript.audio_end_time || lastTranscript.audio_start_time || 0;
-            }
-
-            // Calculate word count
-            const transcriptWordCount = freshTranscripts
-              .map(t => t.text.split(/\s+/).length)
-              .reduce((a, b) => a + b, 0);
-
-            // Calculate words per minute
-            const wordsPerMinute = durationSeconds > 0 ? transcriptWordCount / (durationSeconds / 60) : 0;
-
-            // Get meetings count today
-            const meetingsToday = await Analytics.getMeetingsCountToday();
-
-            // Track meeting completed
-            await Analytics.trackMeetingCompleted(meetingId, {
-              duration_seconds: durationSeconds,
-              transcript_segments: freshTranscripts.length,
-              transcript_word_count: transcriptWordCount,
-              words_per_minute: wordsPerMinute,
-              meetings_today: meetingsToday
-            });
-
-            // Update meeting count in analytics.json
-            await Analytics.updateMeetingCount();
-
-            // Check for activation (first meeting)
-            const { Store } = await import('@tauri-apps/plugin-store');
-            const store = await Store.load('analytics.json');
-            const totalMeetings = await store.get<number>('total_meetings');
-
-            if (totalMeetings === 1) {
-              const daysSinceInstall = await Analytics.calculateDaysSince('first_launch_date');
-              await Analytics.track('user_activated', {
-                meetings_count: '1',
-                days_since_install: daysSinceInstall?.toString() || 'null',
-                first_meeting_duration_seconds: durationSeconds.toString()
-              });
-            }
-          } catch (analyticsError) {
-            console.error('Failed to track meeting completion analytics:', analyticsError);
-            // Don't block user flow on analytics errors
-          }
-
-        } catch (saveError) {
-          console.error('Failed to save meeting to database:', saveError);
-          setStatus(RecordingStatus.ERROR, saveError instanceof Error ? saveError.message : tr('toast.unknownError'));
-          toast.error(tr('toast.saveMeetingFailed'), {
-            description: saveError instanceof Error ? saveError.message : tr('toast.unknownError')
-          });
-          throw saveError;
-        }
-      } else {
-        // No save needed, go back to IDLE
-        setStatus(RecordingStatus.IDLE);
+      if (!isCallApi) {
+        return;
+      }
+      if (!stopped) {
+        // No stop event: this stop was a duplicate (tray and button at once) or
+        // the session never started. The stop that did happen saves the meeting;
+        // anything else stays in the recovery store.
+        console.warn('No recording-stopped event for this stop; nothing to finalize');
+        return;
       }
 
-      setIsMeetingActive(false);
-      // isRecording already set to false at function start
-      setIsRecordingDisabled(false);
+      console.log('Recording stopped; finishing in the background', {
+        session_id: sessionId,
+        on_screen_transcripts: onScreenTranscripts.length,
+      });
+
+      const toastId = `finalize-${sessionId ?? Date.now()}`;
+      toast.loading(tr('toast.finishingRecording', { name: titleAtStop }), {
+        id: toastId,
+        description: tr('toast.finishingRecordingHint'),
+      });
+
+      void enqueueFinalization(() =>
+        finalizeRecordingRef.current({
+          sessionId,
+          toastId,
+          titleAtStop,
+          onScreenTranscripts,
+          recoveryMeetingId,
+          folderPathAtStop: stopped.folder_path ?? null,
+          deferredAtStop: stopped.transcription_deferred ?? false,
+        }),
+      );
     } catch (error) {
       console.error('Error in handleRecordingStop:', error);
       setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : tr('toast.unknownError'));
-      // isRecording already set to false at function start
       setIsRecordingDisabled(false);
     } finally {
       // Always reset the guard flag when done
@@ -597,18 +303,230 @@ export function useRecordingStop(
     setStatus,
     transcriptsRef,
     flushBuffer,
-    clearTranscripts,
+    currentMeetingId,
     meetingTitle,
-    markMeetingAsSaved,
-    refetchMeetings,
-    setCurrentMeeting,
-    setMeetings,
-    meetings,
     setIsMeetingActive,
-    router,
-    navigateToMeeting,
-    setPendingPostRecording,
   ]);
+
+  /**
+   * Save one stopped recording once the backend has finished it.
+   *
+   * Runs from the background queue, possibly while the next meeting records,
+   * so it never touches the live recording status or transcript.
+   */
+  const finalizeRecording = async ({
+    sessionId,
+    toastId,
+    titleAtStop,
+    onScreenTranscripts,
+    recoveryMeetingId,
+    folderPathAtStop,
+    deferredAtStop,
+  }: {
+    sessionId: string | null;
+    toastId: string;
+    titleAtStop: string;
+    onScreenTranscripts: Transcript[];
+    recoveryMeetingId: string | null;
+    folderPathAtStop: string | null;
+    deferredAtStop: boolean;
+  }) => {
+    try {
+      const finalized = sessionId ? await waitForFinalizedRecording(sessionId) : null;
+      if (sessionId && !finalized) {
+        console.warn('Background finalization result not received; saving the on-screen transcript');
+      }
+
+      const deferred = finalized?.transcription_deferred ?? deferredAtStop;
+      const folderPath = finalized?.folder_path ?? folderPathAtStop;
+      const meetingName = finalized?.meeting_name || titleAtStop;
+
+      // The backend's copy includes the segments transcribed after Stop. Keep the
+      // on-screen one only if it somehow holds more.
+      let freshTranscripts = finalized ? segmentsToTranscripts(finalized.segments) : [];
+      if (freshTranscripts.length < onScreenTranscripts.length) {
+        freshTranscripts = onScreenTranscripts;
+      }
+
+      // Cleanup runs before saving so the database stores the cleaned text and
+      // the user never sees the raw version replaced afterwards.
+      freshTranscripts = await applyTranscriptCleanup(freshTranscripts);
+
+      console.log('💾 Saving COMPLETE transcripts to database...', {
+        session_id: sessionId,
+        transcript_count: freshTranscripts.length,
+        meeting_name: meetingName,
+        folder_path: folderPath,
+      });
+
+      // In deferred mode the meeting is saved even though it has no transcript rows:
+      // without a meeting record the audio on disk is unreachable from the UI, so it
+      // could never be transcribed afterwards.
+      const responseData = await storageService.saveMeeting(meetingName, freshTranscripts, folderPath);
+      const meetingId = responseData.meeting_id;
+      if (!meetingId) {
+        console.error('No meeting_id in response:', responseData);
+        throw new Error('No meeting ID received from save operation');
+      }
+
+      let shouldDetectSummaryLanguage = false;
+      try {
+        shouldDetectSummaryLanguage = !(await applyPinnedSummaryLanguageToMeeting(meetingId));
+      } catch (error) {
+        console.warn('Failed to apply pinned summary language preference for new meeting:', error);
+        toast.warning(tr('toast.defaultLangFailed'), {
+          description: tr('toast.defaultLangFailedHint'),
+        });
+      }
+
+      if (shouldDetectSummaryLanguage) {
+        try {
+          await detectAndCacheSummaryLanguage(
+            meetingId,
+            freshTranscripts.map(t => t.text)
+          );
+        } catch (error) {
+          console.warn('Failed to detect summary language for new meeting:', error);
+          toast.warning(tr('toast.detectLangFailed'), {
+            description: tr('toast.detectLangFailedHint'),
+          });
+        }
+      }
+
+      console.log('✅ Successfully saved COMPLETE meeting with ID:', meetingId);
+
+      // Mark this recording's recovery entry as saved (not whichever is current now)
+      await markMeetingAsSaved(recoveryMeetingId);
+
+      await refetchMeetings();
+
+      // Only move the user if nothing new is being recorded and they are still on
+      // the recording page; otherwise the toast's button opens the meeting.
+      const recordingNow = await invoke<boolean>('is_recording').catch(() => false);
+      const canNavigate = !recordingNow && window.location.pathname === '/';
+
+      if (!recordingNow) {
+        try {
+          const meetingData = await storageService.getMeeting(meetingId);
+          setCurrentMeeting({ id: meetingId, title: meetingData?.title || meetingName });
+        } catch (error) {
+          console.warn('Could not fetch meeting details, using ID only:', error);
+          setCurrentMeeting({ id: meetingId, title: meetingName });
+        }
+      }
+
+      const openMeeting = {
+        label: tr('toast.viewMeeting'),
+        onClick: () => {
+          router.push(`/meeting-details?id=${meetingId}`);
+          Analytics.trackButtonClick('view_meeting_from_toast', 'recording_complete');
+        },
+      };
+
+      if (deferred) {
+        // Deferred transcription has no live text, so the sensible next step is
+        // a choice rather than a silent save. Ask, then act on the answer.
+        if (canNavigate) {
+          toast.success(tr('toast.recordingSaved'), {
+            id: toastId,
+            description: tr('toast.recordingSavedChoose'),
+          });
+          setPendingPostRecording({ meetingId, folderPath });
+        } else {
+          toast.success(tr('toast.recordingSaved'), {
+            id: toastId,
+            description: tr('toast.recordingSavedLater'),
+            action: openMeeting,
+            duration: 10000,
+          });
+        }
+      } else {
+        toast.success(tr('toast.recordingSavedOk'), {
+          id: toastId,
+          description: tr('toast.segmentsSaved', { count: freshTranscripts.length }),
+          action: openMeeting,
+          duration: 10000,
+        });
+
+        if (canNavigate) {
+          // Auto-navigate after a short delay with source parameter
+          setTimeout(async () => {
+            const startedMeanwhile = await invoke<boolean>('is_recording').catch(() => false);
+            if (!startedMeanwhile && window.location.pathname === '/') {
+              navigateToMeeting(meetingId);
+            }
+          }, 2000);
+        }
+      }
+
+      if (finalized?.save_error) {
+        toast.warning(tr('toast.audioSaveIssue'), { description: finalized.save_error });
+      }
+
+      // Track meeting completion analytics
+      try {
+        // Calculate meeting duration from transcript timestamps
+        let durationSeconds = 0;
+        if (freshTranscripts.length > 0 && freshTranscripts[0].audio_start_time !== undefined) {
+          // Use audio_end_time of last transcript if available
+          const lastTranscript = freshTranscripts[freshTranscripts.length - 1];
+          durationSeconds = lastTranscript.audio_end_time || lastTranscript.audio_start_time || 0;
+        }
+
+        // Calculate word count
+        const transcriptWordCount = freshTranscripts
+          .map(t => t.text.split(/\s+/).length)
+          .reduce((a, b) => a + b, 0);
+
+        // Calculate words per minute
+        const wordsPerMinute = durationSeconds > 0 ? transcriptWordCount / (durationSeconds / 60) : 0;
+
+        // Get meetings count today
+        const meetingsToday = await Analytics.getMeetingsCountToday();
+
+        // Track meeting completed
+        await Analytics.trackMeetingCompleted(meetingId, {
+          duration_seconds: durationSeconds,
+          transcript_segments: freshTranscripts.length,
+          transcript_word_count: transcriptWordCount,
+          words_per_minute: wordsPerMinute,
+          meetings_today: meetingsToday
+        });
+
+        // Update meeting count in analytics.json
+        await Analytics.updateMeetingCount();
+
+        // Check for activation (first meeting)
+        const { Store } = await import('@tauri-apps/plugin-store');
+        const store = await Store.load('analytics.json');
+        const totalMeetings = await store.get<number>('total_meetings');
+
+        if (totalMeetings === 1) {
+          const daysSinceInstall = await Analytics.calculateDaysSince('first_launch_date');
+          await Analytics.track('user_activated', {
+            meetings_count: '1',
+            days_since_install: daysSinceInstall?.toString() || 'null',
+            first_meeting_duration_seconds: durationSeconds.toString()
+          });
+        }
+      } catch (analyticsError) {
+        console.error('Failed to track meeting completion analytics:', analyticsError);
+        // Don't block user flow on analytics errors
+      }
+    } catch (saveError) {
+      // The transcript stays in the recovery store (not marked saved), so the
+      // recovery dialog can still bring it back.
+      console.error('Failed to save meeting to database:', saveError);
+      toast.error(tr('toast.saveMeetingFailed'), {
+        id: toastId,
+        description: saveError instanceof Error ? saveError.message : tr('toast.unknownError')
+      });
+    }
+  };
+  // The queued job runs later, possibly after this hook re-rendered or unmounted;
+  // it uses the latest closure rather than the one from the stop.
+  const finalizeRecordingRef = useRef(finalizeRecording);
+  finalizeRecordingRef.current = finalizeRecording;
 
   /**
    * Wait until a retranscription finishes.
@@ -704,8 +622,7 @@ export function useRecordingStop(
       // frozen click. It closes in the finally block (navigation unmounts it).
       setPostRecordingProgress(null);
       try {
-        const { meetingId } = pending;
-        const folderPath = sessionStorage.getItem('last_recording_folder_path');
+        const { meetingId, folderPath } = pending;
 
         if (action !== 'keep' && actionNeedsTranscription(action) && folderPath) {
           try {

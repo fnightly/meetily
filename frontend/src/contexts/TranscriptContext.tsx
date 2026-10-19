@@ -8,6 +8,7 @@ import { transcriptService } from '@/services/transcriptService';
 import { recordingService } from '@/services/recordingService';
 import { indexedDBService } from '@/services/indexedDBService';
 import { tr } from '@/lib/i18n';
+import { isFinishedSession } from '@/lib/background-finalize';
 
 interface TranscriptContextType {
   transcripts: Transcript[];
@@ -20,7 +21,8 @@ interface TranscriptContextType {
   setMeetingTitle: (title: string) => void;
   clearTranscripts: () => void;
   currentMeetingId: string | null;
-  markMeetingAsSaved: () => Promise<void>;
+  /** Mark a recovery entry saved; defaults to the current recording's. */
+  markMeetingAsSaved: (meetingId?: string | null) => Promise<void>;
 }
 
 const TranscriptContext = createContext<TranscriptContextType | undefined>(undefined);
@@ -38,6 +40,10 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
   const isUserAtBottomRef = useRef<boolean>(true);
   const transcriptContainerRef = useRef<HTMLDivElement>(null);
   const finalFlushRef = useRef<(() => void) | null>(null);
+
+  // Latest recording id for callbacks that outlive a render (background saves)
+  const currentMeetingIdRef = useRef<string | null>(currentMeetingId);
+  currentMeetingIdRef.current = currentMeetingId;
 
   // Keep ref updated with current transcripts
   useEffect(() => {
@@ -297,6 +303,13 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
             buffer_size_before: transcriptBuffer.size
           });
 
+          // A stopped recording keeps transcribing its queued audio in the
+          // background; those segments are saved with that meeting and must not
+          // appear in (or be recovered with) the one recording now.
+          if (isFinishedSession(update.session_id)) {
+            return;
+          }
+
           // Check for duplicate sequence_id before processing
           if (transcriptBuffer.has(update.sequence_id)) {
             console.log('🚫 MAIN LISTENER: Duplicate sequence_id, skipping buffer:', update.sequence_id);
@@ -487,10 +500,12 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
     // Don't clear currentMeetingId here - it will be set by recording-started event
   }, []);
 
-  // Mark current meeting as saved in IndexedDB
-  const markMeetingAsSaved = useCallback(async () => {
+  // Mark a meeting as saved in IndexedDB. A recording finalized in the
+  // background passes its own id: by then the current one may be a newer recording.
+  const markMeetingAsSaved = useCallback(async (explicitMeetingId?: string | null) => {
     // Try context state first, fallback to sessionStorage
-    const meetingId = currentMeetingId || sessionStorage.getItem('indexeddb_current_meeting_id');
+    const currentId = currentMeetingIdRef.current || sessionStorage.getItem('indexeddb_current_meeting_id');
+    const meetingId = explicitMeetingId || currentId;
 
     if (!meetingId) {
       console.error('[IndexedDB] ❌ Cannot mark meeting as saved: No meeting ID available!');
@@ -502,9 +517,11 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
     try {
       await indexedDBService.markMeetingSaved(meetingId);
 
-      // Clear both sources
-      setCurrentMeetingId(null);
-      sessionStorage.removeItem('indexeddb_current_meeting_id');
+      // Clear both sources, unless they already point at a newer recording
+      if (meetingId === currentId) {
+        setCurrentMeetingId(null);
+        sessionStorage.removeItem('indexeddb_current_meeting_id');
+      }
     } catch (error) {
       console.error('[IndexedDB] ❌ Failed to mark meeting as saved:', error);
     }

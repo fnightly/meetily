@@ -23,6 +23,7 @@ import { indexedDBService } from '@/services/indexedDBService';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
 import { HomeDashboard } from '@/components/home/HomeDashboard';
+import { pendingFinalizationCount } from '@/lib/background-finalize';
 
 export default function Home() {
   // Local page state (not moved to contexts)
@@ -84,7 +85,10 @@ export default function Home() {
       try {
         // Skip recovery check if currently recording or processing stop
         // This prevents the recovery dialog from showing when:
+        // A stopped recording finishing in the background is not saved yet and
+        // would otherwise be offered for recovery.
         if (recordingState.isRecording ||
+          pendingFinalizationCount() > 0 ||
           status === RecordingStatus.STOPPING ||
           status === RecordingStatus.PROCESSING_TRANSCRIPTS ||
           status === RecordingStatus.SAVING) {
