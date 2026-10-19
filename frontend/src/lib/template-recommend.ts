@@ -15,6 +15,7 @@ const RULES: Rule[] = [
   { id: 'zh_investment_committee', pattern: /(投决|投委|投资决策|IC\s*会|立项会|过会)/i },
   { id: 'zh_project_pitch', pattern: /(路演|尽调|尽职调查|BP|融资|估值|创始人|pitch|due\s*diligence)/i },
   { id: 'zh_job_interview', pattern: /(面试|候选人|interview|简历|offer)/i },
+  { id: 'zh_english_lesson', pattern: /(英语|英文课|口语课|外教|自然拼读|绘本|单词|phonics|english\s*(class|lesson)|vocabulary)/i },
   { id: 'zh_customer_interview', pattern: /(客户访谈|用户访谈|访谈|调研|客户拜访|customer\s*interview|user\s*research)/i },
   { id: 'zh_weekly_meeting', pattern: /(周会|例会|周报|weekly|周例会|双周会)/i },
   { id: 'daily_standup', pattern: /(站会|standup|stand-up|晨会|daily)/i },
