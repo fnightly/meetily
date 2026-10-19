@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import { ExportDialog } from '@/components/ExportDialog';
 import { RecordingAudioPreview } from '@/components/RecordingAudioPreview';
+import { TranscribeRecordingDialog } from '@/components/TranscribeRecordingDialog';
 import { useRecordingTranscription } from '@/hooks/useRecordingTranscription';
 import {
   groupByDate,
@@ -42,6 +43,7 @@ import {
   type LibrarySort,
 } from '@/lib/library-view';
 import { transcriptionStageKey } from '@/lib/transcription-queue';
+import type { ModelOption } from '@/lib/transcription-model-options';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useI18n } from '@/contexts/I18nContext';
@@ -105,7 +107,10 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
   const [batchBusy, setBatchBusy] = useState(false);
   /** Folder whose inline audio player is expanded; only one at a time. */
   const [previewFolder, setPreviewFolder] = useState<string | null>(null);
-  const [retranscribeTarget, setRetranscribeTarget] = useState<RecordingEntry | null>(null);
+  // Recordings waiting on the model picker; `replace` when a transcript exists.
+  const [transcribeRequest, setTranscribeRequest] = useState<
+    { entries: RecordingEntry[]; replace: boolean } | null
+  >(null);
 
   const folderToMeeting = useMemo(() => meetingIdsByFolder(entries), [entries]);
 
@@ -378,10 +383,10 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
     );
   };
 
-  const handleRetranscribeConfirm = () => {
-    const entry = retranscribeTarget;
-    setRetranscribeTarget(null);
-    if (entry) transcription.enqueue([entry]);
+  const handleTranscribeConfirm = (model: ModelOption) => {
+    const request = transcribeRequest;
+    setTranscribeRequest(null);
+    if (request) transcription.enqueue(request.entries, model);
   };
 
   const handleSummarise = (entry: RecordingEntry) => {
@@ -557,7 +562,7 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
                     variant="outline"
                     disabled={batchBusy || transcribableSelected.length === 0}
                     title={t('library.transcribeSelectedHint')}
-                    onClick={() => transcription.enqueue(transcribableSelected)}
+                    onClick={() => setTranscribeRequest({ entries: transcribableSelected, replace: false })}
                   >
                     <FileText className="w-4 h-4" />
                     <span className="ml-1.5">
@@ -817,7 +822,7 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => transcription.enqueue([entry])}
+                        onClick={() => setTranscribeRequest({ entries: [entry], replace: false })}
                         disabled={isBusy}
                         title={t('library.transcribeTitle')}
                       >
@@ -829,7 +834,7 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => setRetranscribeTarget(entry)}
+                        onClick={() => setTranscribeRequest({ entries: [entry], replace: true })}
                         disabled={isBusy}
                         title={t('library.retranscribeTitle')}
                       >
@@ -933,25 +938,24 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
         </DialogContent>
       </Dialog>
 
-      {/* Re-transcribe confirmation */}
-      <Dialog open={retranscribeTarget !== null} onOpenChange={(open) => !open && setRetranscribeTarget(null)}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>{t('library.retranscribeDialogTitle')}</DialogTitle>
-          </DialogHeader>
-          <p className="text-sm text-gray-600">
-            {t('library.retranscribeDialogBody', { name: retranscribeTarget?.meeting_name ?? '' })}
-          </p>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setRetranscribeTarget(null)}>
-              {t('common.cancel')}
-            </Button>
-            <Button variant="destructive" onClick={handleRetranscribeConfirm}>
-              {t('library.retranscribe')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* Model choice before transcribing; also confirms replacing a transcript */}
+      <TranscribeRecordingDialog
+        open={transcribeRequest !== null}
+        onOpenChange={(open) => !open && setTranscribeRequest(null)}
+        title={
+          transcribeRequest?.replace
+            ? t('library.retranscribeDialogTitle')
+            : t('library.transcribeDialogTitle', { count: transcribeRequest?.entries.length ?? 0 })
+        }
+        body={
+          transcribeRequest?.replace
+            ? t('library.retranscribeDialogBody', { name: transcribeRequest.entries[0]?.meeting_name ?? '' })
+            : undefined
+        }
+        confirmLabel={transcribeRequest?.replace ? t('library.retranscribe') : t('library.transcribe')}
+        destructive={transcribeRequest?.replace}
+        onConfirm={handleTranscribeConfirm}
+      />
 
       {/* Delete confirmation */}
       <Dialog open={deleteTarget !== null} onOpenChange={(open) => !open && setDeleteTarget(null)}>

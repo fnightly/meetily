@@ -352,7 +352,7 @@ export function RetranscribeDialog({
                 </SelectTrigger>
                 <SelectContent>
                   {availableModels.map((model) => (
-                    <SelectItem key={`${model.provider}:${model.name}`} value={`${model.provider}:${model.name}`}>
+                    <SelectItem key={`${model.provider}:${model.name}`} value={`${model.provider}:${model.name}`} disabled={model.disabled}>
                       {model.displayName}{model.size_mb > 0 ? ` (${Math.round(model.size_mb)} MB)` : ""}
                     </SelectItem>
                   ))}
