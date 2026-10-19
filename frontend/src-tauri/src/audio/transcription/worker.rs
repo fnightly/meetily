@@ -4,6 +4,7 @@
 
 use super::engine::TranscriptionEngine;
 use super::provider::TranscriptionError;
+use super::text_cleanup;
 use crate::audio::AudioChunk;
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
@@ -292,6 +293,11 @@ pub fn start_transcription_task<R: Runtime>(
                     warn!("⚠️ Worker {} pre-validation: {} model not loaded - chunks may be skipped", worker_id, engine_name);
                 }
 
+                // Tail of the last emitted transcript, kept per worker/session so the
+                // decoder can be primed with names and jargon across segments. It is a
+                // local, so it can never carry text from another meeting.
+                let mut previous_context: Option<String> = None;
+
                 loop {
                     // Try to get a chunk to process
                     let chunk = {
@@ -331,11 +337,20 @@ pub fn start_transcription_task<R: Runtime>(
                                 &engine_clone,
                                 chunk,
                                 &app_clone,
+                                previous_context.clone(),
                             )
                             .await
                             {
                                 Ok((transcript, confidence_opt, is_partial)) => {
                                     let transcript = crate::dictionary::apply_active_corrections(&transcript);
+                                    // A previous-transcript prompt can make the decoder
+                                    // echo its own prompt tail at the start of this
+                                    // segment; drop that duplicate before it reaches the
+                                    // UI or the saved transcript.
+                                    let transcript = text_cleanup::strip_overlap_prefix(
+                                        previous_context.as_deref(),
+                                        &transcript,
+                                    );
                                     let confidence_str = match confidence_opt {
                                         Some(c) => format!("{:.2}", c),
                                         None => "N/A".to_string(),
@@ -405,6 +420,14 @@ pub fn start_transcription_task<R: Runtime>(
                                                 worker_id, e
                                             );
                                         }
+
+                                        // Only text this session emitted becomes context;
+                                        // the worker is created per recording, so this
+                                        // cannot prompt from another meeting.
+                                        previous_context = text_cleanup::context_tail(
+                                            &update.text,
+                                            text_cleanup::MAX_CONTEXT_CHARS,
+                                        );
                                         // PERFORMANCE: Removed verbose logging of every emission
                                     }
                                 }
@@ -586,6 +609,7 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
     engine: &TranscriptionEngine,
     chunk: AudioChunk,
     app: &AppHandle<R>,
+    previous_context: Option<String>,
 ) -> std::result::Result<(String, Option<f32>, bool), TranscriptionError> {
     // Convert to 16kHz mono for transcription
     let transcription_data = if chunk.sample_rate != 16000 {
@@ -626,7 +650,11 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
             let language = crate::get_language_preference_internal();
 
             match whisper_engine
-                .transcribe_audio_with_confidence(speech_samples, language)
+                .transcribe_audio_with_confidence_and_context(
+                    speech_samples,
+                    language,
+                    previous_context,
+                )
                 .await
             {
                 Ok((text, confidence, is_partial)) => {
@@ -704,7 +732,10 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
             // NEW: Trait-based provider (clean, unified interface)
             let language = crate::get_language_preference_internal();
 
-            match provider.transcribe(speech_samples, language).await {
+            match provider
+                .transcribe_with_context(speech_samples, language, previous_context)
+                .await
+            {
                 Ok(result) => {
                     let cleaned_text = result.text.trim().to_string();
                     if cleaned_text.is_empty() {

@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { ImagePlus, Loader2, Plus, Save, Trash2, X } from "lucide-react";
+import { Eye, ImagePlus, Loader2, Pencil, Plus, Save, Trash2, X } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -101,6 +103,27 @@ function NoteImage({ path, alt }: { path: string; alt: string }) {
   return <img src={src} alt={alt || t("notes.imageAlt")} className="max-h-80 rounded" />;
 }
 
+/** Serialise the block document to the Markdown the preview renders. */
+function blocksToMarkdown(blocks: NoteBlock[]): string {
+  return blocks
+    .map((block) => {
+      switch (block.type) {
+        case "heading": {
+          const level = Math.min(6, Math.max(1, Math.round(block.level)));
+          return `${"#".repeat(level)} ${block.text}`;
+        }
+        case "bullet":
+          return `- ${block.text}`;
+        case "image":
+          return `![${block.alt}]${block.path}`;
+        default:
+          return block.text;
+      }
+    })
+    .join("\n\n")
+    .trim();
+}
+
 export interface MeetingNotesEditorProps {
   meetingId: string;
   /**
@@ -128,6 +151,9 @@ export function MeetingNotesEditor({
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
+  // Markdown is the default reading mode: notes are written as Markdown blocks and
+  // a reader should see the rendered result, not the raw block inputs.
+  const [mode, setMode] = useState<"preview" | "edit">("preview");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Let the embedding pane show an unsaved dot next to the tab label.
@@ -294,6 +320,7 @@ export function MeetingNotesEditor({
     () => metadata?.title?.trim() || t("notes.title"),
     [metadata, t],
   );
+  const markdown = useMemo(() => blocksToMarkdown(blocks), [blocks]);
 
   const actions = (
     <div className="flex shrink-0 items-center gap-2">
@@ -301,12 +328,23 @@ export function MeetingNotesEditor({
       <Button
         variant="outline"
         size="sm"
-        onClick={() => fileInputRef.current?.click()}
-        disabled={uploading}
+        onClick={() => setMode((current) => (current === "preview" ? "edit" : "preview"))}
+        aria-pressed={mode === "preview"}
       >
-        <ImagePlus className="mr-2 h-4 w-4" />
-        {t("notes.addImage")}
+        {mode === "preview" ? <Pencil className="mr-2 h-4 w-4" /> : <Eye className="mr-2 h-4 w-4" />}
+        {mode === "preview" ? t("notes.mode.edit") : t("notes.mode.preview")}
       </Button>
+      {mode === "edit" && (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploading}
+        >
+          <ImagePlus className="mr-2 h-4 w-4" />
+          {t("notes.addImage")}
+        </Button>
+      )}
       <Button size="sm" onClick={() => void handleSave()} disabled={saving || !dirty}>
         {saving ? (
           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -369,6 +407,20 @@ export function MeetingNotesEditor({
               </div>
             )}
 
+            {mode === "preview" && blocks.length > 0 ? (
+              <div className="prose prose-slate max-w-none prose-headings:font-semibold prose-img:rounded-lg">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    img: ({ src, alt }) =>
+                      src ? <NoteImage path={String(src)} alt={alt ?? ""} /> : null,
+                  }}
+                >
+                  {markdown}
+                </ReactMarkdown>
+              </div>
+            ) : (
+            <>
             <div className="space-y-3">
               {blocks.map((block, index) => (
                 <div key={index} className="group flex items-start gap-2">
@@ -483,6 +535,8 @@ export function MeetingNotesEditor({
                 {t("notes.addImageBlock")}
               </Button>
             </div>
+            </>
+            )}
           </>
         )}
       </div>

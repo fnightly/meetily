@@ -11,6 +11,7 @@ pub mod catalog;
 pub mod provider_commands;
 pub mod cloud_provider;
 pub mod residency;
+pub mod text_cleanup;
 
 // Re-export commonly used types
 pub use catalog::{

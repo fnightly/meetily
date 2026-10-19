@@ -1244,8 +1244,11 @@ impl AudioPipeline {
                             // interleaved source was forwarded before the downmix.
                             if !stereo_system {
                                 if let Some(ref sender) = self.recording_sender_for_mixed {
+                                    // Move the mixed window into the logger instead of
+                                    // cloning ~10 KB per 600 ms window: nothing else
+                                    // reads it after the VAD call above.
                                     let recording_chunk = AudioChunk {
-                                        data: mixed_with_gain.clone(),
+                                        data: mixed_with_gain,
                                         sample_rate: self.sample_rate,
                                         timestamp: chunk.timestamp,
                                         chunk_id: self.chunk_id_counter,

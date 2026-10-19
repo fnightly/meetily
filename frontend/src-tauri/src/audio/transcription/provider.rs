@@ -62,6 +62,19 @@ pub trait TranscriptionProvider: Send + Sync {
         language: Option<String>,
     ) -> std::result::Result<TranscriptResult, TranscriptionError>;
 
+    /// Transcribe with optional preceding-transcript context.
+    ///
+    /// Only providers that can steer a decoder should override this; the default
+    /// keeps the context-free behaviour so cloud and other engines are unaffected.
+    async fn transcribe_with_context(
+        &self,
+        audio: Vec<f32>,
+        language: Option<String>,
+        _previous_context: Option<String>,
+    ) -> std::result::Result<TranscriptResult, TranscriptionError> {
+        self.transcribe(audio, language).await
+    }
+
     /// Check if a model is currently loaded
     async fn is_model_loaded(&self) -> bool;
 

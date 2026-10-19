@@ -282,23 +282,22 @@ pub async fn open_recording_folder(folder_path: String) -> Result<(), String> {
 
 /// Rename a recording.
 ///
-/// Writes the new title into `metadata.json` and renames the folder, preserving
-/// its time stamp so ordering survives the rename and two recordings cannot end
-/// up with the same folder name.
-#[tauri::command]
-pub async fn rename_saved_recording(
-    state: tauri::State<'_, AppState>,
+/// Rename a recording's audio file and folder on disk and update its metadata.
+///
+/// Shared by the library's rename command and by meeting-title saves, so renaming
+/// a meeting from the sidebar or the meeting header keeps the audio file name in
+/// step instead of leaving the old file name behind.
+pub async fn rename_recording_on_disk(
     folder_path: String,
     new_title: String,
+    rename_folder: bool,
 ) -> Result<RecordingMutationResult, String> {
     let trimmed = new_title.trim().to_string();
     if trimmed.is_empty() {
         return Err("A recording name cannot be empty".to_string());
     }
 
-    let original_path = folder_path.clone();
-
-    let result = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         let path = require_recording_folder(&folder_path)?;
 
         let folder_name = path
@@ -306,7 +305,14 @@ pub async fn rename_saved_recording(
             .map(|n| n.to_string_lossy().to_string())
             .ok_or_else(|| "Recording folder has no name".to_string())?;
 
-        let new_folder_name = renamed_folder_name(&folder_name, &trimmed);
+        // A meeting-title save only renames the audio file: the folder path is
+        // referenced by the open meeting page and by retranscription, so keeping
+        // it stable avoids leaving those pointing at a path that no longer exists.
+        let new_folder_name = if rename_folder {
+            renamed_folder_name(&folder_name, &trimmed)
+        } else {
+            folder_name.clone()
+        };
         let parent = path
             .parent()
             .ok_or_else(|| "Recording folder has no parent".to_string())?;
@@ -354,7 +360,7 @@ pub async fn rename_saved_recording(
         }
 
         let mut final_path = path.clone();
-        if new_path != path {
+        if rename_folder && new_path != path {
             if new_path.exists() {
                 return Err(format!(
                     "A recording named '{}' already exists",
@@ -373,7 +379,19 @@ pub async fn rename_saved_recording(
         })
     })
     .await
-    .map_err(|e| format!("Rename task failed: {}", e))??;
+    .map_err(|e| format!("Rename task failed: {}", e))?
+}
+
+/// Writes the new title into `metadata.json` and renames the folder and audio
+/// file, preserving the folder's time stamp so ordering survives the rename.
+#[tauri::command]
+pub async fn rename_saved_recording(
+    state: tauri::State<'_, AppState>,
+    folder_path: String,
+    new_title: String,
+) -> Result<RecordingMutationResult, String> {
+    let original_path = folder_path.clone();
+    let result = rename_recording_on_disk(folder_path, new_title, true).await?;
 
     // The sidebar reads meetings from the database. Without this update a rename
     // changed the folder on disk but left the sidebar pointing at the old path, so

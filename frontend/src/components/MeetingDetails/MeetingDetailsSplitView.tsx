@@ -53,6 +53,11 @@ export function MeetingDetailsSplitView({
   const [ratio, setRatio] = useState(DEFAULT_RATIO);
   const [isDesktop, setIsDesktop] = useState(true);
   const dragging = useRef(false);
+  // Pointer moves fire far more often than frames, and each ratio change re-renders
+  // both panes (transcript list and summary editor). Coalesce them to one painted
+  // update per frame so dragging stays smooth on large meetings.
+  const frameRef = useRef<number | null>(null);
+  const pendingRatioRef = useRef<number | null>(null);
   const clampRatio = (value: number) => Math.min(MAX_RATIO, Math.max(MIN_RATIO, value));
 
   useEffect(() => {
@@ -73,19 +78,46 @@ export function MeetingDetailsSplitView({
     event.currentTarget.setPointerCapture(event.pointerId);
   }, []);
 
+  const flushPendingRatio = useCallback(() => {
+    if (frameRef.current !== null) {
+      cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+    }
+    if (pendingRatioRef.current !== null) {
+      const next = pendingRatioRef.current;
+      pendingRatioRef.current = null;
+      setRatio(next);
+    }
+  }, []);
+
   const onPointerMove = useCallback((event: React.PointerEvent) => {
     if (!dragging.current || !containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
-    setRatio(clampRatio((event.clientX - rect.left) / rect.width));
+    pendingRatioRef.current = clampRatio((event.clientX - rect.left) / rect.width);
+    if (frameRef.current === null) {
+      frameRef.current = requestAnimationFrame(() => {
+        frameRef.current = null;
+        if (pendingRatioRef.current !== null) {
+          const next = pendingRatioRef.current;
+          pendingRatioRef.current = null;
+          setRatio(next);
+        }
+      });
+    }
   }, []);
 
   const onPointerUp = useCallback(() => {
     if (!dragging.current) return;
     dragging.current = false;
+    flushPendingRatio();
     setRatio((current) => {
       writeStoredRatio(current);
       return current;
     });
+  }, [flushPendingRatio]);
+
+  useEffect(() => () => {
+    if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
   }, []);
 
   const onSeparatorKeyDown = useCallback((event: React.KeyboardEvent) => {

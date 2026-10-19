@@ -13,6 +13,97 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use crate::config::WHISPER_MODEL_CATALOG;
 use super::acceleration::{whisper_context_acceleration_for, WhisperCompiledBackend};
+use crate::audio::transcription::text_cleanup;
+
+/// Whisper's initial-prompt budget is roughly 224 tokens. CJK terms cost about one
+/// token per character, so the prompt is capped by characters to stay inside it.
+const MAX_PROMPT_CHARS: usize = 224;
+
+/// Combine the custom-dictionary glossary with the tail of the previous transcript.
+///
+/// The glossary comes first and recent speech second because the tokens closest to
+/// the audio influence the decode most. Context is skipped for `auto-translate`: the
+/// output is English while the previous transcript is in the source language, and
+/// mixing the two biases the translation.
+pub(crate) fn build_initial_prompt(
+    vocabulary: Option<&str>,
+    previous_context: Option<&str>,
+    language: Option<&str>,
+) -> Option<String> {
+    let vocabulary = vocabulary.map(str::trim).filter(|text| !text.is_empty());
+    let context = previous_context
+        .map(str::trim)
+        .filter(|text| !text.is_empty() && language != Some("auto-translate"));
+
+    let vocabulary_chars = vocabulary.map(|text| text.chars().count()).unwrap_or(0);
+    let separator = if vocabulary.is_some() && context.is_some() { 1 } else { 0 };
+    let context_budget = MAX_PROMPT_CHARS
+        .saturating_sub(vocabulary_chars + separator)
+        .min(text_cleanup::MAX_CONTEXT_CHARS);
+    let context = context.and_then(|text| text_cleanup::context_tail(text, context_budget));
+
+    match (vocabulary, context) {
+        (Some(vocabulary), Some(context)) => Some(format!("{vocabulary} {context}")),
+        (Some(vocabulary), None) => Some(vocabulary.to_string()),
+        (None, Some(context)) => Some(context),
+        (None, None) => None,
+    }
+}
+
+/// Build the decoder parameters shared by both transcription entry points.
+///
+/// Kept in one place so the two paths cannot drift apart: the text-only path used to
+/// override the hardware profile's temperature with a hard-coded value.
+fn transcription_params<'a>(
+    adaptive_config: &crate::audio::AdaptiveWhisperConfig,
+    language: Option<&'a str>,
+    vocabulary_prompt: Option<&str>,
+    previous_context: Option<&str>,
+) -> FullParams<'a, 'static> {
+    let mut params = FullParams::new(SamplingStrategy::BeamSearch {
+        beam_size: adaptive_config.beam_size as i32,
+        patience: 1.0,
+    });
+
+    // None/"auto" -> language detection; "auto-translate" -> translate to English;
+    // anything else is a language code.
+    let (language_code, should_translate) = match language {
+        Some("auto") | None => (None, false),
+        Some("auto-translate") => (None, true),
+        Some(lang) => (Some(lang), false),
+    };
+    params.set_language(language_code);
+    params.set_translate(should_translate);
+
+    // Custom-dictionary terms plus the previous transcript, bounded by the helper.
+    if let Some(prompt) = build_initial_prompt(vocabulary_prompt, previous_context, language) {
+        params.set_initial_prompt(&prompt);
+    }
+
+    // CRITICAL: timestamp tokens trigger whisper.cpp's "single timestamp ending - skip
+    // the whole chunk" heuristic, which discards complete valid text.
+    params.set_no_timestamps(true);
+    params.set_token_timestamps(true);
+
+    // Keep the C library quiet; its logging dominates the transcription hot path.
+    params.set_print_special(false);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+
+    params.set_suppress_blank(true);
+    params.set_suppress_nst(true);
+    params.set_temperature(adaptive_config.temperature);
+    params.set_max_initial_ts(1.0);
+    params.set_entropy_thold(2.4);
+    params.set_logprob_thold(-1.0);
+    // 0.55 keeps quiet speech while still rejecting silence hallucinations.
+    params.set_no_speech_thold(0.55);
+    params.set_max_len(200);
+    params.set_single_segment(false);
+
+    params
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ModelStatus {
@@ -550,71 +641,34 @@ impl WhisperEngine {
     
     /// Transcribe audio with streaming support for partial results and adaptive quality
     pub async fn transcribe_audio_with_confidence(&self, audio_data: Vec<f32>, language: Option<String>) -> Result<(String, f32, bool)> {
+        self.transcribe_audio_with_confidence_and_context(audio_data, language, None).await
+    }
+
+    /// Transcribe with confidence, optionally primed with the tail of the previous
+    /// transcript from the same session.
+    ///
+    /// `previous_context` is bounded by the prompt builder and is only ever supplied
+    /// by the caller's own session (the live worker owns it). It exists so names and
+    /// jargon stay stable across consecutive VAD segments without any global state.
+    pub async fn transcribe_audio_with_confidence_and_context(
+        &self,
+        audio_data: Vec<f32>,
+        language: Option<String>,
+        previous_context: Option<String>,
+    ) -> Result<(String, f32, bool)> {
         let ctx_lock = self.current_context.read().await;
         let ctx = ctx_lock.as_ref()
             .ok_or_else(|| anyhow!("No model loaded. Please load a model first."))?;
 
-        // Get adaptive configuration based on hardware
         let hardware_profile = crate::audio::HardwareProfile::detect();
         let adaptive_config = hardware_profile.get_whisper_config();
-
         let vocabulary_prompt = crate::dictionary::active_vocabulary_prompt();
-
-        // ADAPTIVE parameters - optimized for current hardware
-        let mut params = FullParams::new(SamplingStrategy::BeamSearch {
-            beam_size: adaptive_config.beam_size as i32,
-            patience: 1.0
-        });
-
-        // Configure with adaptive settings
-        // If language is "auto" or None, use automatic language detection (pass None)
-        // If language is "auto-translate", enable translation to English
-        // Otherwise, use the specified language code
-        let (language_code, should_translate) = match language.as_deref() {
-            Some("auto") | None => (None, false),
-            Some("auto-translate") => (None, true),
-            Some(lang) => (Some(lang), false),
-        };
-        params.set_language(language_code);
-        params.set_translate(should_translate);
-        // Custom-dictionary terms as preceding context: Whisper spells names and
-        // jargon it has "already seen" far more reliably.
-        if let Some(prompt) = vocabulary_prompt.as_deref() {
-            params.set_initial_prompt(prompt);
-        }
-
-        // CRITICAL: Disable timestamp tokens to prevent whisper.cpp chunking heuristics
-        // The "single timestamp ending - skip entire chunk" optimization incorrectly discards
-        // complete, valid transcriptions. Disabling timestamps forces whisper to return ALL text.
-        params.set_no_timestamps(true);     // Prevent timestamp-based segment skipping
-        params.set_token_timestamps(true);  // Keep for any timestamp-aware features
-
-        // PERFORMANCE: Disable ALL whisper.cpp internal printing
-        // This reduces C library log spam significantly
-        params.set_print_special(false);      // Don't print special tokens
-        params.set_print_progress(false);     // Don't print progress
-        params.set_print_realtime(false);     // Don't print realtime info
-        params.set_print_timestamps(false);   // Don't print timestamps
-
-        // Additional suppression to reduce C library verbosity
-        params.set_suppress_blank(true);
-        params.set_suppress_nst(true);
-        params.set_temperature(adaptive_config.temperature);
-        params.set_max_initial_ts(1.0);
-        params.set_entropy_thold(2.4);
-        params.set_logprob_thold(-1.0);
-        // BALANCED FIX: Lowered from 0.75 to 0.55 to allow quiet speech detection
-        // Previous value was too aggressive and rejected valid quiet speech
-        // 0.55 is balanced - prevents hallucinations while preserving quiet speech
-        params.set_no_speech_thold(0.55);
-        params.set_max_len(200);
-        params.set_single_segment(false);
-
-        // Set thread count based on hardware (if supported by whisper.cpp)
-        if let Some(_max_threads) = adaptive_config.max_threads {
-            // Note: whisper.cpp may or may not expose thread control through params
-            // Removed debug log to reduce I/O overhead in transcription hot path
-        }
+        let params = transcription_params(
+            &adaptive_config,
+            language.as_deref(),
+            vocabulary_prompt.as_deref(),
+            previous_context.as_deref(),
+        );
 
         let duration_seconds = audio_data.len() as f64 / 16000.0;
         let is_partial = duration_seconds < 15.0; // Consider chunks under 15s as partial
@@ -631,37 +685,30 @@ impl WhisperEngine {
             (num_segments, state)
             // Suppressor dropped here, stderr restored
         };
-        let mut result = String::new();
         let mut total_confidence = 0.0;
         let mut segment_count = 0;
+        let mut segment_texts: Vec<String> = Vec::new();
 
         let num_segments = num_segments as usize;
         for i in 0..num_segments {
-            let segment_text = match state.get_segment(i as i32).map(|s| s.to_str_lossy()).transpose().ok().flatten() {
-                Some(text) => text,
-                None => continue,
-            };
+            let Some(segment) = state.get_segment(i as i32) else { continue; };
+            let Ok(segment_text) = segment.to_str_lossy() else { continue; };
 
-            // Calculate confidence based on segment length and duration (simplified approach)
+            // Segment length stands in for decode confidence here; keep the same
+            // measure so the reported confidence number does not change.
             let segment_length = segment_text.len() as f32;
             let segment_confidence = if segment_length > 0.0 {
-                (segment_length / 100.0).min(0.9) + 0.1 // 0.1 to 1.0 confidence based on text length
+                (segment_length / 100.0).min(0.9) + 0.1
             } else {
                 0.1
             };
             total_confidence += segment_confidence;
             segment_count += 1;
-
-            let cleaned_text = segment_text.trim();
-            if !cleaned_text.is_empty() {
-                if !result.is_empty() {
-                    result.push(' ');
-                }
-                result.push_str(cleaned_text);
-            }
+            segment_texts.push(segment_text.into_owned());
         }
 
-        let final_result = result.trim().to_string();
+        let final_result =
+            text_cleanup::join_segments(segment_texts.iter().map(|text| text.as_str()));
         let cleaned_result = Self::clean_repetitive_text(&final_result);
 
         let avg_confidence = if segment_count > 0 {
@@ -678,66 +725,17 @@ impl WhisperEngine {
         let ctx = ctx_lock.as_ref()
             .ok_or_else(|| anyhow!("No model loaded. Please load a model first."))?;
 
-        // Get adaptive configuration based on hardware
         let hardware_profile = crate::audio::HardwareProfile::detect();
         let adaptive_config = hardware_profile.get_whisper_config();
-
         let vocabulary_prompt = crate::dictionary::active_vocabulary_prompt();
-
-        // ADAPTIVE parameters - optimized for current hardware
-        let mut params = FullParams::new(SamplingStrategy::BeamSearch {
-            beam_size: adaptive_config.beam_size as i32,
-            patience: 1.0
-        });
-
-        // Configure for good quality
-        // If language is "auto" or None, use automatic language detection (pass None)
-        // If language is "auto-translate", enable translation to English
-        // Otherwise, use the specified language code
-        let (language_code, should_translate) = match language.as_deref() {
-            Some("auto") | None => (None, false),
-            Some("auto-translate") => (None, true),
-            Some(lang) => (Some(lang), false),
-        };
-        params.set_language(language_code);
-        params.set_translate(should_translate);
-        // Custom-dictionary terms as preceding context: Whisper spells names and
-        // jargon it has "already seen" far more reliably.
-        if let Some(prompt) = vocabulary_prompt.as_deref() {
-            params.set_initial_prompt(prompt);
-        }
-
-        // CRITICAL: Disable timestamp tokens to prevent whisper.cpp chunking heuristics
-        // The "single timestamp ending - skip entire chunk" optimization incorrectly discards
-        // complete, valid transcriptions. Disabling timestamps forces whisper to return ALL text.
-        params.set_no_timestamps(true);     // Prevent timestamp-based segment skipping
-        params.set_token_timestamps(true);  // Keep for any timestamp-aware features
-
-        params.set_print_special(false);
-        params.set_print_progress(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
-
-        // BALANCED settings - good quality with reasonable speed
-        params.set_suppress_blank(true);
-        params.set_suppress_nst(true);
-        params.set_temperature(0.3);             // Lower than 0.4 for consistency, higher than 0.0 for quality
-        params.set_max_initial_ts(1.0);
-        params.set_entropy_thold(2.4);
-        params.set_logprob_thold(-1.0);
-        // BALANCED FIX: Lowered from 0.75 to 0.55 to allow quiet speech detection
-        // Previous value was too aggressive and rejected valid quiet speech
-        // 0.55 is balanced - prevents hallucinations while preserving quiet speech
-        params.set_no_speech_thold(0.55);
-
-        // Reasonable length limits
-        params.set_max_len(200);                 // Reasonable length
-        params.set_single_segment(false);        // Allow multiple segments for better accuracy
-
-        // Note: compression_ratio_threshold would be ideal but not available in current whisper-rs
-        // This would help detect repetitive outputs: params.set_compression_ratio_threshold(2.4);
-
-        // Duration-based optimization is handled by beam search parameters
+        // No previous-transcript context here: batch callers transcribe independent
+        // chunks, so a preceding transcript would come from unrelated audio.
+        let params = transcription_params(
+            &adaptive_config,
+            language.as_deref(),
+            vocabulary_prompt.as_deref(),
+            None,
+        );
         let duration_seconds = audio_data.len() as f64 / 16000.0; // Assuming 16kHz
         let is_short_audio = duration_seconds < 1.0;
 
@@ -798,36 +796,29 @@ impl WhisperEngine {
         if (should_log_transcription || num_segments > 0) && (num_segments > 3 || duration_seconds > 5.0) {
             perf_debug!("Transcription #{} completed with {} segments ({:.1}s)", transcription_count, num_segments, duration_seconds);
         }
-        let mut result = String::new();
+        let mut segment_texts: Vec<String> = Vec::new();
 
         for i in 0..num_segments {
-            let segment_text = match state.get_segment(i as i32).map(|s| s.to_str_lossy()).transpose().ok().flatten() {
-                Some(text) => text,
-                None => continue,
-            };
+            // Fetch each segment once: text and timestamps both come from the same
+            // handle instead of three separate C calls per segment.
+            let Some(segment) = state.get_segment(i) else { continue; };
+            let Ok(segment_text) = segment.to_str_lossy() else { continue; };
 
-            let _start_time = state.get_segment(i as i32).map(|s| s.start_timestamp()).unwrap_or(0);
-            let _end_time = state.get_segment(i as i32).map(|s| s.end_timestamp()).unwrap_or(0);
-
-            // Performance optimization: remove per-segment debug logging
-            // This was causing significant I/O overhead during transcription
-            // Only log segments for very long audio (>30s) or when explicitly debugging
+            // Only long recordings log segments; keep timestamps out of the hot path
+            // unless they are about to be printed.
             if duration_seconds > 30.0 {
                 perf_trace!("Segment {} ({:.2}s-{:.2}s): '{}'",
-                           i, _start_time as f64 / 100.0, _end_time as f64 / 100.0, segment_text);
+                           i, segment.start_timestamp() as f64 / 100.0,
+                           segment.end_timestamp() as f64 / 100.0, segment_text);
             }
 
-            // Clean and append segment text
-            let cleaned_text = segment_text.trim();
-            if !cleaned_text.is_empty() {
-                if !result.is_empty() {
-                    result.push(' ');
-                }
-                result.push_str(cleaned_text);
+            if !segment_text.trim().is_empty() {
+                segment_texts.push(segment_text.into_owned());
             }
         }
 
-        let final_result = result.trim().to_string();
+        let final_result =
+            text_cleanup::join_segments(segment_texts.iter().map(|text| text.as_str()));
 
         // Check for repetition loops and clean them up
         let cleaned_result = Self::clean_repetitive_text(&final_result);
@@ -1309,6 +1300,44 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
     use tokio::time::{timeout, Duration};
+
+    #[test]
+    fn prompt_builder_keeps_vocabulary_and_bounds_context() {
+        // Vocabulary-only behaviour is unchanged.
+        assert_eq!(
+            build_initial_prompt(Some("Meetly、Parakeet"), None, Some("en")).as_deref(),
+            Some("Meetly、Parakeet")
+        );
+        assert_eq!(build_initial_prompt(None, None, None), None);
+        assert_eq!(build_initial_prompt(Some("  "), Some("  "), Some("en")), None);
+
+        // Context follows the glossary, separated by one space.
+        let prompt =
+            build_initial_prompt(Some("Meetly"), Some("we discussed the budget"), Some("en"))
+                .expect("prompt");
+        assert_eq!(prompt, "Meetly we discussed the budget");
+
+        // Long context is cut to its tail and the whole prompt stays under the cap.
+        let long_context = "word ".repeat(200);
+        let prompt =
+            build_initial_prompt(Some("glossary"), Some(&long_context), Some("en")).expect("prompt");
+        assert!(prompt.chars().count() <= MAX_PROMPT_CHARS);
+        assert!(prompt.starts_with("glossary "));
+        assert!(prompt.ends_with("word"));
+    }
+
+    #[test]
+    fn prompt_builder_skips_context_for_translation() {
+        let prompt =
+            build_initial_prompt(Some("Meetly"), Some("previous words"), Some("auto-translate"));
+        assert_eq!(prompt.as_deref(), Some("Meetly"));
+
+        // Detection mode ("auto") still gets context; only translation drops it.
+        assert_eq!(
+            build_initial_prompt(None, Some("previous words"), Some("auto")).as_deref(),
+            Some("previous words")
+        );
+    }
 
     fn tiny_model(models: &[ModelInfo]) -> &ModelInfo {
         models

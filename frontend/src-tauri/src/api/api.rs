@@ -927,9 +927,48 @@ pub async fn api_save_meeting_title<R: Runtime>(
         auth_token.is_some()
     );
     let pool = state.db_manager.pool();
+    let folder_path: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT folder_path FROM meetings WHERE id = ?",
+    )
+    .bind(&meeting_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to read meeting folder: {}", e))?
+    .flatten();
+
     match MeetingsRepository::update_meeting_title(pool, &meeting_id, &title).await {
         Ok(true) => {
             log_info!("Successfully saved meeting title");
+            // A meeting backed by a recording folder keeps the audio file name in
+            // step with the title. Best effort: a filesystem problem must not undo
+            // the title save the user just made.
+            if let Some(folder_path) = folder_path {
+                match crate::audio::recordings_commands::rename_recording_on_disk(
+                    folder_path.clone(),
+                    title.clone(),
+                    false,
+                )
+                .await
+                {
+                    Ok(renamed) => {
+                        if let Err(e) = sqlx::query(
+                            "UPDATE meetings SET folder_path = ?, title = ? WHERE id = ?",
+                        )
+                        .bind(&renamed.folder_path)
+                        .bind(&renamed.title)
+                        .bind(&meeting_id)
+                        .execute(pool)
+                        .await
+                        {
+                            log_error!("Title saved but folder path update failed: {}", e);
+                        }
+                    }
+                    Err(e) => log_warn!(
+                        "Title saved but recording folder/audio rename failed: {}",
+                        e
+                    ),
+                }
+            }
             Ok(serde_json::json!({"message": "Meeting title saved successfully"}))
         }
         Ok(false) => {

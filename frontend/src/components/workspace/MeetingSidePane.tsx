@@ -4,7 +4,6 @@ import { useEffect, useState, type ReactNode } from 'react';
 import dynamic from 'next/dynamic';
 import { ListChecks, Loader2, MessageCircleQuestion, Sparkles, StickyNote } from 'lucide-react';
 import { useI18n } from '@/contexts/I18nContext';
-import { MeetingNotesEditor } from '@/app/notes/MeetingNotesEditor';
 
 export type SidePaneTab = 'summary' | 'notes' | 'tasks' | 'ask';
 
@@ -29,6 +28,12 @@ const ActionItemsPanel = dynamic(
 );
 const AskPanel = dynamic(
   () => import('./AskPanel').then((mod) => mod.AskPanel),
+  { ssr: false, loading: () => <PaneLoading /> },
+);
+// The notes editor pulls in the Markdown renderer; load it only when the 笔记 tab
+// is opened so a meeting page that never touches notes does not pay for it.
+const MeetingNotesEditor = dynamic(
+  () => import('@/app/notes/MeetingNotesEditor').then((mod) => mod.MeetingNotesEditor),
   { ssr: false, loading: () => <PaneLoading /> },
 );
 
