@@ -10,6 +10,7 @@ import {
   batchTranscriptionTarget,
   type ActiveSpeechSettings,
 } from '@/lib/transcription-target';
+import { batchTargetForModel, type ModelOption } from '@/lib/transcription-model-options';
 import {
   initialTranscriptionQueue,
   nextQueuedFolder,
@@ -55,8 +56,12 @@ export interface UseRecordingTranscriptionOptions {
 }
 
 export interface RecordingTranscription {
-  /** Queue recordings; duplicates that are already queued/running are ignored. */
-  enqueue: (entries: RecordingEntry[]) => void;
+  /**
+   * Queue recordings; duplicates that are already queued/running are ignored.
+   * `model` overrides the speech settings for these recordings only; a retry
+   * without one reuses the model the recording was last queued with.
+   */
+  enqueue: (entries: RecordingEntry[], model?: Pick<ModelOption, 'provider' | 'name'>) => void;
   /** Cancel one queued or running recording. */
   cancel: (folderPath: string) => void;
   statusFor: (folderPath: string) => TranscriptionQueueItem | undefined;
@@ -94,6 +99,8 @@ export function useRecordingTranscription(
   const cancelledRef = useRef<Set<string>>(new Set());
   /** meeting id -> folder, maintained synchronously so an early event still matches. */
   const meetingToFolderRef = useRef<Map<string, string>>(new Map());
+  /** Folder -> model chosen for that recording, when not the configured one. */
+  const modelForRef = useRef<Map<string, Pick<ModelOption, 'provider' | 'name'>>>(new Map());
   /** Guards against a StrictMode double effect starting the same item twice. */
   const inFlightRef = useRef<Set<string>>(new Set());
 
@@ -169,10 +176,12 @@ export function useRecordingTranscription(
 
         if (cancelledRef.current.has(folderPath)) throw new TranscriptionCancelled();
 
+        const base = await resolveBatchTarget();
+        const chosen = modelForRef.current.get(folderPath);
         const args = {
           meetingId,
           meetingFolderPath: folderPath,
-          ...(await resolveBatchTarget()),
+          ...(chosen ? batchTargetForModel(base, chosen) : base),
         };
         try {
           await invoke('start_retranscription_command', args);
@@ -221,8 +230,12 @@ export function useRecordingTranscription(
     void runItem(nextFolder);
   }, [nextFolder, runItem]);
 
-  const enqueue = useCallback((entries: RecordingEntry[]) => {
+  const enqueue = useCallback((entries: RecordingEntry[], model?: Pick<ModelOption, 'provider' | 'name'>) => {
     for (const entry of entries) {
+      const item = stateRef.current.items[entry.folder_path];
+      if (item && isPendingStatus(item.status)) continue;
+      // Without a model (a retry), the recording keeps the one it was queued with.
+      if (model) modelForRef.current.set(entry.folder_path, model);
       dispatch({
         type: 'enqueue',
         folderPath: entry.folder_path,
