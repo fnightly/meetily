@@ -24,6 +24,9 @@ pub const ZH_INVESTMENT_COMMITTEE: &str = include_str!("../../../templates/zh_in
 /// Chinese template: zh_project_pitch
 pub const ZH_PROJECT_PITCH: &str = include_str!("../../../templates/zh_project_pitch.json");
 
+/// Chinese template: zh_english_lesson
+pub const ZH_ENGLISH_LESSON: &str = include_str!("../../../templates/zh_english_lesson.json");
+
 /// Registry of all built-in templates
 ///
 /// Maps template identifiers to their embedded JSON content
@@ -37,6 +40,7 @@ pub fn get_builtin_templates() -> Vec<(&'static str, &'static str)> {
         ("zh_job_interview", ZH_JOB_INTERVIEW),
         ("zh_investment_committee", ZH_INVESTMENT_COMMITTEE),
         ("zh_project_pitch", ZH_PROJECT_PITCH),
+        ("zh_english_lesson", ZH_ENGLISH_LESSON),
     ]
 }
 
@@ -56,6 +60,7 @@ pub fn get_builtin_template(id: &str) -> Option<&'static str> {
         "zh_job_interview" => Some(ZH_JOB_INTERVIEW),
         "zh_investment_committee" => Some(ZH_INVESTMENT_COMMITTEE),
         "zh_project_pitch" => Some(ZH_PROJECT_PITCH),
+        "zh_english_lesson" => Some(ZH_ENGLISH_LESSON),
         _ => None,
     }
 }
@@ -70,6 +75,7 @@ pub fn list_builtin_template_ids() -> Vec<&'static str> {
         "zh_job_interview",
         "zh_investment_committee",
         "zh_project_pitch",
+        "zh_english_lesson",
     ]
 }
 

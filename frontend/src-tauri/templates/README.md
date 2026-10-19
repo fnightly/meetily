@@ -24,6 +24,18 @@ General-purpose meeting notes template focusing on key outcomes and actions.
 - Action Items
 - Discussion Highlights
 
+### 3. `zh_english_lesson.json`
+英语课堂笔记 for a child's English class, tutor session or picture-book read-along.
+English words and sentences are kept verbatim.
+
+**Sections:**
+- 今天学了什么 (what was learned, in simple Chinese)
+- 新单词 (word | meaning | example sentence table)
+- 好句子 (sentences worth repeating)
+- 发音和语法小提醒 (pronunciation and grammar corrections)
+- 复习小测验 (3–5 review questions built only from the lesson)
+- 回家练一练 (homework the teacher actually set)
+
 ## Template Structure
 
 Each template JSON file follows this schema:

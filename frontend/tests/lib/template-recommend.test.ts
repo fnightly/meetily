@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { recommendTemplate } from '../../src/lib/template-recommend';
 
 const ALL = ['standard_meeting', 'daily_standup', 'project_sync', 'retrospective', 'sales_marketing_client_call',
-  'zh_weekly_meeting', 'zh_customer_interview', 'zh_job_interview', 'zh_investment_committee', 'zh_project_pitch'];
+  'zh_weekly_meeting', 'zh_customer_interview', 'zh_job_interview', 'zh_investment_committee', 'zh_project_pitch', 'zh_english_lesson'];
 
 describe('recommendTemplate', () => {
   test('matches scenes from the title first', () => {
@@ -11,6 +11,8 @@ describe('recommendTemplate', () => {
     expect(recommendTemplate('产品经理面试', '', ALL)).toBe('zh_job_interview');
     expect(recommendTemplate('研发周会', '', ALL)).toBe('zh_weekly_meeting');
     expect(recommendTemplate('Q3 retro', '', ALL)).toBe('retrospective');
+    expect(recommendTemplate('周三外教口语课', '', ALL)).toBe('zh_english_lesson');
+    expect(recommendTemplate('Daily English lesson', '', ALL)).toBe('zh_english_lesson');
   });
 
   test('falls back to the transcript opening, then the standard template', () => {
