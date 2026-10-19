@@ -1,8 +1,7 @@
-import { useState, useEffect, useCallback, useRef, useSyncExternalStore } from 'react';
+import { useEffect, useCallback, useRef, useSyncExternalStore } from 'react';
 import { tr } from '@/lib/i18n';
 import { useRouter } from 'next/navigation';
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
@@ -14,7 +13,7 @@ import {
   actionNeedsTranscription,
   type PostRecordingAction,
 } from '@/lib/post-recording';
-import { batchTranscriptionTarget, type ActiveSpeechSettings } from '@/lib/transcription-target';
+import { enqueueTranscription } from '@/lib/background-transcription';
 import type { Transcript } from '@/types';
 import {
   applyPinnedSummaryLanguageToMeeting,
@@ -44,8 +43,6 @@ interface UseRecordingStopReturn {
   pendingPostRecording: { meetingId: string } | null;
   /** Apply the user's choice for the pending recording. */
   handlePostRecordingChoice: (action: PostRecordingAction) => Promise<void>;
-  /** Live progress while the post-recording choice runs, when it transcribes. */
-  postRecordingProgress: { percentage: number; stage: string } | null;
 }
 
 /**
@@ -81,10 +78,6 @@ export function useRecordingStop(
     getPendingPostRecording,
     () => null,
   );
-  const [postRecordingProgress, setPostRecordingProgress] = useState<{
-    percentage: number;
-    stage: string;
-  } | null>(null);
 
   const {
     transcriptsRef,
@@ -428,7 +421,7 @@ export function useRecordingStop(
             id: toastId,
             description: tr('toast.recordingSavedChoose'),
           });
-          setPendingPostRecording({ meetingId, folderPath });
+          setPendingPostRecording({ meetingId, folderPath, title: meetingName });
         } else {
           toast.success(tr('toast.recordingSaved'), {
             id: toastId,
@@ -476,84 +469,6 @@ export function useRecordingStop(
   finalizeRecordingRef.current = finalizeRecording;
 
   /**
-   * Wait until a retranscription finishes.
-   *
-   * `start_retranscription_command` returns as soon as the work is queued, so the
-   * completion event is what marks it done. Bounded by a timeout so a lost event
-   * still lets the UI finish rather than hanging on the dialog.
-   */
-  const waitForRetranscription = useCallback(
-    async (
-      meetingId: string,
-      onProgress?: (progress: { percentage: number; stage: string }) => void,
-      timeoutMs = 30 * 60 * 1000,
-    ): Promise<void> => {
-      await new Promise<void>((resolve) => {
-        let settled = false;
-        let unlistenComplete: (() => void) | undefined;
-        let unlistenProgress: (() => void) | undefined;
-
-        const finish = () => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          unlistenComplete?.();
-          unlistenProgress?.();
-          resolve();
-        };
-
-        const timer = setTimeout(() => {
-          console.warn('Retranscription wait timed out; continuing');
-          finish();
-        }, timeoutMs);
-
-        listen<{ meeting_id?: string; progress_percentage?: number; stage?: string }>(
-          'retranscription-progress',
-          (event) => {
-            if (event.payload?.meeting_id && event.payload.meeting_id !== meetingId) return;
-            onProgress?.({
-              percentage: Math.max(0, Math.min(100, Math.round(event.payload?.progress_percentage ?? 0))),
-              stage: event.payload?.stage ?? '',
-            });
-          },
-        )
-          .then((fn) => {
-            if (settled) fn();
-            else unlistenProgress = fn;
-          })
-          .catch((error) => console.error('Failed to subscribe to retranscription-progress:', error));
-
-        listen<{ meeting_id?: string }>('retranscription-complete', (event) => {
-          // Only react to this meeting's completion.
-          if (!event.payload?.meeting_id || event.payload.meeting_id === meetingId) {
-            finish();
-          }
-        })
-          .then((fn) => {
-            if (settled) fn();
-            else unlistenComplete = fn;
-          })
-          .catch((error) => {
-            console.error('Failed to subscribe to retranscription-complete:', error);
-            finish();
-          });
-      });
-    },
-    [],
-  );
-
-  // The batch command falls back to Whisper when it is not told which engine to
-  // use; forward the active speech settings so a Parakeet or cloud choice is used.
-  const resolveBatchTarget = useCallback(async () => {
-    try {
-      return batchTranscriptionTarget(await invoke<ActiveSpeechSettings>('api_get_active_speech_settings'));
-    } catch (error) {
-      console.error('Failed to read the active speech settings:', error);
-      return batchTranscriptionTarget(null);
-    }
-  }, []);
-
-  /**
    * Apply the user's choice for a recording that has no live transcript.
    *
    * `keep` is the do-nothing path: the audio is already saved and the meeting can
@@ -564,33 +479,23 @@ export function useRecordingStop(
       const pending = pendingPostRecording;
       if (!pending) return;
 
-      // Keep the dialog open while the work runs: closing it immediately made the
-      // busy state and progress invisible, so a long transcription looked like a
-      // frozen click. It closes in the finally block (navigation unmounts it).
-      setPostRecordingProgress(null);
       try {
-        const { meetingId, folderPath } = pending;
+        const { meetingId, folderPath, title } = pending;
 
         if (action !== 'keep' && actionNeedsTranscription(action) && folderPath) {
-          try {
-            toast.info(tr('toast.transcribing'), {
-              description: tr('toast.transcribingHint'),
-            });
-
-            await invoke('start_retranscription_command', {
-              meetingId,
-              meetingFolderPath: folderPath,
-              ...(await resolveBatchTarget()),
-            });
-
-            await waitForRetranscription(meetingId, setPostRecordingProgress);
-            toast.success(tr('toast.transcriptionComplete'));
-          } catch (error) {
-            console.error('Post-recording follow-up failed:', error);
-            toast.error(tr('toast.transcriptionFailed'), {
-              description: error instanceof Error ? error.message : String(error),
-            });
-          }
+          // Transcribe in the background rather than holding the dialog open: the
+          // user can record the next meeting meanwhile, and is told when the text
+          // (and, if asked for, the summary on opening it) is ready.
+          enqueueTranscription([{
+            folderPath,
+            meetingId,
+            title,
+            summarize: actionNeedsSummary(action),
+          }]);
+          toast.success(tr('bgTranscribe.started'), { description: tr('bgTranscribe.startedDetail') });
+          clearTranscripts();
+          setStatus(RecordingStatus.IDLE);
+          return;
         }
 
         // The summary itself is generated on the meeting page, which owns the model
@@ -602,11 +507,10 @@ export function useRecordingStop(
 
         navigateToMeeting(meetingId);
       } finally {
-        setPostRecordingProgress(null);
         setPendingPostRecording(null);
       }
     },
-    [pendingPostRecording, navigateToMeeting, resolveBatchTarget, waitForRetranscription],
+    [pendingPostRecording, navigateToMeeting, clearTranscripts, setStatus],
   );
 
   // Expose handleRecordingStop function to window for Rust callbacks
@@ -640,6 +544,5 @@ export function useRecordingStop(
     },
     pendingPostRecording,
     handlePostRecordingChoice,
-    postRecordingProgress,
   };
 }

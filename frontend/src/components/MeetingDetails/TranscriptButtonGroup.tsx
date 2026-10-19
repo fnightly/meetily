@@ -9,6 +9,8 @@ import { useI18n } from '@/contexts/I18nContext';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
+import { useBackgroundTranscription } from '@/hooks/useBackgroundTranscription';
+import { onBackgroundJobSettled } from '@/lib/background-transcription';
 
 
 interface TranscriptButtonGroupProps {
@@ -17,6 +19,8 @@ interface TranscriptButtonGroupProps {
   onOpenMeetingFolder: () => Promise<void>;
   meetingId?: string;
   meetingFolderPath?: string | null;
+  /** Names the recording in background transcription messages. */
+  meetingTitle?: string;
   onRefetchTranscripts?: () => Promise<void>;
   /** Export the meeting as Markdown (transcript + summary). */
   onExportMarkdown?: () => void | Promise<void>;
@@ -30,6 +34,7 @@ export function TranscriptButtonGroup({
   onOpenMeetingFolder,
   meetingId,
   meetingFolderPath,
+  meetingTitle,
   onRefetchTranscripts,
   onExportMarkdown,
   isExporting = false,
@@ -123,12 +128,22 @@ export function TranscriptButtonGroup({
     // should rebuild the handler's messages.
   }, [meetingId, meetingFolderPath, onRefetchTranscripts, t]);
 
-  const handleRetranscribeComplete = useCallback(async () => {
-    // Refetch transcripts to show the updated data
-    if (onRefetchTranscripts) {
-      await onRefetchTranscripts();
-    }
-  }, [onRefetchTranscripts]);
+  // Transcription runs in the background; this meeting's row in the queue says
+  // whether it is waiting or how far along it is.
+  const { recordings: transcriptionQueue } = useBackgroundTranscription();
+  const transcriptionJob = meetingFolderPath ? transcriptionQueue.items[meetingFolderPath] : undefined;
+  const transcribing = transcriptionJob?.status === 'queued' || transcriptionJob?.status === 'running';
+
+  // Show the new transcript when this meeting's job finishes, wherever it was started.
+  useEffect(() => {
+    if (!meetingFolderPath) return;
+    return onBackgroundJobSettled((job) => {
+      if (job.kind !== 'transcribe' || job.folderPath !== meetingFolderPath || job.status !== 'done') return;
+      onRefetchTranscripts?.().catch((error) => {
+        console.error('Failed to reload the transcript:', error);
+      });
+    });
+  }, [meetingFolderPath, onRefetchTranscripts]);
 
   return (
     <div className="flex items-center justify-between w-full gap-2 min-w-0">
@@ -201,15 +216,20 @@ export function TranscriptButtonGroup({
             onClick={() => {
               setShowRetranscribeDialog(true);
             }}
+            disabled={transcribing}
             title={transcriptCount === 0
               ? t('transcriptActions.transcribeRecordingHint')
               : t('transcriptActions.retranscribeHint')}
           >
-            <RefreshCw className="@[34rem]:mr-1" size={16} />
+            <RefreshCw className={transcribing ? 'animate-spin @[34rem]:mr-1' : '@[34rem]:mr-1'} size={16} />
             <span className="hidden @[34rem]:inline">
-              {transcriptCount === 0
-                ? t('transcriptActions.transcribeRecording')
-                : t('transcriptActions.retranscribe')}
+              {transcribing
+                ? transcriptionJob?.status === 'running'
+                  ? t('bgTranscribe.progress', { percent: transcriptionJob.percentage })
+                  : t('bgTranscribe.queued')
+                : transcriptCount === 0
+                  ? t('transcriptActions.transcribeRecording')
+                  : t('transcriptActions.retranscribe')}
             </span>
           </Button>
         )}
@@ -221,8 +241,8 @@ export function TranscriptButtonGroup({
           onOpenChange={setShowRetranscribeDialog}
           meetingId={meetingId}
           meetingFolderPath={meetingFolderPath}
+          meetingTitle={meetingTitle}
           emptyTranscript={transcriptCount === 0}
-          onComplete={handleRetranscribeComplete}
         />
       )}
     </div>

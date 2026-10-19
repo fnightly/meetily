@@ -338,6 +338,7 @@ export default function PageContent({
               onLoadMore={onLoadMore}
               meetingId={meeting.id}
               meetingFolderPath={meeting.folder_path}
+              meetingTitle={meetingData.meetingTitle || meeting.title}
               audioPath={meetingAudioPath}
               onRefetchTranscripts={onRefetchTranscripts}
               onExportMarkdown={() => setExportOpen(true)}

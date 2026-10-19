@@ -227,6 +227,8 @@ export const subscribeFinalizations = (listener: () => void) => queue.subscribe(
 export interface PendingPostRecording {
   meetingId: string;
   folderPath: string | null;
+  /** The meeting's name, for background transcription messages. */
+  title?: string;
 }
 
 let pendingPostRecording: PendingPostRecording | null = null;

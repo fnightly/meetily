@@ -20,6 +20,7 @@ import { OnboardingFlow } from '@/components/onboarding'
 import { loadBetaFeatures } from '@/types/betaFeatures'
 import { DownloadProgressToastProvider } from '@/components/shared/DownloadProgressToast'
 import { RecordingPostProcessingProvider } from '@/contexts/RecordingPostProcessingProvider'
+import { BackgroundTranscriptionHost } from '@/components/BackgroundTranscriptionHost'
 import { ImportAudioDialog, ImportDropOverlay } from '@/components/ImportAudio'
 import { ImportDialogProvider } from '@/contexts/ImportDialogContext'
 import { I18nProvider } from '@/contexts/I18nContext'
@@ -272,6 +273,9 @@ function AppLayout({
                             <ImportDialogProvider onOpen={handleOpenImportDialog}>
                               {/* Download progress toast provider - listens for background downloads */}
                               <DownloadProgressToastProvider />
+
+                              {/* Background transcription: routes its "View" links and reloads meetings */}
+                              <BackgroundTranscriptionHost />
 
                               {/* Show onboarding or main app */}
                               {showOnboarding ? (
