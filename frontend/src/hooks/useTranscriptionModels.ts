@@ -1,5 +1,13 @@
 import { useState, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { tr } from '@/lib/i18n';
+import {
+  cloudModelOptions,
+  defaultModelKey,
+  type CloudProviderInfo,
+  type ModelOption,
+  type TranscriptModelConfig,
+} from '@/lib/transcription-model-options';
 
 export interface RawModelInfo {
   name: string;
@@ -7,24 +15,14 @@ export interface RawModelInfo {
   status: 'Available' | 'Missing' | { Downloading: { progress: number } } | { Error: string };
 }
 
-export interface ModelOption {
-  /** `whisper` / `parakeet` run locally; any other id is a cloud provider. */
-  provider: 'whisper' | 'parakeet' | 'openai' | 'groq' | 'siliconflow' | (string & {});
-  name: string;
-  displayName: string;
-  size_mb: number;
-}
-
-interface TranscriptModelConfig {
-  provider?: string;
-  model?: string;
-}
+export type { ModelOption } from '@/lib/transcription-model-options';
 
 /**
- * Custom hook for fetching and managing transcription models (Whisper and Parakeet).
+ * Custom hook for fetching and managing transcription models (Whisper, Parakeet and cloud).
  *
  * This hook centralizes the model fetching logic that was previously duplicated
- * in ImportAudioDialog and RetranscribeDialog components.
+ * in ImportAudioDialog and RetranscribeDialog components, and is also used by the
+ * recordings library's transcribe dialog.
  *
  * @param transcriptModelConfig - User's saved model configuration from context
  * @returns Object containing available models, selected model key, loading state, and fetch function
@@ -78,55 +76,21 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
       console.error('Failed to fetch Parakeet models:', err);
     }
 
-    // Cloud providers the user has configured (selectable + key stored). Listed
-    // after local models so the default never silently becomes an upload.
+    // Cloud models, listed after local ones so the default never silently
+    // becomes an upload. Providers without a stored key are shown disabled.
     try {
-      const providers = await invoke<Array<{
-        id: string; display_name: string; kind: string; selectable: boolean;
-        has_api_key: boolean; models: string[];
-      }>>('api_list_speech_providers');
-      for (const p of providers ?? []) {
-        if (p.kind !== 'cloud' || !p.selectable || !p.has_api_key) continue;
-        const model =
-          transcriptModelConfig?.provider === p.id && transcriptModelConfig?.model
-            ? transcriptModelConfig.model
-            : p.models[0];
-        if (!model) continue;
-        allModels.push({
-          provider: p.id,
-          name: model,
-          displayName: `☁️ ${p.display_name}: ${model}`,
-          size_mb: 0,
-        });
-      }
+      const providers = await invoke<CloudProviderInfo[]>('api_list_speech_providers');
+      allModels.push(...cloudModelOptions(providers, transcriptModelConfig, tr('transcribeModels.needsKey')));
     } catch (err) {
       console.error('Failed to fetch cloud speech providers:', err);
     }
 
     setAvailableModels(allModels);
 
-    // Set default model based on user's saved configuration
-    const configuredProvider = transcriptModelConfig?.provider || '';
-    const configuredModel = transcriptModelConfig?.model || '';
-
-    // Try to match the configured model
-    // Note: 'localWhisper' in config maps to 'whisper' provider in model list
-    const configuredMatch = allModels.find(
-      (m) =>
-        (configuredProvider === 'localWhisper' && m.provider === 'whisper' && m.name === configuredModel) ||
-        (configuredProvider === 'parakeet' && m.provider === 'parakeet' && m.name === configuredModel) ||
-        (m.provider === configuredProvider && m.name === configuredModel)
-    );
-
     // Only set default model if user hasn't manually selected one
     if (!userSelectedRef.current) {
-      if (configuredMatch) {
-        // Use the configured model if available
-        setSelectedModelKey(`${configuredMatch.provider}:${configuredMatch.name}`);
-      } else if (allModels.length > 0) {
-        // Fall back to first available model
-        setSelectedModelKey(`${allModels[0].provider}:${allModels[0].name}`);
-      }
+      const key = defaultModelKey(allModels, transcriptModelConfig);
+      if (key) setSelectedModelKey(key);
     }
 
     setLoadingModels(false);

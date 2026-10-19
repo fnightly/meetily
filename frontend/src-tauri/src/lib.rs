@@ -63,6 +63,7 @@ pub mod storage;
 pub mod summary;
 pub mod sync;
 pub mod tray;
+pub mod recording_bar;
 pub mod utils;
 pub mod whisper_engine;
 
@@ -538,6 +539,7 @@ pub fn run() {
         .manage(audio::init_system_audio_state())
         .manage(summary::summary_engine::ModelManagerState(Arc::new(tokio::sync::Mutex::new(None))))
         .setup(|_app| {
+            recording_bar::init(_app.handle());
             // Mirror the custom dictionary for the local speech engines, which
             // run without an AppHandle (Whisper prompt + text corrections).
             let _ = dictionary::load_dictionary(_app.handle());
@@ -682,6 +684,11 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Focused(focused) = event {
+                if window.label() == "main" {
+                    recording_bar::on_main_focus_changed(window.app_handle(), *focused);
+                }
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     api.prevent_close();
@@ -754,6 +761,8 @@ pub fn run() {
             audio::recording_commands::resume_recording,
             audio::recording_commands::is_recording_paused,
             audio::recording_commands::get_recording_state,
+            recording_bar::recording_bar_stop,
+            recording_bar::recording_bar_open_main,
             audio::recording_commands::get_meeting_folder_path,
             // Reload sync commands (retrieve transcript history and meeting name)
             audio::recording_commands::get_transcript_history,

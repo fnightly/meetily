@@ -25,6 +25,7 @@ import { ImportDialogProvider } from '@/contexts/ImportDialogContext'
 import { I18nProvider } from '@/contexts/I18nContext'
 import { isAudioExtension, getAudioFormatsDisplayList } from '@/constants/audioFormats'
 import { tr } from '@/lib/i18n';
+import { usePathname } from 'next/navigation'
 
 
 const sourceSans3 = Source_Sans_3({
@@ -63,7 +64,33 @@ function ConditionalImportDialog({
 
 // export { metadata } from './metadata'
 
+/** Route of the floating recording bar window (see src-tauri/src/recording_bar.rs). */
+const RECORDING_BAR_PATH = '/recording-bar'
+
 export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode
+}) {
+  const pathname = usePathname()
+
+  // The floating bar is a second window on the same app. It must not mount the
+  // app's providers: they would start a second copy of the stop/save handlers,
+  // tray listeners and onboarding checks.
+  if (pathname?.startsWith(RECORDING_BAR_PATH)) {
+    return (
+      <html lang="en" suppressHydrationWarning>
+        <body className={`${sourceSans3.variable} font-sans antialiased bg-transparent`}>
+          {children}
+        </body>
+      </html>
+    )
+  }
+
+  return <AppLayout>{children}</AppLayout>
+}
+
+function AppLayout({
   children,
 }: {
   children: React.ReactNode
