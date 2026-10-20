@@ -124,6 +124,23 @@ function blocksToMarkdown(blocks: NoteBlock[]): string {
     .trim();
 }
 
+/**
+ * Notes prefetched while the pointer is over the 笔记 tab. Opening the tab then
+ * shows content without waiting for a round-trip that could have started earlier.
+ */
+const primedNotes = new Map<string, Promise<MeetingNote>>();
+
+export function primeMeetingNote(meetingId: string): Promise<MeetingNote> {
+  const existing = primedNotes.get(meetingId);
+  if (existing) return existing;
+  const request = invoke<MeetingNote>("api_get_meeting_note", { meetingId }).catch((error) => {
+    primedNotes.delete(meetingId);
+    throw error;
+  });
+  primedNotes.set(meetingId, request);
+  return request;
+}
+
 export interface MeetingNotesEditorProps {
   meetingId: string;
   /**
@@ -186,11 +203,19 @@ export function MeetingNotesEditor({
       setLoading(true);
       setError(null);
       try {
-        const [note, meta] = await Promise.all([
-          invoke<MeetingNote>("api_get_meeting_note", { meetingId }),
-          // Metadata is best-effort: a note can still be edited without it.
-          invoke<MeetingMetadata>("api_get_meeting_metadata", { meetingId }).catch(() => null),
-        ]);
+        // The embedded pane has no page title to show, so it does not need the
+        // meeting metadata round-trip: one query makes the first tab open faster.
+        const primed = primedNotes.get(meetingId);
+        primedNotes.delete(meetingId);
+        let note: MeetingNote;
+        try {
+          note = primed ? await primed : await invoke<MeetingNote>("api_get_meeting_note", { meetingId });
+        } catch {
+          note = await invoke<MeetingNote>("api_get_meeting_note", { meetingId });
+        }
+        const meta = embedded
+          ? null
+          : await invoke<MeetingMetadata>("api_get_meeting_metadata", { meetingId }).catch(() => null);
         if (cancelled) return;
         setBlocks(note.blocks ?? []);
         setMetadata(meta);
@@ -207,7 +232,7 @@ export function MeetingNotesEditor({
     return () => {
       cancelled = true;
     };
-  }, [meetingId]);
+  }, [meetingId, embedded]);
 
   const updateBlock = useCallback((index: number, patch: Partial<NoteBlock>) => {
     setBlocks((prev) =>

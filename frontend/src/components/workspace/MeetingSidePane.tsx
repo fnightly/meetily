@@ -32,8 +32,9 @@ const AskPanel = dynamic(
 );
 // The notes editor pulls in the Markdown renderer; load it only when the 笔记 tab
 // is opened so a meeting page that never touches notes does not pay for it.
+const loadNotesEditor = () => import('@/app/notes/MeetingNotesEditor');
 const MeetingNotesEditor = dynamic(
-  () => import('@/app/notes/MeetingNotesEditor').then((mod) => mod.MeetingNotesEditor),
+  () => loadNotesEditor().then((mod) => mod.MeetingNotesEditor),
   { ssr: false, loading: () => <PaneLoading /> },
 );
 
@@ -78,6 +79,12 @@ export function MeetingSidePane({
     setTabState({ meetingId, tab: next });
   };
 
+  // Start both the editor chunk and its note query while the pointer is over the
+  // tab, so the click mostly renders already-available data.
+  const warmNotes = () => {
+    void loadNotesEditor().then((mod) => mod.primeMeetingNote(meetingId)).catch(() => {});
+  };
+
   const tabs: Array<{ id: SidePaneTab; label: string; icon: typeof Sparkles }> = [
     { id: 'summary', label: t('meeting.pane.summary'), icon: Sparkles },
     { id: 'notes', label: t('meeting.pane.notes'), icon: StickyNote },
@@ -95,6 +102,8 @@ export function MeetingSidePane({
             role="tab"
             aria-selected={tab === id}
             onClick={() => selectTab(id)}
+            onPointerEnter={id === 'notes' ? warmNotes : undefined}
+            onFocus={id === 'notes' ? warmNotes : undefined}
             className={`relative -mb-px inline-flex items-center gap-1.5 border-b-2 px-3 pb-2 pt-1 text-sm font-medium transition-colors ${
               tab === id ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500 hover:text-slate-800'
             }`}

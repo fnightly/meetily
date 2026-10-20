@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 
 use super::recordings::{
     find_audio_file, is_recording_folder, list_recordings, renamed_folder_name, RecordingEntry,
@@ -188,6 +188,17 @@ pub async fn list_saved_recordings<R: Runtime>(
     .await
     .map_err(|e| format!("Recordings list task failed: {}", e))?;
 
+    // The recordings root and every meeting folder can be outside $APPDATA, so
+    // allow them for the asset protocol before the library renders players.
+    let _ = app.asset_protocol_scope().allow_directory(&folder, true);
+    for entry in &recordings {
+        if let Some(audio_path) = entry.audio_path.as_deref() {
+            if let Err(e) = app.asset_protocol_scope().allow_file(audio_path) {
+                log::warn!("Failed to allow reading audio asset {}: {}", audio_path, e);
+            }
+        }
+    }
+
     Ok(RecordingsListView {
         folder: folder.to_string_lossy().to_string(),
         recordings,
@@ -207,10 +218,23 @@ fn normalize_folder(path: &str) -> String {
 /// (`audio.mp3`, `.m4a`, ...), and the recordings root may have changed since the
 /// meeting was saved. Resolving it from the folder keeps old meetings playable.
 #[tauri::command]
-pub async fn get_recording_audio_path(folder_path: String) -> Result<Option<String>, String> {
+pub async fn get_recording_audio_path<R: Runtime>(
+    app: AppHandle<R>,
+    folder_path: String,
+) -> Result<Option<String>, String> {
     let folder = require_recording_folder(&folder_path)?;
 
-    Ok(find_audio_file(&folder).map(|path| path.to_string_lossy().to_string()))
+    let audio = find_audio_file(&folder);
+    // The recordings folder may live outside $APPDATA, which the static asset
+    // scope does not cover. Allow the resolved file so the frontend can stream it
+    // through the asset protocol instead of reading the whole file over IPC.
+    if let Some(path) = audio.as_ref() {
+        if let Err(e) = app.asset_protocol_scope().allow_file(path) {
+            log::warn!("Failed to allow reading audio asset {:?}: {}", path, e);
+        }
+    }
+
+    Ok(audio.map(|path| path.to_string_lossy().to_string()))
 }
 
 /// Find the meeting row for a recording folder, creating one when absent.
