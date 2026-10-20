@@ -23,9 +23,14 @@ export interface TemplateSectionPayload {
 }
 
 /** Full template definition (`api_get_template_full`). */
+export type TemplateDetailLevel = 'brief' | 'standard' | 'detailed';
+export type TemplateGranularity = 'coarse' | 'balanced' | 'fine';
+
 export interface TemplateFull {
   name: string;
   description: string;
+  detail_level?: TemplateDetailLevel | null;
+  granularity?: TemplateGranularity | null;
   sections: TemplateSectionPayload[];
 }
 
@@ -108,6 +113,8 @@ export function useTemplates() {
       templateId?: string | null;
       name: string;
       description: string;
+      detail_level?: TemplateDetailLevel | null;
+      granularity?: TemplateGranularity | null;
       sections: TemplateSectionPayload[];
       overwrite?: boolean;
     }): Promise<SaveTemplateResult> => {
@@ -115,6 +122,8 @@ export function useTemplates() {
         templateId: params.templateId ?? null,
         name: params.name,
         description: params.description,
+        detailLevel: params.detail_level ?? null,
+        granularity: params.granularity ?? null,
         sections: params.sections,
         overwrite: params.overwrite ?? false,
       });

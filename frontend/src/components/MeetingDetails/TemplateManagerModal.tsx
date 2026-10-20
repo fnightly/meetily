@@ -22,6 +22,8 @@ import {
 import { Plus, Pencil, Copy, Trash2, ChevronUp, ChevronDown, ArrowLeft } from "lucide-react";
 import { toast } from "sonner";
 import type {
+  TemplateDetailLevel,
+  TemplateGranularity,
   TemplateInfo,
   TemplateSectionPayload,
 } from "@/hooks/meeting-details/useTemplates";
@@ -40,6 +42,18 @@ const FORMATS = [
   { value: "string", label: "Short text" },
 ];
 
+const DETAIL_LEVELS: Array<{ value: TemplateDetailLevel; label: string }> = [
+  { value: "brief", label: "Brief — essentials only" },
+  { value: "standard", label: "Standard — balanced" },
+  { value: "detailed", label: "Detailed — context and reasoning" },
+];
+
+const GRANULARITIES: Array<{ value: TemplateGranularity; label: string }> = [
+  { value: "coarse", label: "Coarse — grouped themes" },
+  { value: "balanced", label: "Balanced — decisions and steps" },
+  { value: "fine", label: "Fine — every point, decision and owner" },
+];
+
 interface SectionDraft {
   title: string;
   instruction: string;
@@ -52,6 +66,8 @@ interface TemplateDraft {
   id: string | null;
   name: string;
   description: string;
+  detailLevel: TemplateDetailLevel;
+  granularity: TemplateGranularity;
   sections: SectionDraft[];
 }
 
@@ -60,7 +76,14 @@ function emptySection(): SectionDraft {
 }
 
 function emptyDraft(): TemplateDraft {
-  return { id: null, name: "", description: "", sections: [emptySection()] };
+  return {
+    id: null,
+    name: "",
+    description: "",
+    detailLevel: "standard",
+    granularity: "balanced",
+    sections: [emptySection()],
+  };
 }
 
 export interface TemplateManagerModalProps {
@@ -70,12 +93,16 @@ export interface TemplateManagerModalProps {
   loadTemplate: (id: string) => Promise<{
     name: string;
     description: string;
+    detail_level?: TemplateDetailLevel | null;
+    granularity?: TemplateGranularity | null;
     sections: TemplateSectionPayload[];
   }>;
   saveTemplate: (params: {
     templateId?: string | null;
     name: string;
     description: string;
+    detail_level?: TemplateDetailLevel | null;
+    granularity?: TemplateGranularity | null;
     sections: TemplateSectionPayload[];
     overwrite?: boolean;
   }) => Promise<{ id: string; overwritten: boolean }>;
@@ -127,6 +154,8 @@ export function TemplateManagerModal({
           id,
           name: full.name,
           description: full.description,
+          detailLevel: full.detail_level ?? "standard",
+          granularity: full.granularity ?? "balanced",
           sections:
             full.sections.length > 0
               ? full.sections.map((s) => ({
@@ -239,6 +268,8 @@ export function TemplateManagerModal({
         templateId: draft.id,
         name,
         description,
+        detail_level: draft.detailLevel,
+        granularity: draft.granularity,
         sections,
         // Editing an existing custom template replaces it; creating never does.
         overwrite: draft.id !== null,
@@ -411,6 +442,52 @@ export function TemplateManagerModal({
                 placeholder="What this template is for"
                 onChange={(e) => setDraft({ ...draft, description: e.target.value })}
               />
+            </div>
+
+            {/* Template-wide breadth controls: they are applied to every section
+                through the generated section instructions. */}
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="tpl-detail">Detail level</Label>
+                <Select
+                  value={draft.detailLevel}
+                  onValueChange={(value) =>
+                    setDraft({ ...draft, detailLevel: value as TemplateDetailLevel })
+                  }
+                >
+                  <SelectTrigger id="tpl-detail">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {DETAIL_LEVELS.map((level) => (
+                      <SelectItem key={level.value} value={level.value}>
+                        {level.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="tpl-granularity">Granularity</Label>
+                <Select
+                  value={draft.granularity}
+                  onValueChange={(value) =>
+                    setDraft({ ...draft, granularity: value as TemplateGranularity })
+                  }
+                >
+                  <SelectTrigger id="tpl-granularity">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {GRANULARITIES.map((level) => (
+                      <SelectItem key={level.value} value={level.value}>
+                        {level.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
 
             <div className="space-y-3">

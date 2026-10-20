@@ -25,15 +25,15 @@ describe('llm presets', () => {
 
   test('switching vendor clears the key and picks the vendor default model', () => {
     const kimi = LLM_PRESETS.find((p) => p.id === 'kimi')!;
-    const next = applyPreset({ endpoint: 'https://api.deepseek.com/v1', model: 'deepseek-chat', apiKey: 'sk-ds' }, kimi);
+    const next = applyPreset({ endpoint: 'https://api.deepseek.com/v1', model: 'deepseek-v4-flash', apiKey: 'sk-ds' }, kimi);
     expect(next).toEqual({ endpoint: kimi.endpoint, model: kimi.models[0], apiKey: '' });
   });
 
   test('re-applying the same vendor keeps key and a valid model', () => {
     const ds = LLM_PRESETS.find((p) => p.id === 'deepseek')!;
-    const next = applyPreset({ endpoint: ds.endpoint + '/', model: 'deepseek-reasoner', apiKey: 'sk' }, ds);
+    const next = applyPreset({ endpoint: ds.endpoint + '/', model: 'deepseek-v4-pro', apiKey: 'sk' }, ds);
     expect(next.apiKey).toBe('sk');
-    expect(next.model).toBe('deepseek-reasoner');
+    expect(next.model).toBe('deepseek-v4-pro');
   });
 
   test('local presets keep the typed model', () => {
@@ -45,7 +45,7 @@ describe('llm presets', () => {
     expect(draftProblem({ endpoint: '', model: 'm', apiKey: '' })).toBe('endpoint');
     expect(draftProblem({ endpoint: 'api.x.com', model: 'm', apiKey: '' })).toBe('endpointScheme');
     expect(draftProblem({ endpoint: 'http://localhost:1234/v1', model: ' ', apiKey: '' })).toBe('model');
-    expect(draftProblem({ endpoint: 'https://api.deepseek.com/v1', model: 'deepseek-chat', apiKey: '' })).toBe('apiKey');
+    expect(draftProblem({ endpoint: 'https://api.deepseek.com/v1', model: 'deepseek-v4-flash', apiKey: '' })).toBe('apiKey');
     expect(draftProblem({ endpoint: 'http://localhost:1234/v1', model: 'x', apiKey: '' })).toBeNull();
   });
 });

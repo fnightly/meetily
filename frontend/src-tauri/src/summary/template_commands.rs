@@ -153,6 +153,8 @@ pub async fn api_save_template<R: Runtime>(
     template_id: Option<String>,
     name: String,
     description: String,
+    detail_level: Option<String>,
+    granularity: Option<String>,
     sections: Vec<TemplateSectionInput>,
     overwrite: Option<bool>,
 ) -> Result<SaveTemplateResult, String> {
@@ -166,6 +168,8 @@ pub async fn api_save_template<R: Runtime>(
     let template = Template {
         name: name.clone(),
         description,
+        detail_level,
+        granularity,
         sections: sections
             .into_iter()
             .map(|s| TemplateSection {
@@ -231,6 +235,8 @@ pub async fn api_duplicate_template<R: Runtime>(
     let duplicated = Template {
         name: name.clone(),
         description: source.description.clone(),
+        detail_level: source.detail_level.clone(),
+        granularity: source.granularity.clone(),
         sections: source.sections.clone(),
     };
 

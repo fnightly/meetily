@@ -17,7 +17,7 @@ export function SummaryModelSettings({ refetchTrigger }: SummaryModelSettingsPro
   const { t } = useI18n();
   const [modelConfig, setModelConfig] = useState<ModelConfig>({
     provider: 'ollama',
-    model: 'llama3.2:latest',
+    model: 'qwen3.5:4b',
     whisperModel: 'large-v3',
     apiKey: null,
     ollamaEndpoint: null

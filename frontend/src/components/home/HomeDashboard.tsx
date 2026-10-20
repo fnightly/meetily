@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-  ArrowRight, AudioLines, ChevronRight, Cpu, FileText, Languages, Mic, MonitorSpeaker,
+  ArrowRight, AudioLines, ChevronDown, ChevronRight, Cpu, FileText, Languages, Mic, MonitorSpeaker,
   ShieldCheck, Sparkles, Upload, Library, Settings2, Cloud, ListChecks, MessageCircleQuestion,
 } from 'lucide-react';
 import { WindowPickerDialog } from '@/components/WindowPickerDialog';
@@ -43,6 +43,29 @@ interface HomeDashboardProps {
 export function HomeDashboard({ hasMicrophone, onStart, isStarting = false }: HomeDashboardProps) {
   const { t, locale } = useI18n();
   const router = useRouter();
+  const [tasksCollapsed, setTasksCollapsed] = useState(false);
+
+  // Remember the collapse choice: users who keep the home task list out of the
+  // way should not have to hide it on every launch.
+  useEffect(() => {
+    try {
+      setTasksCollapsed(localStorage.getItem('meetily.home.tasksCollapsed') === '1');
+    } catch {
+      // Storage is optional.
+    }
+  }, []);
+
+  const toggleTasksCollapsed = () => {
+    setTasksCollapsed((collapsed) => {
+      const next = !collapsed;
+      try {
+        localStorage.setItem('meetily.home.tasksCollapsed', next ? '1' : '0');
+      } catch {
+        // Storage is optional.
+      }
+      return next;
+    });
+  };
   const { entries, setCurrentMeeting } = useSidebar();
   const { selectedDevices, selectedWindow, setSelectedWindow, captureSystemAudio, captureMicrophone, deferTranscription, transcriptModelConfig, selectedLanguage, betaFeatures } = useConfig();
   const { openImportDialog } = useImportDialog();
@@ -357,13 +380,28 @@ export function HomeDashboard({ hasMicrophone, onStart, isStarting = false }: Ho
                 <h3 className="flex items-center gap-1.5 text-sm font-semibold text-slate-900">
                   <ListChecks className="h-4 w-4 text-emerald-600" />{t('home.tasks.title')}
                 </h3>
-                <button type="button" onClick={() => router.push('/tasks')} className="inline-flex items-center gap-0.5 text-xs font-medium text-blue-600 hover:text-blue-700">
-                  {t('home.tasks.viewAll')}<ChevronRight className="h-3 w-3" />
-                </button>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={toggleTasksCollapsed}
+                    aria-expanded={!tasksCollapsed}
+                    aria-controls="home-tasks-body"
+                    title={tasksCollapsed ? t('home.tasks.expand') : t('home.tasks.collapse')}
+                    className="inline-flex items-center gap-1 text-xs font-medium text-slate-500 hover:text-slate-800"
+                  >
+                    <ChevronDown className={`h-3.5 w-3.5 transition-transform ${tasksCollapsed ? '-rotate-90' : ''}`} />
+                    {tasksCollapsed ? t('home.tasks.expand') : t('home.tasks.collapse')}
+                  </button>
+                  <button type="button" onClick={() => router.push('/tasks')} className="inline-flex items-center gap-0.5 text-xs font-medium text-blue-600 hover:text-blue-700">
+                    {t('home.tasks.viewAll')}<ChevronRight className="h-3 w-3" />
+                  </button>
+                </div>
               </div>
-              <div className="mt-3">
-                <ActionItemsPanel compact limit={5} />
-              </div>
+              {!tasksCollapsed && (
+                <div id="home-tasks-body" className="mt-3">
+                  <ActionItemsPanel compact limit={5} />
+                </div>
+              )}
             </section>
 
             <button

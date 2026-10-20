@@ -80,22 +80,17 @@ interface GroqModel {
 
 // Fallback models for when API fetch fails or no API key provided
 const OPENAI_FALLBACK_MODELS = [
+  'gpt-6.1-sol',
+  'gpt-6-luna',
+  'gpt-5.6-cyber',
   'gpt-4o',
   'gpt-4o-mini',
-  'gpt-4-turbo',
-  'gpt-4',
-  'gpt-3.5-turbo',
-  'o1',
-  'o1-mini',
-  'o3',
-  'o3-mini',
 ];
 
 const CLAUDE_FALLBACK_MODELS = [
-  'claude-sonnet-4-5-20250929',
-  'claude-haiku-4-5-20251001',
-  'claude-opus-4-5-20251101',
-  'claude-3-5-sonnet-latest',
+  'claude-sonnet-5-5',
+  'claude-opus-5-5',
+  'claude-haiku-5-5',
 ];
 
 const GROQ_FALLBACK_MODELS = [
@@ -1066,7 +1061,7 @@ export function ModelSettingsModal({
                 id="custom-model"
                 value={customOpenAIModel}
                 onChange={(e) => setCustomOpenAIModel(e.target.value)}
-                placeholder={activePreset?.models[0] ?? 'qwen2.5:7b, deepseek-chat …'}
+                placeholder={activePreset?.models[0] ?? 'qwen3.5:4b, deepseek-v4-flash …'}
                 list="custom-model-suggestions"
                 className="mt-1"
               />
