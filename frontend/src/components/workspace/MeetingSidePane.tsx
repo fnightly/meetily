@@ -85,6 +85,15 @@ export function MeetingSidePane({
     void loadNotesEditor().then((mod) => mod.primeMeetingNote(meetingId)).catch(() => {});
   };
 
+  // Warm the notes tab once the meeting page has settled: the editor chunk and
+  // the note query are small, and doing them here removes the first-click wait
+  // for users who never hover the tab first.
+  useEffect(() => {
+    const timer = window.setTimeout(() => { warmNotes(); }, 1500);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meetingId]);
+
   const tabs: Array<{ id: SidePaneTab; label: string; icon: typeof Sparkles }> = [
     { id: 'summary', label: t('meeting.pane.summary'), icon: Sparkles },
     { id: 'notes', label: t('meeting.pane.notes'), icon: StickyNote },
