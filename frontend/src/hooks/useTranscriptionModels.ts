@@ -31,6 +31,9 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
   const [selectedModelKey, setSelectedModelKey] = useState<string>('');
   const [loadingModels, setLoadingModels] = useState(false);
+  // True when every model source failed, so the dialog can explain the empty
+  // list instead of silently leaving the user without a selectable model.
+  const [loadError, setLoadError] = useState(false);
   // Track whether the user has manually changed the model selection
   const userSelectedRef = useRef(false);
 
@@ -42,7 +45,9 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
 
   const fetchModels = useCallback(async () => {
     setLoadingModels(true);
+    setLoadError(false);
     const allModels: ModelOption[] = [];
+    let failures = 0;
 
     // Fetch Whisper models
     try {
@@ -57,6 +62,7 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
         }));
       allModels.push(...availableWhisper);
     } catch (err) {
+      failures += 1;
       console.error('Failed to fetch Whisper models:', err);
     }
 
@@ -73,6 +79,7 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
         }));
       allModels.push(...availableParakeet);
     } catch (err) {
+      failures += 1;
       console.error('Failed to fetch Parakeet models:', err);
     }
 
@@ -82,10 +89,14 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
       const providers = await invoke<CloudProviderInfo[]>('api_list_speech_providers');
       allModels.push(...cloudModelOptions(providers, transcriptModelConfig, tr('transcribeModels.needsKey')));
     } catch (err) {
+      failures += 1;
       console.error('Failed to fetch cloud speech providers:', err);
     }
 
     setAvailableModels(allModels);
+    // Only a total failure is attributed to loading: one missing provider simply
+    // means fewer choices, and the no-models message covers the empty result.
+    setLoadError(allModels.length === 0 && failures > 0);
 
     // Only set default model if user hasn't manually selected one
     if (!userSelectedRef.current) {
@@ -106,6 +117,7 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
     selectedModelKey,
     setSelectedModelKey: setSelectedModelKeyWithTracking,
     loadingModels,
+    loadError,
     fetchModels,
     resetSelection,
   };

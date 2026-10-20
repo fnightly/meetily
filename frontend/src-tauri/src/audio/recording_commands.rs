@@ -131,6 +131,26 @@ static FINALIZE_QUEUE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(()
 static PENDING_FINALIZATIONS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// RAII accounting for a session that is still finishing in the background.
+///
+/// The stop path returns before the save completes, so this count is what
+/// `get_recording_status` reports as "still finalizing". A panic anywhere in the
+/// finalizer must not leave that count pinned forever, hence the guard.
+struct FinalizingGuard(());
+
+impl FinalizingGuard {
+    fn new() -> Self {
+        PENDING_FINALIZATIONS.fetch_add(1, Ordering::SeqCst);
+        Self(())
+    }
+}
+
+impl Drop for FinalizingGuard {
+    fn drop(&mut self) {
+        PENDING_FINALIZATIONS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// Id of the live recording session, if any.
 pub fn current_session_id() -> Option<String> {
     ACTIVE_SESSION.lock().unwrap().as_ref().map(|s| s.id.clone())
@@ -1143,8 +1163,6 @@ pub async fn stop_recording<R: Runtime>(
         .as_ref()
         .map_or(false, |m| m.get_state().is_transcription_deferred());
 
-    PENDING_FINALIZATIONS.fetch_add(1, Ordering::SeqCst);
-
     info!("🔍 Setting IS_RECORDING to false");
     IS_RECORDING.store(false, Ordering::SeqCst);
     drop(stopping_guard);
@@ -1180,6 +1198,7 @@ pub async fn stop_recording<R: Runtime>(
             meeting_folder,
             meeting_name,
             transcription_deferred,
+            finalizing: FinalizingGuard::new(),
         },
     ));
 
@@ -1196,6 +1215,8 @@ struct StoppedSession {
     meeting_folder: Option<std::path::PathBuf>,
     meeting_name: Option<String>,
     transcription_deferred: bool,
+    /// Held until this function returns or unwinds, so the pending count is real.
+    finalizing: FinalizingGuard,
 }
 
 fn emit_finalize_progress<R: Runtime>(
@@ -1228,6 +1249,7 @@ async fn finalize_stopped_session<R: Runtime>(app: AppHandle<R>, stopped: Stoppe
         meeting_folder,
         meeting_name,
         transcription_deferred,
+        finalizing: _finalizing_guard,
     } = stopped;
     let session_id = session.as_ref().map(|s| s.id.clone()).unwrap_or_default();
 
@@ -1245,6 +1267,14 @@ async fn finalize_stopped_session<R: Runtime>(app: AppHandle<R>, stopped: Stoppe
     if let Some(task_handle) = transcription_task {
         info!("⏳ Waiting for ALL transcription chunks of session {} to be processed", session_id);
 
+        // Keep an abort handle before `timeout` consumes the JoinHandle: on timeout the
+        // handle is dropped, which detaches the task. A detached worker would keep
+        // transcribing after this session's listener is gone and after the model has
+        // been released (it holds no ModelUseGuard), silently losing its remaining
+        // chunks. Abort is cooperative: an in-flight decode finishes first, and
+        // `unload_model` waits on its read guard, so the model cannot vanish under it.
+        let abort_handle = task_handle.abort_handle();
+
         // Wait up to 10 minutes for transcription completion to prevent indefinite hangs
         match tokio::time::timeout(
             tokio::time::Duration::from_secs(600), // 10 minutes max
@@ -1260,8 +1290,8 @@ async fn finalize_stopped_session<R: Runtime>(app: AppHandle<R>, stopped: Stoppe
                 // Continue anyway - the worker may have processed most chunks
             }
             Err(_) => {
-                warn!("⏱️ Transcription timeout (10 minutes) reached, continuing shutdown to prevent indefinite hang");
-                // Continue shutdown even on timeout - better to lose some chunks than hang forever
+                warn!("⏱️ Transcription timeout (10 minutes) reached; aborting the remaining task so it cannot run against a released model");
+                abort_handle.abort();
             }
         }
     } else {
@@ -1339,8 +1369,7 @@ async fn finalize_stopped_session<R: Runtime>(app: AppHandle<R>, stopped: Stoppe
         info!("ℹ️ No recording manager available for cleanup");
     }
 
-    PENDING_FINALIZATIONS.fetch_sub(1, Ordering::SeqCst);
-
+    // `_finalizing_guard` decrements the pending count on drop, including on unwind.
     emit_finalize_progress(&app, &session_id, "complete", "Recording stopped successfully", 100);
 
     // The frontend saves the meeting from this payload, so it carries the whole

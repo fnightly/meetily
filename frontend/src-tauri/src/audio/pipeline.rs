@@ -152,6 +152,24 @@ impl AudioMixerRingBuffer {
         Some((mic_window, sys_window))
     }
 
+    /// Take whatever is left once the real-time mix loop has stopped.
+    ///
+    /// The mix loop only emits complete windows, so a stop landing mid-window would
+    /// otherwise drop the remainder of both streams. The leftovers are padded to one
+    /// window so the caller can run them through the same mix → VAD → recording path
+    /// once; any trailing zeros are silence, as for a partially filled window.
+    fn drain_remainder(&mut self) -> Option<(Vec<f32>, Vec<f32>)> {
+        if self.mic_buffer.is_empty() && self.system_buffer.is_empty() {
+            return None;
+        }
+
+        let mut mic = self.mic_buffer.drain(..).collect::<Vec<_>>();
+        let mut system = self.system_buffer.drain(..).collect::<Vec<_>>();
+        mic.resize(self.window_size_samples, 0.0);
+        system.resize(self.window_size_samples, 0.0);
+        Some((mic, system))
+    }
+
 }
 
 /// Simple audio mixer without aggressive ducking
@@ -1015,6 +1033,8 @@ pub struct AudioPipeline {
     /// Channels the recorder writes for this session, read once at construction so the
     /// hot path never consults session state.
     recording_channels: u16,
+    /// Timestamp of the newest capture chunk, used for the window drained at stop.
+    last_chunk_timestamp: f64,
 }
 
 impl AudioPipeline {
@@ -1110,6 +1130,7 @@ impl AudioPipeline {
             echo_canceller,
             recording_sender_for_mixed: None,  // Will be set by manager
             recording_channels,
+            last_chunk_timestamp: 0.0,
         })
     }
 
@@ -1125,6 +1146,77 @@ impl AudioPipeline {
         match guard.as_mut() {
             Some(canceller) => canceller.process_window(&mic_window, sys_window),
             None => mic_window,
+        }
+    }
+
+    /// Mix one window, feed the VAD, and hand the mixed audio to the recorder.
+    ///
+    /// Extracted from the receive loop so the stop path can run it once more for the
+    /// partial window that never reaches a full mix window on its own.
+    fn process_window(
+        &mut self,
+        mic_window: Vec<f32>,
+        sys_window: Vec<f32>,
+        stereo_system: bool,
+        timestamp: f64,
+    ) {
+        // Cancel speaker echo in the microphone before mixing: otherwise the recording
+        // contains both the system audio and its delayed, coloured copy from the room.
+        let mic_window = self.cancel_echo(mic_window, &sys_window);
+
+        let mixed_with_gain = self.mixer.mix_window(&mic_window, &sys_window);
+
+        // STEP 3: Send mixed audio for transcription (VAD + Whisper)
+        match self.vad_processor.process_audio(&mixed_with_gain) {
+            Ok(speech_segments) => {
+                for segment in speech_segments {
+                    let duration_ms = segment.end_timestamp_ms - segment.start_timestamp_ms;
+
+                    // Minimum 50ms at 16kHz - matches Parakeet capability.
+                    if segment.samples.len() >= 800 {
+                        debug!("📤 Sending VAD segment: {:.1}ms, {} samples",
+                               duration_ms, segment.samples.len());
+
+                        let transcription_chunk = AudioChunk {
+                            data: segment.samples,
+                            sample_rate: 16000,
+                            timestamp: segment.start_timestamp_ms / 1000.0,
+                            chunk_id: self.chunk_id_counter,
+                            device_type: DeviceType::Microphone,  // Mixed audio
+                        };
+
+                        if let Err(e) = self.transcription_sender.send(transcription_chunk) {
+                            warn!("Failed to send VAD segment: {}", e);
+                        } else {
+                            self.chunk_id_counter += 1;
+                        }
+                    } else {
+                        debug!("⏭️ Dropping short VAD segment: {:.1}ms ({} samples < 800)",
+                               duration_ms, segment.samples.len());
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("⚠️ VAD error: {}", e);
+            }
+        }
+
+        // STEP 4: Send mixed audio for recording (WAV file). The stereo internal
+        // recording has no mixer output to save: its interleaved source was forwarded
+        // before the downmix.
+        if !stereo_system {
+            if let Some(ref sender) = self.recording_sender_for_mixed {
+                // Move the mixed window into the logger instead of cloning ~10 KB per
+                // 600 ms window: nothing else reads it after the VAD call above.
+                let recording_chunk = AudioChunk {
+                    data: mixed_with_gain,
+                    sample_rate: self.sample_rate,
+                    timestamp,
+                    chunk_id: self.chunk_id_counter,
+                    device_type: DeviceType::Microphone,  // Mixed audio
+                };
+                let _ = sender.send(recording_chunk);
+            }
         }
     }
 
@@ -1155,6 +1247,7 @@ impl AudioPipeline {
                     // PERFORMANCE OPTIMIZATION: Eliminate per-chunk logging overhead
                     // Logging in hot paths causes severe performance degradation
                     self.processed_chunks += 1;
+                    self.last_chunk_timestamp = chunk.timestamp;
 
                     // CRITICAL: Log summary only every 200 chunks OR every 60 seconds (99.5% reduction)
                     // This eliminates I/O overhead in the audio processing hot path
@@ -1191,72 +1284,7 @@ impl AudioPipeline {
                     // STEP 2: Mix audio in fixed windows when both streams have sufficient data
                     while self.ring_buffer.can_mix() {
                         if let Some((mic_window, sys_window)) = self.ring_buffer.extract_window() {
-                            // Cancel speaker echo in the microphone before mixing:
-                            // otherwise the recording contains both the system audio
-                            // and its delayed, coloured copy from the room.
-                            let mic_window = self.cancel_echo(mic_window, &sys_window);
-
-                            // Simple mixing without aggressive ducking
-                            let mixed_clean = self.mixer.mix_window(&mic_window, &sys_window);
-
-                            // NO POST-GAIN NEEDED: Microphone already normalized by EBU R128 to -23 LUFS
-                            // This is broadcast-standard loudness (Netflix/YouTube/Spotify level)
-                            // System audio at natural levels
-                            // Previous 2x gain was causing excessive limiting/distortion
-                            let mixed_with_gain = mixed_clean;
-
-                            // STEP 3: Send mixed audio for transcription (VAD + Whisper)
-                            match self.vad_processor.process_audio(&mixed_with_gain) {
-                                Ok(speech_segments) => {
-                                    for segment in speech_segments {
-                                        let duration_ms = segment.end_timestamp_ms - segment.start_timestamp_ms;
-
-                                        if segment.samples.len() >= 800 {  // Minimum 50ms at 16kHz - matches Parakeet capability
-                                            info!("📤 Sending VAD segment: {:.1}ms, {} samples",
-                                                  duration_ms, segment.samples.len());
-
-                                            let transcription_chunk = AudioChunk {
-                                                data: segment.samples,
-                                                sample_rate: 16000,
-                                                timestamp: segment.start_timestamp_ms / 1000.0,
-                                                chunk_id: self.chunk_id_counter,
-                                                device_type: DeviceType::Microphone,  // Mixed audio
-                                            };
-
-                                            if let Err(e) = self.transcription_sender.send(transcription_chunk) {
-                                                warn!("Failed to send VAD segment: {}", e);
-                                            } else {
-                                                self.chunk_id_counter += 1;
-                                            }
-                                        } else {
-                                            debug!("⏭️ Dropping short VAD segment: {:.1}ms ({} samples < 800)",
-                                                   duration_ms, segment.samples.len());
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("⚠️ VAD error: {}", e);
-                                }
-                            }
-
-                            // STEP 4: Send mixed audio for recording (WAV file). The
-                            // stereo internal recording has no mixer output to save: its
-                            // interleaved source was forwarded before the downmix.
-                            if !stereo_system {
-                                if let Some(ref sender) = self.recording_sender_for_mixed {
-                                    // Move the mixed window into the logger instead of
-                                    // cloning ~10 KB per 600 ms window: nothing else
-                                    // reads it after the VAD call above.
-                                    let recording_chunk = AudioChunk {
-                                        data: mixed_with_gain,
-                                        sample_rate: self.sample_rate,
-                                        timestamp: chunk.timestamp,
-                                        chunk_id: self.chunk_id_counter,
-                                        device_type: DeviceType::Microphone,  // Mixed audio
-                                    };
-                                    let _ = sender.send(recording_chunk);
-                                }
-                            }
+                            self.process_window(mic_window, sys_window, stereo_system, chunk.timestamp);
                         }
                     }
                 }
@@ -1280,6 +1308,15 @@ impl AudioPipeline {
 
     fn flush_remaining_audio(&mut self) -> Result<()> {
         info!("Flushing remaining audio from pipeline (processed {} chunks)", self.processed_chunks);
+
+        // A stop can land mid-window: the receive loop above only mixes complete
+        // windows, so push the remainder through the same path before the VAD is
+        // flushed, otherwise up to one window of mono recording is silently lost.
+        // Stereo sessions never write mixer output to the recorder, matching the loop.
+        while let Some((mic_window, sys_window)) = self.ring_buffer.drain_remainder() {
+            let stereo_system = self.recording_channels == 2;
+            self.process_window(mic_window, sys_window, stereo_system, self.last_chunk_timestamp);
+        }
 
         // Flush any remaining audio from VAD processor and send segments to transcription
         match self.vad_processor.flush() {
@@ -1596,6 +1633,25 @@ mod tests {
         assert_eq!(mic.len(), ring.window_size_samples);
         assert_eq!(sys.len(), ring.window_size_samples);
         assert!(ring.mic_buffer.len() <= max);
+    }
+
+    #[test]
+    fn ring_buffer_drain_remainder_flushes_a_partial_window() {
+        let mut ring = AudioMixerRingBuffer::new(48_000);
+        let mic: Vec<f32> = (0..1_000).map(|index| index as f32 * 1e-4).collect();
+        ring.add_samples(DeviceType::Microphone, mic.clone());
+
+        let (drained_mic, drained_system) = ring
+            .drain_remainder()
+            .expect("the partial window must be flushed, not dropped");
+        let window = 48_000 * 600 / 1000;
+
+        assert_eq!(drained_mic.len(), window);
+        assert_eq!(drained_system.len(), window);
+        assert_eq!(&drained_mic[..mic.len()], mic.as_slice());
+        assert!(drained_mic[mic.len()..].iter().all(|sample| *sample == 0.0));
+        assert!(drained_system.iter().all(|sample| *sample == 0.0));
+        assert!(ring.drain_remainder().is_none(), "drain must be one-shot");
     }
 
     #[test]

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { LANGUAGE_OPTIONS } from "@/lib/summary-languages";
 import { useRecentLanguages } from "@/hooks/useRecentLanguages";
+import { useI18n } from "@/contexts/I18nContext";
 
 interface LanguagePickerPopoverProps {
   value: string | null;
@@ -19,6 +20,7 @@ export function LanguagePickerPopover({
   mode = "meeting",
   autoSubtitle,
 }: LanguagePickerPopoverProps) {
+  const { t } = useI18n();
   const { recents } = useRecentLanguages();
   const [query, setQuery] = useState("");
   const containerRef = useRef<HTMLDivElement>(null);
@@ -92,7 +94,7 @@ export function LanguagePickerPopover({
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search language..."
+          placeholder={t("language.searchPlaceholder")}
           className="flex-1 text-sm text-gray-900 bg-transparent border-none outline-none placeholder-gray-400"
         />
       </div>

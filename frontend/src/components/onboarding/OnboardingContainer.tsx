@@ -3,6 +3,7 @@ import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { ProgressIndicator } from './shared/ProgressIndicator';
 import { useOnboarding } from '@/contexts/OnboardingContext';
+import { useI18n } from '@/contexts/I18nContext';
 import type { OnboardingContainerProps } from '@/types/onboarding';
 
 export function OnboardingContainer({
@@ -20,6 +21,7 @@ export function OnboardingContainer({
   canGoNext = true,
   canGoPrevious = true,
 }: OnboardingContainerProps) {
+  const { t } = useI18n();
   const { goToStep, goPrevious, goNext } = useOnboarding();
 
   const handlePrevious = () => {
@@ -52,29 +54,33 @@ export function OnboardingContainer({
             {showNavigation && (
               <div className="absolute top-1/2 -translate-y-1/2 left-0 right-0 flex justify-between pointer-events-none">
                 <button
+                  type="button"
                   onClick={handlePrevious}
                   disabled={!canGoPrevious || step === 1}
+                  aria-label={t('onboarding.nav.previous')}
                   className={cn(
-                    'pointer-events-auto w-8 h-8 rounded-full bg-white border border-gray-200 shadow-sm flex items-center justify-center transition-all duration-200',
+                    'pointer-events-auto w-8 h-8 rounded-full bg-white border border-gray-200 shadow-sm flex items-center justify-center transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60',
                     canGoPrevious && step !== 1
                       ? 'hover:bg-gray-50 hover:shadow-md hover:scale-110 text-gray-700'
                       : 'opacity-0 cursor-not-allowed'
                   )}
                 >
-                  <ChevronLeft className="w-4 h-4" />
+                  <ChevronLeft className="w-4 h-4" aria-hidden />
                 </button>
 
                 <button
+                  type="button"
                   onClick={handleNext}
                   disabled={!canGoNext || step === totalSteps}
+                  aria-label={t('onboarding.nav.next')}
                   className={cn(
-                    'pointer-events-auto w-8 h-8 rounded-full bg-white border border-gray-200 shadow-sm flex items-center justify-center transition-all duration-200',
+                    'pointer-events-auto w-8 h-8 rounded-full bg-white border border-gray-200 shadow-sm flex items-center justify-center transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60',
                     canGoNext && step !== totalSteps
                       ? 'hover:bg-gray-50 hover:shadow-md hover:scale-110 text-gray-700'
                       : 'opacity-0 cursor-not-allowed'
                   )}
                 >
-                  <ChevronRight className="w-4 h-4" />
+                  <ChevronRight className="w-4 h-4" aria-hidden />
                 </button>
               </div>
             )}

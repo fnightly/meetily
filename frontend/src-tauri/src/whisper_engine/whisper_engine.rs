@@ -105,6 +105,24 @@ fn transcription_params<'a>(
     params
 }
 
+/// Run CPU-heavy whisper work without parking a tokio worker thread.
+///
+/// `whisper.cpp` decode and model load are synchronous and can take seconds. Running
+/// them inline in an async fn starves the capture pipeline (and every other async
+/// command) on low-core machines. `block_in_place` requires a multi-thread runtime,
+/// which is what Tauri installs; tests or embedders on a current-thread runtime fall
+/// back to running inline instead of panicking.
+fn run_blocking<T>(work: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle)
+            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
+        {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ModelStatus {
     Available,
@@ -384,11 +402,17 @@ impl WhisperEngine {
     }
     
     pub async fn load_model(&self, model_name: &str) -> Result<()> {
-        let models = self.available_models.read().await;
-        let model_info = models.get(model_name)
-            .ok_or_else(|| anyhow!("Model {} not found", model_name))?;
+        // Copy what is needed and release the list lock: loading a model takes
+        // seconds and holding it here would stall discover_models (and download
+        // progress updates) for the whole load.
+        let (model_status, model_path) = {
+            let models = self.available_models.read().await;
+            let model_info = models.get(model_name)
+                .ok_or_else(|| anyhow!("Model {} not found", model_name))?;
+            (model_info.status.clone(), model_info.path.clone())
+        };
 
-        match model_info.status {
+        match model_status {
             ModelStatus::Available => {
                 // FIX 5: Check if this model is already loaded
                 if let Some(current_model) = self.current_model.read().await.as_ref() {
@@ -436,8 +460,9 @@ impl WhisperEngine {
 
                     // Load whisper context with hardware-optimized parameters.
                     // `path` takes `AsRef<Path>`, so pass the path directly rather
-                    // than a `Cow<str>` (which is not `AsRef<Path>`).
-                    WhisperContext::new_with_params(&model_info.path, context_param)
+                    // than a `Cow<str>` (which is not `AsRef<Path>`). Model loading is
+                    // blocking for seconds, so keep it off the async runtime.
+                    run_blocking(|| WhisperContext::new_with_params(&model_path, context_param))
                         .map_err(|e| anyhow!("Failed to load model {}: {}", model_name, e))?
                     // Suppressor dropped here, stderr restored
                 };
@@ -673,27 +698,26 @@ impl WhisperEngine {
         let duration_seconds = audio_data.len() as f64 / 16000.0;
         let is_partial = duration_seconds < 15.0; // Consider chunks under 15s as partial
 
-        // PERFORMANCE: Suppress verbose C library logs during transcription
-        // This hides whisper_full_with_state debug logs and beam search details
-        let (num_segments, state) = {
-            // let _suppressor = crate::whisper_engine::StderrSuppressor::new();
-
+        // The decode plus segment extraction is CPU-bound for seconds; keep it off the
+        // async worker threads (see `run_blocking`).
+        let segment_texts = run_blocking(|| -> Result<Vec<String>> {
             let mut state = ctx.create_state()?;
             state.full(params, &audio_data)?;
-            let num_segments = state.full_n_segments();
+            let num_segments = state.full_n_segments() as usize;
 
-            (num_segments, state)
-            // Suppressor dropped here, stderr restored
-        };
+            let mut segment_texts: Vec<String> = Vec::new();
+            for i in 0..num_segments {
+                let Some(segment) = state.get_segment(i as i32) else { continue; };
+                let Ok(segment_text) = segment.to_str_lossy() else { continue; };
+                segment_texts.push(segment_text.into_owned());
+            }
+
+            Ok(segment_texts)
+        })?;
+
         let mut total_confidence = 0.0;
         let mut segment_count = 0;
-        let mut segment_texts: Vec<String> = Vec::new();
-
-        let num_segments = num_segments as usize;
-        for i in 0..num_segments {
-            let Some(segment) = state.get_segment(i as i32) else { continue; };
-            let Ok(segment_text) = segment.to_str_lossy() else { continue; };
-
+        for segment_text in &segment_texts {
             // Segment length stands in for decode confidence here; keep the same
             // measure so the reported confidence number does not change.
             let segment_length = segment_text.len() as f32;
@@ -704,7 +728,6 @@ impl WhisperEngine {
             };
             total_confidence += segment_confidence;
             segment_count += 1;
-            segment_texts.push(segment_text.into_owned());
         }
 
         let final_result =
@@ -784,37 +807,42 @@ impl WhisperEngine {
             log::info!("Starting transcription #{} of {} samples ({:.1}s duration)",
                       transcription_count, audio_data.len(), duration_seconds);
         }
-        let mut state = ctx.create_state()?;
-        state.full(params, &audio_data)?;
+        // The decode plus segment extraction is CPU-bound for seconds; keep it off the
+        // async worker threads (see `run_blocking`).
+        let (num_segments, segment_texts) = run_blocking(|| -> Result<(i32, Vec<String>)> {
+            let mut state = ctx.create_state()?;
+            state.full(params, &audio_data)?;
 
-        // Extract text with improved segment handling
-        // `full_n_segments` returns a plain c_int in whisper-rs 0.16.
-        let num_segments = state.full_n_segments();
+            // `full_n_segments` returns a plain c_int in whisper-rs 0.16.
+            let num_segments = state.full_n_segments();
+            let mut segment_texts: Vec<String> = Vec::new();
+
+            for i in 0..num_segments {
+                // Fetch each segment once: text and timestamps both come from the same
+                // handle instead of three separate C calls per segment.
+                let Some(segment) = state.get_segment(i) else { continue; };
+                let Ok(segment_text) = segment.to_str_lossy() else { continue; };
+
+                // Only long recordings log segments; keep timestamps out of the hot
+                // path unless they are about to be printed.
+                if duration_seconds > 30.0 {
+                    perf_trace!("Segment {} ({:.2}s-{:.2}s): '{}'",
+                               i, segment.start_timestamp() as f64 / 100.0,
+                               segment.end_timestamp() as f64 / 100.0, segment_text);
+                }
+
+                if !segment_text.trim().is_empty() {
+                    segment_texts.push(segment_text.into_owned());
+                }
+            }
+
+            Ok((num_segments, segment_texts))
+        })?;
 
         // Performance optimization: reduce segment completion logging
         // Only log for significant transcriptions to avoid I/O overhead
         if (should_log_transcription || num_segments > 0) && (num_segments > 3 || duration_seconds > 5.0) {
             perf_debug!("Transcription #{} completed with {} segments ({:.1}s)", transcription_count, num_segments, duration_seconds);
-        }
-        let mut segment_texts: Vec<String> = Vec::new();
-
-        for i in 0..num_segments {
-            // Fetch each segment once: text and timestamps both come from the same
-            // handle instead of three separate C calls per segment.
-            let Some(segment) = state.get_segment(i) else { continue; };
-            let Ok(segment_text) = segment.to_str_lossy() else { continue; };
-
-            // Only long recordings log segments; keep timestamps out of the hot path
-            // unless they are about to be printed.
-            if duration_seconds > 30.0 {
-                perf_trace!("Segment {} ({:.2}s-{:.2}s): '{}'",
-                           i, segment.start_timestamp() as f64 / 100.0,
-                           segment.end_timestamp() as f64 / 100.0, segment_text);
-            }
-
-            if !segment_text.trim().is_empty() {
-                segment_texts.push(segment_text.into_owned());
-            }
         }
 
         let final_result =

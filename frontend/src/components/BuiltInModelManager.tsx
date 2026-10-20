@@ -282,6 +282,8 @@ export function BuiltInModelManager({
       </div>
 
       <div
+        role="radiogroup"
+        aria-label="Built-in AI models"
         className={cn(
           'grid gap-4',
           layout === 'dialog' && 'max-h-[50vh] overflow-y-auto pr-2 pb-2'
@@ -299,8 +301,12 @@ export function BuiltInModelManager({
           return (
             <div
               key={model.name}
+              role="radio"
+              aria-checked={selectedModel === model.name}
+              aria-disabled={!isAvailable || modelIsDownloading}
+              tabIndex={isAvailable && !modelIsDownloading ? 0 : -1}
               className={cn(
-                'p-4 rounded-lg border transition-colors',
+                'p-4 rounded-lg border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60',
                 modelIsDownloading
                   ? 'bg-white border-gray-200'
                   : 'bg-card',
@@ -309,6 +315,14 @@ export function BuiltInModelManager({
                   : 'border-gray-200 hover:border-gray-300',
                 isAvailable && !modelIsDownloading && 'cursor-pointer'
               )}
+              onKeyDown={(event) => {
+                // Nested action buttons handle their own keyboard activation.
+                if (event.target !== event.currentTarget) return;
+                if ((event.key === 'Enter' || event.key === ' ') && isAvailable && !modelIsDownloading) {
+                  event.preventDefault();
+                  onModelSelect(model.name);
+                }
+              }}
               onClick={() => {
                 if (isAvailable && !modelIsDownloading) {
                   onModelSelect(model.name);

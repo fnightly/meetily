@@ -1,5 +1,6 @@
 import React from 'react';
 import { Check, Lock, Download, CheckCircle2, BrainCircuit } from 'lucide-react';
+import { useI18n } from '@/contexts/I18nContext';
 
 interface ProgressIndicatorProps {
   current: number;
@@ -15,6 +16,7 @@ const stepIcons = [
 ];
 
 export function ProgressIndicator({ current, total, onStepClick }: ProgressIndicatorProps) {
+  const { t } = useI18n();
   const visibleSteps = Array.from({ length: total }, (_, i) => i + 1);
 
   return (
@@ -30,20 +32,24 @@ export function ProgressIndicator({ current, total, onStepClick }: ProgressIndic
             <React.Fragment key={step}>
               {/* Step Circle */}
               <button
+                type="button"
                 onClick={() => isClickable && onStepClick(step)}
                 disabled={!isClickable}
-                className={`relative flex items-center justify-center transition-all duration-300 ${
+                aria-label={t('onboarding.step.label', { current: step, total })}
+                aria-current={isActive ? 'step' : undefined}
+                className={`relative flex items-center justify-center transition-all duration-300 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 ${
                   isCompleted
-                    ? 'w-7 h-7 bg-green-600 rounded-full'
+                    ? 'w-7 h-7 bg-green-600'
                     : isActive
-                      ? 'w-8 h-8 bg-gray-900 rounded-full'
-                      : 'w-6 h-6 bg-gray-300 rounded-full'
+                      ? 'w-8 h-8 bg-gray-900'
+                      : 'w-6 h-6 bg-gray-300'
                 } ${isClickable ? 'cursor-pointer hover:scale-110 hover:shadow-md' : 'cursor-default'}`}
               >
                 {isCompleted ? (
-                  <Check className="w-4 h-4 text-white" />
+                  <Check className="w-4 h-4 text-white" aria-hidden />
                 ) : (
                   <StepIcon
+                    aria-hidden
                     className={`transition-all duration-300 ${
                       isActive ? 'w-4 h-4 text-white' : 'w-3 h-3 text-gray-600'
                     }`}
@@ -54,6 +60,7 @@ export function ProgressIndicator({ current, total, onStepClick }: ProgressIndic
               {/* Connector Line */}
               {index < visibleSteps.length - 1 && (
                 <div
+                  aria-hidden
                   className={`h-0.5 w-6 transition-all duration-300 ${
                     isCompleted ? 'bg-green-600' : 'bg-gray-300'
                   }`}

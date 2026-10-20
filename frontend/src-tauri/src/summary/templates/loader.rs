@@ -136,6 +136,17 @@ fn load_bundled_template(template_id: &str) -> Option<String> {
 /// # Returns
 /// The template JSON content if found, None otherwise
 fn load_custom_template(template_id: &str) -> Option<String> {
+    // Defense in depth: the public entry points validate too, but this helper is
+    // also called directly and must never resolve a path outside the templates
+    // directories.
+    if validate_template_id(template_id).is_err() {
+        warn!(
+            "Refusing to load custom template with invalid id '{}'",
+            template_id
+        );
+        return None;
+    }
+
     for custom_dir in custom_template_dirs() {
         let template_path = custom_dir.join(format!("{}.json", template_id));
         if let Ok(content) = std::fs::read_to_string(&template_path) {
@@ -149,7 +160,14 @@ fn load_custom_template(template_id: &str) -> Option<String> {
 }
 
 /// Whether a template id resolves to a user-authored template.
+///
+/// An invalid id (separators, dots, blank) can never name a template, so it is
+/// reported as not custom rather than being used to build a path.
 pub fn is_custom_template(template_id: &str) -> bool {
+    if validate_template_id(template_id).is_err() {
+        return false;
+    }
+
     custom_template_dirs()
         .iter()
         .any(|dir| dir.join(format!("{}.json", template_id)).is_file())
@@ -157,6 +175,8 @@ pub fn is_custom_template(template_id: &str) -> bool {
 
 /// Read a custom template straight from disk (no bundled/builtin fallback).
 pub fn read_custom_template(template_id: &str) -> Result<Template, String> {
+    validate_template_id(template_id)?;
+
     let content = load_custom_template(template_id)
         .ok_or_else(|| format!("Custom template '{}' not found", template_id))?;
     validate_and_parse_template(&content)
@@ -240,6 +260,10 @@ pub fn save_custom_template(
 
 /// Delete a custom template. Built-in templates cannot be deleted.
 pub fn delete_custom_template(template_id: &str) -> Result<(), String> {
+    // The id is used as a file name below; validate before the loop so a crafted
+    // id cannot delete a JSON file outside the templates directory.
+    validate_template_id(template_id)?;
+
     let mut removed = false;
 
     for dir in custom_template_dirs() {
@@ -307,6 +331,8 @@ pub fn is_custom_templates_dir(dir: &Path) -> bool {
 /// # Returns
 /// Parsed and validated Template struct
 pub fn get_template(template_id: &str) -> Result<Template, String> {
+    validate_template_id(template_id)?;
+
     // The bundled file was once misspelled; keep saved selections working.
     let template_id = if template_id == "psychatric_session" { "psychiatric_session" } else { template_id };
     info!("Loading template: {}", template_id);
@@ -529,5 +555,30 @@ mod tests {
     fn custom_templates_write_dir_is_resolvable() {
         // Must never panic; a platform without a data dir returns an error.
         let _ = custom_templates_write_dir();
+    }
+
+    #[test]
+    fn delete_and_read_paths_reject_traversal_ids() {
+        // Without the validation these would resolve <templates>/../<x>.json and
+        // either read it as a template or delete it.
+        for id in ["../meeting_minutes", "a/b", "a\\b", "evil.json", ".."] {
+            assert!(
+                delete_custom_template(id).is_err(),
+                "delete must reject '{id}'"
+            );
+            assert!(get_template(id).is_err(), "get must reject '{id}'");
+            assert!(
+                read_custom_template(id).is_err(),
+                "read must reject '{id}'"
+            );
+            assert!(
+                !is_custom_template(id),
+                "is_custom must be false for '{id}'"
+            );
+        }
+
+        // Valid ids still work: built-ins resolve, and a built-in is not custom.
+        assert!(get_template("daily_standup").is_ok());
+        assert!(!is_custom_template("daily_standup"));
     }
 }

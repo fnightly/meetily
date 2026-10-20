@@ -314,34 +314,6 @@ async fn is_recording() -> bool {
 // implementation in `audio::recording_commands` (which reports `IS_RECORDING`)
 // is registered below instead.
 
-#[tauri::command]
-fn read_audio_file(file_path: String) -> Result<Vec<u8>, String> {
-    match std::fs::read(&file_path) {
-        Ok(data) => Ok(data),
-        Err(e) => Err(format!("Failed to read audio file: {}", e)),
-    }
-}
-
-#[tauri::command]
-async fn save_transcript(file_path: String, content: String) -> Result<(), String> {
-    log_info!("Saving transcript to: {}", file_path);
-
-    // Ensure parent directory exists
-    if let Some(parent) = std::path::Path::new(&file_path).parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create directory: {}", e))?;
-        }
-    }
-
-    // Write content to file
-    std::fs::write(&file_path, content)
-        .map_err(|e| format!("Failed to write transcript: {}", e))?;
-
-    log_info!("Transcript saved successfully");
-    Ok(())
-}
-
 // Which applications are currently producing audio, for choosing a per-app source.
 #[tauri::command]
 async fn list_audio_apps() -> Result<Vec<audio::app_audio::AudioApp>, String> {
@@ -656,6 +628,14 @@ pub fn run() {
             })
             .expect("Failed to initialize database");
 
+            // Retention: apply the user's recording-retention preference once, now
+            // that the database and preferences are available. Best effort — the
+            // sweep is a no-op when retention is disabled (the default).
+            let retention_app = _app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                audio::retention_commands::run_startup_retention(retention_app).await;
+            });
+
             // Model residency: idle reaper + optional preload (after the database is ready).
             audio::transcription::residency::on_app_start(_app.handle().clone());
 
@@ -706,8 +686,6 @@ pub fn run() {
             is_recording,
             // Real transcription-queue status (replaces the former zero-valued stub).
             audio::recording_commands::get_transcription_status,
-            read_audio_file,
-            save_transcript,
             whisper_engine::commands::whisper_init,
             whisper_engine::commands::whisper_get_available_models,
             whisper_engine::commands::whisper_load_model,

@@ -1,10 +1,12 @@
 'use client';
 
 import React, { useEffect, useMemo, useRef } from 'react';
-import { Cpu } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { Cpu, Settings2 } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -48,12 +50,14 @@ export function TranscribeRecordingDialog({
   onConfirm,
 }: TranscribeRecordingDialogProps) {
   const { t } = useI18n();
+  const router = useRouter();
   const { transcriptModelConfig } = useConfig();
   const {
     availableModels,
     selectedModelKey,
     setSelectedModelKey,
     loadingModels,
+    loadError,
     fetchModels,
     resetSelection,
   } = useTranscriptionModels(transcriptModelConfig);
@@ -73,34 +77,60 @@ export function TranscribeRecordingDialog({
     [availableModels, selectedModelKey],
   );
 
+  // No models were found (or every source failed): there is nothing to pick and
+  // the confirm button would sit disabled forever without an explanation.
+  const unavailable = !loadingModels && availableModels.length === 0;
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{body ?? t('transcribeModels.description')}</DialogDescription>
         </DialogHeader>
-        {body && <p className="text-sm text-gray-600">{body}</p>}
-        <div className="space-y-2">
-          <div className="flex items-center gap-2">
-            <Cpu className="h-4 w-4 text-muted-foreground" />
-            <span className="text-sm font-medium">{t('retranscribe.model')}</span>
+        {unavailable ? (
+          <div role="alert" className="space-y-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
+            <p className="text-sm font-medium text-amber-900">
+              {loadError ? t('transcribeModels.loadFailed') : t('transcribeModels.noModels')}
+            </p>
+            <p className="text-xs leading-relaxed text-amber-800">
+              {loadError ? t('transcribeModels.loadFailedHint') : t('transcribeModels.noModelsHint')}
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                onOpenChange(false);
+                router.push('/settings');
+              }}
+            >
+              <Settings2 className="mr-2 h-4 w-4" aria-hidden />
+              {t('common.settings')}
+            </Button>
           </div>
-          <Select value={selectedModelKey} onValueChange={setSelectedModelKey} disabled={loadingModels}>
-            <SelectTrigger className="w-full">
-              <SelectValue
-                placeholder={loadingModels ? t('retranscribe.loadingModels') : t('retranscribe.selectModel')}
-              />
-            </SelectTrigger>
-            <SelectContent>
-              {availableModels.map((model) => (
-                <SelectItem key={modelKey(model)} value={modelKey(model)} disabled={model.disabled}>
-                  {model.displayName}{model.size_mb > 0 ? ` (${Math.round(model.size_mb)} MB)` : ''}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <p className="text-xs text-muted-foreground">{t('retranscribe.modelHint')}</p>
-        </div>
+        ) : (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <Cpu className="h-4 w-4 text-muted-foreground" aria-hidden />
+              <span className="text-sm font-medium">{t('retranscribe.model')}</span>
+            </div>
+            <Select value={selectedModelKey} onValueChange={setSelectedModelKey} disabled={loadingModels}>
+              <SelectTrigger className="w-full" aria-label={t('retranscribe.model')}>
+                <SelectValue
+                  placeholder={loadingModels ? t('retranscribe.loadingModels') : t('retranscribe.selectModel')}
+                />
+              </SelectTrigger>
+              <SelectContent>
+                {availableModels.map((model) => (
+                  <SelectItem key={modelKey(model)} value={modelKey(model)} disabled={model.disabled}>
+                    {model.displayName}{model.size_mb > 0 ? ` (${Math.round(model.size_mb)} MB)` : ''}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">{t('retranscribe.modelHint')}</p>
+          </div>
+        )}
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             {t('common.cancel')}
@@ -108,6 +138,7 @@ export function TranscribeRecordingDialog({
           <Button
             variant={destructive ? 'destructive' : 'default'}
             disabled={!selectedModel}
+            title={!selectedModel ? t('transcribeModels.selectFirst') : undefined}
             onClick={() => selectedModel && onConfirm(selectedModel)}
           >
             {confirmLabel}

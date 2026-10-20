@@ -188,9 +188,10 @@ pub async fn list_saved_recordings<R: Runtime>(
     .await
     .map_err(|e| format!("Recordings list task failed: {}", e))?;
 
-    // The recordings root and every meeting folder can be outside $APPDATA, so
-    // allow them for the asset protocol before the library renders players.
-    let _ = app.asset_protocol_scope().allow_directory(&folder, true);
+    // Individual audio files can be outside $APPDATA, so allow each one for the
+    // asset protocol before the library renders players. Only the exact files are
+    // granted: allowing the recordings root recursively would expose every other
+    // file under a user-chosen folder to the webview.
     for entry in &recordings {
         if let Some(audio_path) = entry.audio_path.as_deref() {
             if let Err(e) = app.asset_protocol_scope().allow_file(audio_path) {

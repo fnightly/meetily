@@ -1201,23 +1201,77 @@ pub async fn debug_backend_connection<R: Runtime>(app: AppHandle<R>) -> Result<S
     }
 }
 
+/// Schemes this app is willing to hand to the operating system.
+///
+/// Only links a browser or mail client should handle are accepted. Anything else
+/// (`file:`, `javascript:`, `ms-settings:`, custom protocol handlers) would let a
+/// crafted link launch local programs or open local files.
+const ALLOWED_EXTERNAL_URL_SCHEMES: &[&str] = &["http", "https", "mailto"];
+
+/// Validate a URL before it is opened by the operating system.
+///
+/// Returns the trimmed URL on success. The character check is defense in depth:
+/// URLs are passed as a single argument to the platform opener now, but rejecting
+/// shell metacharacters and control characters keeps a stored link from being
+/// dangerous if an opener is ever reached through a shell again. `&` is allowed
+/// because it is legal URL syntax (query separator) and no shell re-parses it.
+fn validate_external_url(url: &str) -> Result<&str, String> {
+    let trimmed = url.trim();
+
+    if trimmed.is_empty() {
+        return Err("Cannot open an empty URL".to_string());
+    }
+
+    if trimmed.chars().any(|character| {
+        character.is_control()
+            || character.is_whitespace()
+            || matches!(character, '|' | '^' | '<' | '>' | '"' | '`' | '\\')
+    }) {
+        return Err(format!(
+            "Refusing to open a URL containing unsafe characters: {}",
+            trimmed
+        ));
+    }
+
+    let parsed = url::Url::parse(trimmed).map_err(|error| format!("Invalid URL: {}", error))?;
+    let scheme = parsed.scheme();
+
+    if !ALLOWED_EXTERNAL_URL_SCHEMES.contains(&scheme) {
+        return Err(format!(
+            "Refusing to open a URL with unsupported scheme '{}' (only http, https and mailto are allowed)",
+            scheme
+        ));
+    }
+
+    Ok(trimmed)
+}
+
 #[tauri::command]
 pub async fn open_external_url(url: String) -> Result<(), String> {
+    let validated = validate_external_url(&url)?;
+    log_debug!("Opening external URL: {}", validated);
+
     use std::process::Command;
 
-    let result = if cfg!(target_os = "windows") {
-        Command::new("cmd").args(&["/C", "start", &url]).output()
+    // Launch the URL as one argument of the platform opener. The previous Windows
+    // branch went through `cmd /C start`, which re-parsed the URL and let a crafted
+    // link run arbitrary commands.
+    let mut command = if cfg!(target_os = "windows") {
+        Command::new("explorer")
     } else if cfg!(target_os = "macos") {
-        Command::new("open").arg(&url).output()
+        Command::new("open")
     } else {
         // Linux and other Unix-like systems
-        Command::new("xdg-open").arg(&url).output()
+        Command::new("xdg-open")
     };
 
-    match result {
-        Ok(_) => Ok(()),
-        Err(e) => Err(format!("Failed to open URL: {}", e)),
-    }
+    // Spawn rather than wait: openers such as explorer do not have a meaningful
+    // exit status, and launching the browser must not block the command.
+    command
+        .arg(validated)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Failed to open URL: {}", e))
 }
 
 // ===== CUSTOM OPENAI API COMMANDS =====
@@ -1513,5 +1567,67 @@ mod transcript_dto_tests {
         assert_eq!(parsed["audio_start_time"], 1.0);
         assert_eq!(parsed["audio_end_time"], 2.0);
         assert_eq!(parsed["duration"], 1.0);
+    }
+}
+
+#[cfg(test)]
+mod external_url_tests {
+    use super::validate_external_url;
+
+    #[test]
+    fn accepts_web_and_mail_schemes() {
+        assert!(validate_external_url("https://example.com/page?x=1&y=2").is_ok());
+        assert!(validate_external_url("http://localhost:5167/ping").is_ok());
+        assert!(validate_external_url("mailto:someone@example.com").is_ok());
+        // Surrounding whitespace is trimmed before use.
+        assert_eq!(
+            validate_external_url("  https://example.com  ").unwrap(),
+            "https://example.com"
+        );
+    }
+
+    #[test]
+    fn rejects_non_web_schemes() {
+        for url in [
+            "file:///C:/Windows/System32/calc.exe",
+            "javascript:alert(1)",
+            "data:text/html,hello",
+            "ms-settings:privacy-microphone",
+            "vbscript:msgbox(1)",
+        ] {
+            assert!(
+                validate_external_url(url).is_err(),
+                "{} must be rejected",
+                url
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_shell_metacharacters_and_control_characters() {
+        for url in [
+            "https://example.com/|calc",
+            "https://example.com/`calc`",
+            "https://example.com/^calc",
+            "https://example.com/<calc>",
+            "https://example.com/\"calc\"",
+            "https://example.com/calc\\..\\x",
+            "https://example.com/\ncalc",
+            "https://example.com/ calc",
+        ] {
+            assert!(
+                validate_external_url(url).is_err(),
+                "{} must be rejected",
+                url
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_empty_and_relative_inputs() {
+        assert!(validate_external_url("").is_err());
+        assert!(validate_external_url("   ").is_err());
+        assert!(validate_external_url("example.com").is_err());
+        assert!(validate_external_url("/etc/passwd").is_err());
     }
 }

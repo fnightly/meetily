@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useState, type KeyboardEvent, type ReactNode } from 'react';
 import dynamic from 'next/dynamic';
 import { ListChecks, Loader2, MessageCircleQuestion, Sparkles, StickyNote } from 'lucide-react';
 import { useI18n } from '@/contexts/I18nContext';
@@ -37,6 +37,9 @@ const MeetingNotesEditor = dynamic(
   () => loadNotesEditor().then((mod) => mod.MeetingNotesEditor),
   { ssr: false, loading: () => <PaneLoading /> },
 );
+
+const tabId = (id: SidePaneTab) => `meeting-pane-tab-${id}`;
+const panelId = (id: SidePaneTab) => `meeting-pane-panel-${id}`;
 
 /**
  * Right-hand pane of a meeting: the summary editor, the user's own notes, the
@@ -79,15 +82,16 @@ export function MeetingSidePane({
     setTabState({ meetingId, tab: next });
   };
 
-  // Start both the editor chunk and its note query while the pointer is over the
-  // tab, so the click mostly renders already-available data.
+  // Start the editor chunk while the pointer is over the tab, so the click mostly
+  // renders already-available data. The note itself is always fetched on mount:
+  // caching it here could serve a copy older than a save made elsewhere.
   const warmNotes = () => {
-    void loadNotesEditor().then((mod) => mod.primeMeetingNote(meetingId)).catch(() => {});
+    void loadNotesEditor().catch(() => {});
   };
 
-  // Warm the notes tab once the meeting page has settled: the editor chunk and
-  // the note query are small, and doing them here removes the first-click wait
-  // for users who never hover the tab first.
+  // Warm the notes tab once the meeting page has settled: the editor chunk is
+  // small, and doing this here removes the first-click wait for users who never
+  // hover the tab first.
   useEffect(() => {
     const timer = window.setTimeout(() => { warmNotes(); }, 1500);
     return () => window.clearTimeout(timer);
@@ -101,23 +105,46 @@ export function MeetingSidePane({
     { id: 'ask', label: t('meeting.pane.ask'), icon: MessageCircleQuestion },
   ];
 
+  // Arrow keys move between tabs, as expected of a tablist; Home/End jump to
+  // the ends. Tabs use a roving tabindex so Tab lands on the selected one.
+  const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft' && event.key !== 'Home' && event.key !== 'End') {
+      return;
+    }
+    event.preventDefault();
+    const last = tabs.length - 1;
+    const nextIndex =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? last
+          : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+    const next = tabs[nextIndex];
+    selectTab(next.id);
+    document.getElementById(tabId(next.id))?.focus();
+  };
+
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col">
-      <div role="tablist" aria-label={t('meeting.summaryPane')} className="flex shrink-0 items-center gap-1 border-b border-slate-200 bg-white px-3 pt-2">
-        {tabs.map(({ id, label, icon: Icon }) => (
+      <div role="tablist" aria-label={t('meeting.panes')} className="flex shrink-0 items-center gap-1 border-b border-slate-200 bg-white px-3 pt-2">
+        {tabs.map(({ id, label, icon: Icon }, index) => (
           <button
             key={id}
+            id={tabId(id)}
             type="button"
             role="tab"
             aria-selected={tab === id}
+            aria-controls={panelId(id)}
+            tabIndex={tab === id ? 0 : -1}
             onClick={() => selectTab(id)}
+            onKeyDown={(event) => handleTabKeyDown(event, index)}
             onPointerEnter={id === 'notes' ? warmNotes : undefined}
             onFocus={id === 'notes' ? warmNotes : undefined}
-            className={`relative -mb-px inline-flex items-center gap-1.5 border-b-2 px-3 pb-2 pt-1 text-sm font-medium transition-colors ${
+            className={`relative -mb-px inline-flex items-center gap-1.5 border-b-2 px-3 pb-2 pt-1 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 ${
               tab === id ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500 hover:text-slate-800'
             }`}
           >
-            <Icon className="h-4 w-4" />
+            <Icon className="h-4 w-4" aria-hidden />
             {label}
             {id === 'notes' && notesMounted && notesDirty && (
               <span
@@ -130,9 +157,21 @@ export function MeetingSidePane({
           </button>
         ))}
       </div>
-      <div className={tab === 'summary' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>{summary}</div>
+      <div
+        role="tabpanel"
+        id={panelId('summary')}
+        aria-labelledby={tabId('summary')}
+        className={tab === 'summary' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}
+      >
+        {summary}
+      </div>
       {notesMounted && (
-        <div className={tab === 'notes' ? 'flex min-h-0 flex-1 flex-col overflow-hidden bg-white' : 'hidden'}>
+        <div
+          role="tabpanel"
+          id={panelId('notes')}
+          aria-labelledby={tabId('notes')}
+          className={tab === 'notes' ? 'flex min-h-0 flex-1 flex-col overflow-hidden bg-white' : 'hidden'}
+        >
           <MeetingNotesEditor
             key={meetingId}
             meetingId={meetingId}
@@ -142,12 +181,22 @@ export function MeetingSidePane({
         </div>
       )}
       {tab === 'tasks' && (
-        <div className="min-h-0 flex-1 overflow-hidden bg-slate-50/40 p-4">
+        <div
+          role="tabpanel"
+          id={panelId('tasks')}
+          aria-labelledby={tabId('tasks')}
+          className="min-h-0 flex-1 overflow-hidden bg-slate-50/40 p-4"
+        >
           <ActionItemsPanel meetingId={meetingId} summaryMarkdown={summaryMarkdown} />
         </div>
       )}
       {tab === 'ask' && (
-        <div className="min-h-0 flex-1 overflow-hidden">
+        <div
+          role="tabpanel"
+          id={panelId('ask')}
+          aria-labelledby={tabId('ask')}
+          className="min-h-0 flex-1 overflow-hidden"
+        >
           <AskPanel meetingId={meetingId} className="h-full" />
         </div>
       )}

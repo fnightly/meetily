@@ -18,7 +18,6 @@ import {
 } from '@/components/ui/select';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Switch } from '@/components/ui/switch';
 import { Lock, Unlock, Eye, EyeOff, RefreshCw, CheckCircle2, XCircle, ChevronDown, ChevronUp, Download, ExternalLink, Check, ChevronsUpDown } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
@@ -140,7 +139,6 @@ export function ModelSettingsModal({
   const [hasAutoFetched, setHasAutoFetched] = useState<boolean>(false);
   const hasSyncedFromParent = useRef<boolean>(false);
   const hasLoadedInitialConfig = useRef<boolean>(false);
-  const [autoGenerateEnabled, setAutoGenerateEnabled] = useState<boolean>(true); // Default to true
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isEndpointSectionCollapsed, setIsEndpointSectionCollapsed] = useState<boolean>(true); // Collapsed by default
   const [ollamaNotInstalled, setOllamaNotInstalled] = useState<boolean>(false); // Track if Ollama is not installed
@@ -327,21 +325,6 @@ export function ModelSettingsModal({
     fetchModelConfig();
   }, [skipInitialFetch]);
 
-  // Fetch auto-generate setting on mount
-  useEffect(() => {
-    const fetchAutoGenerateSetting = async () => {
-      try {
-        const enabled = (await invoke('api_get_auto_generate_setting')) as boolean;
-        setAutoGenerateEnabled(enabled);
-        console.log('Auto-generate setting loaded:', enabled);
-      } catch (err) {
-        console.error('Failed to fetch auto-generate setting:', err);
-        // Keep default value (true) on error
-      }
-    };
-
-    fetchAutoGenerateSetting();
-  }, []);
 
   // Sync ollamaEndpoint state when modelConfig.ollamaEndpoint changes from parent
   useEffect(() => {
@@ -1112,20 +1095,23 @@ export function ModelSettingsModal({
 
             {/* Advanced Options (Collapsible) */}
             <div>
-              <div
-                className="flex items-center justify-between cursor-pointer py-2"
+              <button
+                type="button"
+                aria-expanded={isCustomOpenAIAdvancedOpen}
+                aria-controls="custom-openai-advanced"
                 onClick={() => setIsCustomOpenAIAdvancedOpen(!isCustomOpenAIAdvancedOpen)}
+                className="flex w-full items-center justify-between cursor-pointer rounded py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50"
               >
-                <Label className="cursor-pointer">{t('llm.advanced')}</Label>
+                <span className="text-sm font-medium leading-none">{t('llm.advanced')}</span>
                 {isCustomOpenAIAdvancedOpen ? (
-                  <ChevronUp className="h-4 w-4 text-muted-foreground" />
+                  <ChevronUp className="h-4 w-4 text-muted-foreground" aria-hidden />
                 ) : (
-                  <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                  <ChevronDown className="h-4 w-4 text-muted-foreground" aria-hidden />
                 )}
-              </div>
+              </button>
 
               {isCustomOpenAIAdvancedOpen && (
-                <div className="space-y-3 pl-2 border-l-2 border-muted mt-2">
+                <div id="custom-openai-advanced" className="space-y-3 pl-2 border-l-2 border-muted mt-2">
                   <div>
                     <Label htmlFor="custom-max-tokens">Max Tokens</Label>
                     <Input
@@ -1239,20 +1225,23 @@ export function ModelSettingsModal({
 
         {modelConfig.provider === 'ollama' && (
           <div>
-            <div
-              className="flex items-center justify-between cursor-pointer py-2"
+            <button
+              type="button"
+              aria-expanded={!isEndpointSectionCollapsed}
+              aria-controls="ollama-endpoint-fields"
               onClick={() => setIsEndpointSectionCollapsed(!isEndpointSectionCollapsed)}
+              className="flex w-full items-center justify-between cursor-pointer rounded py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50"
             >
-              <Label className="cursor-pointer">Custom Endpoint (optional)</Label>
+              <span className="text-sm font-medium leading-none">Custom Endpoint (optional)</span>
               {isEndpointSectionCollapsed ? (
-                <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                <ChevronDown className="h-4 w-4 text-muted-foreground" aria-hidden />
               ) : (
-                <ChevronUp className="h-4 w-4 text-muted-foreground" />
+                <ChevronUp className="h-4 w-4 text-muted-foreground" aria-hidden />
               )}
-            </div>
+            </button>
 
             {!isEndpointSectionCollapsed && (
-              <>
+              <div id="ollama-endpoint-fields">
                 <p className="text-sm text-muted-foreground mt-1 mb-2">
                   Leave empty or enter a custom endpoint (e.g., http://x.yy.zz:11434)
                 </p>
@@ -1310,7 +1299,7 @@ export function ModelSettingsModal({
                     </AlertDescription>
                   </Alert>
                 )}
-              </>
+              </div>
             )}
           </div>
         )}
@@ -1429,7 +1418,7 @@ export function ModelSettingsModal({
                     </AlertDescription>
                   </Alert>
                 ) : (
-                  <div className="grid gap-4">
+                  <div role="radiogroup" aria-label="Ollama models" className="grid gap-4">
                     {filteredModels.map((model) => {
                       const progress = getProgress(model.name);
                       const modelIsDownloading = isDownloading(model.name);
@@ -1437,13 +1426,23 @@ export function ModelSettingsModal({
                       return (
                         <div
                           key={model.id}
+                          role="radio"
+                          aria-checked={modelConfig.model === model.name}
+                          aria-disabled={modelIsDownloading}
+                          tabIndex={modelIsDownloading ? -1 : 0}
                           className={cn(
-                            'bg-card p-2 m-0 rounded-md border transition-colors',
+                            'bg-card p-2 m-0 rounded-md border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60',
                             modelConfig.model === model.name
                               ? 'ring-1 ring-blue-500 border-blue-500 background-blue-100'
                               : 'hover:bg-muted/50',
                             !modelIsDownloading && 'cursor-pointer'
                           )}
+                          onKeyDown={(event) => {
+                            if ((event.key === 'Enter' || event.key === ' ') && !modelIsDownloading) {
+                              event.preventDefault();
+                              setModelConfig((prev: ModelConfig) => ({ ...prev, model: model.name }))
+                            }
+                          }}
                           onClick={() => {
                             if (!modelIsDownloading) {
                               setModelConfig((prev: ModelConfig) => ({ ...prev, model: model.name }))
@@ -1494,25 +1493,6 @@ export function ModelSettingsModal({
           </div>
         )}
       </div>
-
-      {/* Auto-generate summaries toggle */}
-      {/* <div className="mt-6 pt-6 border-t border-gray-200">
-        <div className="flex items-center justify-between">
-          <div className="flex-1">
-            <Label htmlFor="auto-generate" className="text-base font-medium">
-              Auto-generate summaries
-            </Label>
-            <p className="text-sm text-muted-foreground mt-1">
-              Automatically generate summary when opening meetings without one
-            </p>
-          </div>
-          <Switch
-            id="auto-generate"
-            checked={autoGenerateEnabled}
-            onCheckedChange={setAutoGenerateEnabled}
-          />
-        </div>
-      </div> */}
 
       <div className="mt-6 flex justify-end">
         <Button

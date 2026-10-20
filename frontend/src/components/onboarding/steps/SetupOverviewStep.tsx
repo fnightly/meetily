@@ -3,6 +3,7 @@ import { Info } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { OnboardingContainer } from '../OnboardingContainer';
 import { useOnboarding } from '@/contexts/OnboardingContext';
+import { useI18n } from '@/contexts/I18nContext';
 import {
   Tooltip,
   TooltipContent,
@@ -12,6 +13,7 @@ import {
 
 export function SetupOverviewStep() {
   const { goNext } = useOnboarding();
+  const { t } = useI18n();
   const [isMac, setIsMac] = useState(false);
 
   useEffect(() => {
@@ -30,12 +32,12 @@ export function SetupOverviewStep() {
     {
       number: 1,
       type: 'transcription',
-      title: 'Download Transcription Engine',
+      title: t('onboarding.setup.transcriptionEngine'),
     },
     {
       number: 2,
       type: 'summarization',
-      title: 'Download Summarization Engine',
+      title: t('onboarding.setup.summaryEngine'),
     },
   ];
 
@@ -45,8 +47,8 @@ export function SetupOverviewStep() {
 
   return (
     <OnboardingContainer
-      title="Setup Overview"
-      description="会见 requires that you download the Transcription & Summarization AI models for the software to work."
+      title={t('onboarding.setup.title')}
+      description={t('onboarding.setup.description')}
       step={2}
       totalSteps={isMac ? 4 : 3}
     >
@@ -54,27 +56,30 @@ export function SetupOverviewStep() {
         {/* Steps Card */}
         <div className="w-full max-w-md bg-white rounded-lg border border-gray-200 p-4">
           <div className="space-y-4">
-            {steps.map((step, idx) => {
+            {steps.map((step) => {
               return (
                 <div
                   key={step.number}
-                  className={`flex items-start gap-4 p-1`}
+                  className="flex items-start gap-4 p-1"
                 >
                   <div className="flex-1 ml-1">
                     <h3 className="font-medium text-gray-900 flex items-center gap-2">
-                        Step {step.number} :  {step.title}
+                        {t('onboarding.setup.step', { number: step.number, title: step.title })}
 
                         {step.type === "summarization" && (
                             <TooltipProvider>
                             <Tooltip>
                                 <TooltipTrigger asChild>
-                                <button className="text-gray-400 hover:text-gray-600">
-                                    <Info className="w-4 h-4" />
+                                <button
+                                  type="button"
+                                  aria-label={t('onboarding.setup.summaryTooltip')}
+                                  className="text-gray-400 hover:text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 rounded"
+                                >
+                                    <Info className="w-4 h-4" aria-hidden />
                                 </button>
                                 </TooltipTrigger>
                                 <TooltipContent className="max-w-xs text-sm">
-                                You can also select external AI providers like OpenAI, Claude, or
-                                Ollama for summary generation in settings.
+                                {t('onboarding.setup.summaryTooltip')}
                                 </TooltipContent>
                             </Tooltip>
                             </TooltipProvider>
@@ -94,7 +99,7 @@ export function SetupOverviewStep() {
             onClick={handleContinue}
             className="w-full h-11 bg-gray-900 hover:bg-gray-800 text-white"
           >
-            Let's Go
+            {t('onboarding.setup.continue')}
           </Button>
         </div>
       </div>

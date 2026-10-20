@@ -124,23 +124,6 @@ function blocksToMarkdown(blocks: NoteBlock[]): string {
     .trim();
 }
 
-/**
- * Notes prefetched while the pointer is over the 笔记 tab. Opening the tab then
- * shows content without waiting for a round-trip that could have started earlier.
- */
-const primedNotes = new Map<string, Promise<MeetingNote>>();
-
-export function primeMeetingNote(meetingId: string): Promise<MeetingNote> {
-  const existing = primedNotes.get(meetingId);
-  if (existing) return existing;
-  const request = invoke<MeetingNote>("api_get_meeting_note", { meetingId }).catch((error) => {
-    primedNotes.delete(meetingId);
-    throw error;
-  });
-  primedNotes.set(meetingId, request);
-  return request;
-}
-
 export interface MeetingNotesEditorProps {
   meetingId: string;
   /**
@@ -203,16 +186,10 @@ export function MeetingNotesEditor({
       setLoading(true);
       setError(null);
       try {
-        // The embedded pane has no page title to show, so it does not need the
-        // meeting metadata round-trip: one query makes the first tab open faster.
-        const primed = primedNotes.get(meetingId);
-        primedNotes.delete(meetingId);
-        let note: MeetingNote;
-        try {
-          note = primed ? await primed : await invoke<MeetingNote>("api_get_meeting_note", { meetingId });
-        } catch {
-          note = await invoke<MeetingNote>("api_get_meeting_note", { meetingId });
-        }
+        // Always read the note on mount: a cached prefetch could be older than a
+        // save made elsewhere, and writing that stale copy back would lose the
+        // newer text. The embedded pane skips the metadata round-trip.
+        const note = await invoke<MeetingNote>("api_get_meeting_note", { meetingId });
         const meta = embedded
           ? null
           : await invoke<MeetingMetadata>("api_get_meeting_metadata", { meetingId }).catch(() => null);

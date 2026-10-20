@@ -3,6 +3,15 @@ import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { TranscriptModelProps } from '@/components/TranscriptSettings';
 import type { TranscriptionErrorPayload } from '@/services/transcriptService';
+import { tr } from '@/lib/i18n';
+
+/** Payload of the backend's `transcript-chunk-loss-detected` event. */
+interface ChunkLossPayload {
+  chunks_queued?: number;
+  chunks_completed?: number;
+  chunks_lost?: number;
+  message?: string;
+}
 
 export type ModalType =
   | 'modelSettings'
@@ -99,27 +108,37 @@ export function useModalState(transcriptModelConfig?: TranscriptModelProps): Use
     });
   }, []);
 
-  // Set up chunk drop warning listener
+  // Set up chunk loss listener. The backend emits `transcript-chunk-loss-detected`;
+  // `chunk-drop-warning` was never emitted, so this listener could not fire.
   useEffect(() => {
     let unlistenFn: (() => void) | undefined;
 
-    const setupChunkDropListener = async () => {
+    const setupChunkLossListener = async () => {
       try {
-        console.log('Setting up chunk-drop-warning listener...');
-        unlistenFn = await listen<string>('chunk-drop-warning', (event) => {
-          console.log('Chunk drop warning received:', event.payload);
-          showModal('chunkDropWarning', event.payload);
+        console.log('Setting up transcript-chunk-loss-detected listener...');
+        unlistenFn = await listen<ChunkLossPayload | null>('transcript-chunk-loss-detected', (event) => {
+          const payload = event.payload ?? {};
+          console.warn('Transcript chunk loss detected:', payload);
+          const title = tr('chunkLoss.title');
+          const body = tr('chunkLoss.body');
+          const detail = typeof payload.message === 'string' ? payload.message.trim() : '';
+          // Show the localized explanation; append the backend's own message only
+          // when it carries context the generic copy does not repeat.
+          const text = detail && !body.includes(detail) && !title.includes(detail)
+            ? `${title}. ${body} ${detail}`
+            : `${title}. ${body}`;
+          showModal('chunkDropWarning', text);
         });
-        console.log('Chunk drop warning listener setup complete');
+        console.log('Transcript chunk loss listener setup complete');
       } catch (error) {
-        console.error('Failed to setup chunk drop warning listener:', error);
+        console.error('Failed to setup transcript chunk loss listener:', error);
       }
     };
 
-    setupChunkDropListener();
+    setupChunkLossListener();
 
     return () => {
-      console.log('Cleaning up chunk drop warning listener...');
+      console.log('Cleaning up transcript chunk loss listener...');
       if (unlistenFn) {
         unlistenFn();
       }

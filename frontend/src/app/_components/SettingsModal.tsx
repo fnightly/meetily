@@ -133,11 +133,20 @@ export function SettingsModals({
                         {error}
                       </div>
                     )}
-                    <div className="grid gap-4 max-h-[400px] overflow-y-auto pr-2">
+                    <div role="radiogroup" aria-label="Ollama models" className="grid gap-4 max-h-[400px] overflow-y-auto pr-2">
                       {models.map((model) => (
                         <div
                           key={model.id}
-                          className={`bg-white p-4 rounded-lg shadow cursor-pointer transition-colors ${modelConfig.model === model.name ? 'ring-2 ring-blue-500 bg-blue-50' : 'hover:bg-gray-50'
+                          role="radio"
+                          aria-checked={modelConfig.model === model.name}
+                          tabIndex={0}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              setModelConfig((prev: ModelConfig) => ({ ...prev, model: model.name }));
+                            }
+                          }}
+                          className={`bg-white p-4 rounded-lg shadow cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 ${modelConfig.model === model.name ? 'ring-2 ring-blue-500 bg-blue-50' : 'hover:bg-gray-50'
                             }`}
                           onClick={() => setModelConfig((prev: ModelConfig) => ({ ...prev, model: model.name }))}
                         >

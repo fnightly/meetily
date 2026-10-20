@@ -1,12 +1,15 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Mic, Volume2 } from 'lucide-react';
+import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { OnboardingContainer } from '../OnboardingContainer';
 import { PermissionRow } from '../shared';
 import { useOnboarding } from '@/contexts/OnboardingContext';
+import { useI18n } from '@/contexts/I18nContext';
 
 export function PermissionsStep() {
+  const { t } = useI18n();
   const { setPermissionStatus, setPermissionsSkipped, permissions, completeOnboarding } = useOnboarding();
   const [isPending, setIsPending] = useState(false);
 
@@ -25,14 +28,30 @@ export function PermissionsStep() {
     checkPermissions();
   }, [checkPermissions]);
 
+  /**
+   * Tell the user how to open the privacy pane by hand when the deep link is
+   * unavailable (non-macOS, or the OS refused). Never a macOS-only message on
+   * another platform.
+   */
+  const reportSettingsOpenFailure = () => {
+    const isMac = typeof navigator !== 'undefined' && navigator.userAgent.includes('Mac');
+    toast.error(t('onboarding.permissions.settingsFailedTitle'), {
+      description: t(
+        isMac
+          ? 'onboarding.permissions.settingsHintMac'
+          : 'onboarding.permissions.settingsHintOther',
+      ),
+    });
+  };
+
   // Request microphone permission
   const handleMicrophoneAction = async () => {
     if (permissions.microphone === 'denied') {
       // Try to open system settings
       try {
-        await invoke('open_system_settings');
+        await invoke('open_system_settings', { preferencePane: 'Privacy_Microphone' });
       } catch {
-        alert('Please enable microphone access in System Preferences > Security & Privacy > Microphone');
+        reportSettingsOpenFailure();
       }
       return;
     }
@@ -62,9 +81,9 @@ export function PermissionsStep() {
     if (permissions.systemAudio === 'denied') {
       // Try to open system settings
       try {
-        await invoke('open_system_settings');
+        await invoke('open_system_settings', { preferencePane: 'Privacy_AudioCapture' });
       } catch {
-        alert('Please enable Audio Capture in System Settings → Privacy & Security → Audio Capture');
+        reportSettingsOpenFailure();
       }
       return;
     }
@@ -113,8 +132,8 @@ export function PermissionsStep() {
 
   return (
     <OnboardingContainer
-      title="Grant Permissions"
-      description="会见 needs access to your microphone and system audio to record meetings"
+      title={t('onboarding.permissions.title')}
+      description={t('onboarding.permissions.description')}
       step={4}
       hideProgress={true}
       showNavigation={allPermissionsGranted}
@@ -125,9 +144,9 @@ export function PermissionsStep() {
         <div className="space-y-4">
           {/* Microphone */}
           <PermissionRow
-            icon={<Mic className="w-5 h-5" />}
-            title="Microphone"
-            description="Required to capture your voice during meetings"
+            icon={<Mic className="w-5 h-5" aria-hidden />}
+            title={t('onboarding.permissions.microphone')}
+            description={t('onboarding.permissions.microphoneDescription')}
             status={permissions.microphone}
             isPending={isPending}
             onAction={handleMicrophoneAction}
@@ -135,9 +154,9 @@ export function PermissionsStep() {
 
           {/* System Audio */}
           <PermissionRow
-            icon={<Volume2 className="w-5 h-5" />}
-            title="System Audio"
-            description="Click Enable to grant Audio Capture permission"
+            icon={<Volume2 className="w-5 h-5" aria-hidden />}
+            title={t('onboarding.permissions.systemAudio')}
+            description={t('onboarding.permissions.systemAudioDescription')}
             status={permissions.systemAudio}
             isPending={isPending}
             onAction={handleSystemAudioAction}
@@ -147,19 +166,20 @@ export function PermissionsStep() {
         {/* Action Buttons */}
         <div className="flex flex-col gap-3 pt-4">
           <Button onClick={handleFinish} disabled={!allPermissionsGranted} className="w-full h-11">
-            Finish Setup
+            {t('onboarding.permissions.finish')}
           </Button>
 
           <button
+            type="button"
             onClick={handleSkip}
-            className="text-sm text-neutral-500 hover:text-neutral-700 transition-colors"
+            className="text-sm text-neutral-500 hover:text-neutral-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 rounded"
           >
-            I'll do this later
+            {t('onboarding.permissions.skip')}
           </button>
 
           {!allPermissionsGranted && (
             <p className="text-xs text-center text-muted-foreground">
-              Recording won't work without permissions. You can grant them later in settings.
+              {t('onboarding.permissions.warning')}
             </p>
           )}
         </div>

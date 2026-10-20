@@ -269,6 +269,24 @@ pub async fn purge_expired_recordings<R: Runtime>(
         .map_err(|e| format!("Retention sweep task failed: {}", e))
 }
 
+/// Run the retention sweep once at startup.
+///
+/// Best effort: failures are logged, never surfaced, so a locked or unreadable
+/// recording cannot stop the app from starting. The sweep itself is a no-op when
+/// retention is disabled (zero days, the default), so calling it unconditionally
+/// is safe.
+pub async fn run_startup_retention<R: Runtime>(app: AppHandle<R>) {
+    match purge_expired_recordings(app).await {
+        Ok(result) if result.disabled => {
+            log::debug!("Startup retention: disabled; nothing to remove");
+        }
+        Ok(result) => {
+            log::info!("Startup retention: {}", result.detail);
+        }
+        Err(error) => log::warn!("Startup retention sweep failed: {}", error),
+    }
+}
+
 /// Report what a sweep *would* remove, without deleting anything.
 #[tauri::command]
 pub async fn preview_retention_sweep<R: Runtime>(

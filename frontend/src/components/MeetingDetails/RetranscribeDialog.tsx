@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { RefreshCw, Globe, Cpu } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { RefreshCw, Globe, Cpu, Settings2 } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -50,6 +51,7 @@ export function RetranscribeDialog({
   emptyTranscript = false,
 }: RetranscribeDialogProps) {
   const { t } = useI18n();
+  const router = useRouter();
   const { selectedLanguage, transcriptModelConfig } = useConfig();
   const [selectedLang, setSelectedLang] = useState(selectedLanguage || 'auto');
 
@@ -59,6 +61,7 @@ export function RetranscribeDialog({
     selectedModelKey,
     setSelectedModelKey,
     loadingModels,
+    loadError,
     fetchModels,
     resetSelection,
   } = useTranscriptionModels(transcriptModelConfig);
@@ -133,6 +136,30 @@ export function RetranscribeDialog({
         </DialogHeader>
 
         <div className="space-y-4 py-4">
+          {/* The Start button still works with the configured default model, but
+              the empty list must not look like a broken picker. */}
+          {!loadingModels && availableModels.length === 0 && (
+            <div role="status" className="space-y-1.5 rounded-lg border border-amber-200 bg-amber-50 p-3">
+              <p className="text-sm font-medium text-amber-900">
+                {loadError ? t('transcribeModels.loadFailed') : t('transcribeModels.noModels')}
+              </p>
+              <p className="text-xs leading-relaxed text-amber-800">
+                {loadError ? t('transcribeModels.loadFailedHint') : t('transcribeModels.noModelsHint')}
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  onOpenChange(false);
+                  router.push('/settings');
+                }}
+              >
+                <Settings2 className="mr-2 h-4 w-4" aria-hidden />
+                {t('common.settings')}
+              </Button>
+            </div>
+          )}
+
           {!isParakeetModel ? (
             <div className="space-y-3">
               <div className="flex items-center gap-2">
@@ -140,7 +167,7 @@ export function RetranscribeDialog({
                 <span className="text-sm font-medium">{t('retranscribe.language')}</span>
               </div>
               <Select value={selectedLang} onValueChange={setSelectedLang}>
-                <SelectTrigger className="w-full">
+                <SelectTrigger className="w-full" aria-label={t('retranscribe.language')}>
                   <SelectValue placeholder={t('retranscribe.languagePlaceholder')} />
                 </SelectTrigger>
                 <SelectContent className="max-h-60">
@@ -170,7 +197,7 @@ export function RetranscribeDialog({
                 <span className="text-sm font-medium">{t('retranscribe.model')}</span>
               </div>
               <Select value={selectedModelKey} onValueChange={setSelectedModelKey} disabled={loadingModels}>
-                <SelectTrigger className="w-full">
+                <SelectTrigger className="w-full" aria-label={t('retranscribe.model')}>
                   <SelectValue placeholder={loadingModels ? t('retranscribe.loadingModels') : t('retranscribe.selectModel')} />
                 </SelectTrigger>
                 <SelectContent>

@@ -6,7 +6,7 @@ use super::engine::TranscriptionEngine;
 use super::provider::TranscriptionError;
 use super::text_cleanup;
 use crate::audio::AudioChunk;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -633,15 +633,18 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
         });
     }
 
-    // Calculate energy for logging/monitoring only
-    let energy: f32 =
-        speech_samples.iter().map(|&x| x * x).sum::<f32>() / speech_samples.len() as f32;
-    info!(
-        "Processing speech audio chunk {} with {} samples (energy: {:.6})",
-        chunk.chunk_id,
-        speech_samples.len(),
-        energy
-    );
+    // Energy is diagnostic only: compute it only when debug logging is enabled, so the
+    // hot path does not walk every sample for a line nobody will see.
+    if log::log_enabled!(log::Level::Debug) {
+        let energy: f32 =
+            speech_samples.iter().map(|&x| x * x).sum::<f32>() / speech_samples.len() as f32;
+        debug!(
+            "Processing speech audio chunk {} with {} samples (energy: {:.6})",
+            chunk.chunk_id,
+            speech_samples.len(),
+            energy
+        );
+    }
 
     // Transcribe using the appropriate engine (with improved error handling)
     match engine {
@@ -663,7 +666,7 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                         return Ok((String::new(), Some(confidence), is_partial));
                     }
 
-                    info!(
+                    debug!(
                         "Whisper transcription complete for chunk {}: '{}' (confidence: {:.2}, partial: {})",
                         chunk.chunk_id, cleaned_text, confidence, is_partial
                     );
@@ -699,7 +702,7 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                         return Ok((String::new(), None, false));
                     }
 
-                    info!(
+                    debug!(
                         "Parakeet transcription complete for chunk {}: '{}'",
                         chunk.chunk_id, cleaned_text
                     );
@@ -747,7 +750,7 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                         None => "no confidence".to_string(),
                     };
 
-                    info!(
+                    debug!(
                         "{} transcription complete for chunk {}: '{}' ({}, partial: {})",
                         provider.provider_name(),
                         chunk.chunk_id,

@@ -30,6 +30,7 @@ import {
 } from '../ui/select';
 import { toast } from 'sonner';
 import { useConfig } from '@/contexts/ConfigContext';
+import { useI18n } from '@/contexts/I18nContext';
 import { useImportAudio } from '@/hooks/useImportAudio';
 import { enqueueImport } from '@/lib/background-transcription';
 import { tr } from '@/lib/i18n';
@@ -68,6 +69,7 @@ export function ImportAudioDialog({
   preselectedFile,
   onComplete,
 }: ImportAudioDialogProps) {
+  const { t } = useI18n();
   const { selectedLanguage, transcriptModelConfig } = useConfig();
 
   const [title, setTitle] = useState('');
@@ -91,7 +93,7 @@ export function ImportAudioDialog({
   } = useTranscriptionModels(transcriptModelConfig);
 
   const handleImportError = useCallback((error: string) => {
-    toast.error('Import failed', { description: error });
+    toast.error(tr('import.failedToast'), { description: error });
   }, []);
 
   const {
@@ -187,20 +189,18 @@ export function ImportAudioDialog({
           <DialogTitle className="flex items-center gap-2">
             {error ? (
               <>
-                <AlertCircle className="h-5 w-5 text-red-600" />
-                Import Failed
+                <AlertCircle className="h-5 w-5 text-red-600" aria-hidden />
+                {t('import.failedTitle')}
               </>
             ) : (
               <>
-                <Upload className="h-5 w-5 text-blue-600" />
-                Import Audio File
+                <Upload className="h-5 w-5 text-blue-600" aria-hidden />
+                {t('import.title')}
               </>
             )}
           </DialogTitle>
           <DialogDescription>
-            {error
-              ? 'An error occurred during import'
-              : 'Import an audio file to create a new meeting with transcripts'}
+            {error ? t('import.failedDescription') : t('import.description')}
           </DialogDescription>
         </DialogHeader>
 
@@ -211,16 +211,16 @@ export function ImportAudioDialog({
               {fileInfo ? (
                 <div className="bg-gray-50 rounded-lg p-4 space-y-3">
                   <div className="flex items-start gap-3">
-                    <FileAudio className="h-8 w-8 text-blue-600 flex-shrink-0" />
+                    <FileAudio className="h-8 w-8 text-blue-600 flex-shrink-0" aria-hidden />
                     <div className="flex-1 min-w-0">
                       <p className="font-medium text-gray-900 truncate">{fileInfo.filename}</p>
                       <div className="flex items-center gap-4 text-sm text-gray-500 mt-1">
                         <span className="flex items-center gap-1">
-                          <Clock className="h-3.5 w-3.5" />
+                          <Clock className="h-3.5 w-3.5" aria-hidden />
                           {formatDuration(fileInfo.duration_seconds)}
                         </span>
                         <span className="flex items-center gap-1">
-                          <HardDrive className="h-3.5 w-3.5" />
+                          <HardDrive className="h-3.5 w-3.5" aria-hidden />
                           {formatFileSize(fileInfo.size_bytes)}
                         </span>
                         <span className="text-blue-600 font-medium">{fileInfo.format}</span>
@@ -230,38 +230,41 @@ export function ImportAudioDialog({
 
                   {/* Editable title */}
                   <div className="space-y-1">
-                    <label className="text-sm font-medium text-gray-700">Meeting Title</label>
+                    <label htmlFor="import-meeting-title" className="text-sm font-medium text-gray-700">
+                      {t('import.meetingTitle')}
+                    </label>
                     <Input
+                      id="import-meeting-title"
                       value={title}
                       onChange={(e) => {
                         setTitle(e.target.value);
                         setTitleModifiedByUser(true);
                       }}
-                      placeholder="Enter meeting title"
+                      placeholder={t('import.titlePlaceholder')}
                     />
                   </div>
 
                   <Button variant="outline" size="sm" onClick={handleSelectFile} className="w-full">
-                    Choose Different File
+                    {t('import.chooseDifferentFile')}
                   </Button>
                 </div>
               ) : (
                 <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center">
-                  <FileAudio className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+                  <FileAudio className="h-12 w-12 text-gray-400 mx-auto mb-4" aria-hidden />
                   <Button onClick={handleSelectFile} disabled={status === 'validating'}>
                     {status === 'validating' ? (
                       <>
-                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                        Validating...
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" aria-hidden />
+                        {t('import.validating')}
                       </>
                     ) : (
                       <>
-                        <Upload className="h-4 w-4 mr-2" />
-                        Select Audio File
+                        <Upload className="h-4 w-4 mr-2" aria-hidden />
+                        {t('import.selectFile')}
                       </>
                     )}
                   </Button>
-                  <p className="text-sm text-gray-500 mt-2">MP4, WAV, MP3, FLAC, OGG, MKV, WebM, WMA</p>
+                  <p className="text-sm text-gray-500 mt-2">{t('import.formats')}</p>
                 </div>
               )}
 
@@ -269,29 +272,32 @@ export function ImportAudioDialog({
               {fileInfo && (
                 <div className="border rounded-lg">
                   <button
+                    type="button"
                     onClick={() => setShowAdvanced(!showAdvanced)}
-                    className="w-full flex items-center justify-between p-3 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                    aria-expanded={showAdvanced}
+                    aria-controls="import-advanced-options"
+                    className="w-full flex items-center justify-between p-3 text-sm font-medium text-gray-700 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50"
                   >
-                    <span>Advanced Options</span>
+                    <span>{t('import.advancedOptions')}</span>
                     {showAdvanced ? (
-                      <ChevronUp className="h-4 w-4" />
+                      <ChevronUp className="h-4 w-4" aria-hidden />
                     ) : (
-                      <ChevronDown className="h-4 w-4" />
+                      <ChevronDown className="h-4 w-4" aria-hidden />
                     )}
                   </button>
 
                   {showAdvanced && (
-                    <div className="p-3 pt-0 space-y-4 border-t">
+                    <div id="import-advanced-options" className="p-3 pt-0 space-y-4 border-t">
                       {/* Language selector */}
                       {!isParakeetModel ? (
                         <div className="space-y-2">
                           <div className="flex items-center gap-2">
-                            <Globe className="h-4 w-4 text-muted-foreground" />
-                            <span className="text-sm font-medium">Language</span>
+                            <Globe className="h-4 w-4 text-muted-foreground" aria-hidden />
+                            <span className="text-sm font-medium">{t('import.language')}</span>
                           </div>
                           <Select value={selectedLang} onValueChange={setSelectedLang}>
-                            <SelectTrigger className="w-full">
-                              <SelectValue placeholder="Select language" />
+                            <SelectTrigger className="w-full" aria-label={t('import.language')}>
+                              <SelectValue placeholder={t('import.languagePlaceholder')} />
                             </SelectTrigger>
                             <SelectContent className="max-h-60">
                               {LANGUAGES.map((lang) => (
@@ -305,11 +311,11 @@ export function ImportAudioDialog({
                       ) : (
                         <div className="space-y-2">
                           <div className="flex items-center gap-2">
-                            <Globe className="h-4 w-4 text-muted-foreground" />
-                            <span className="text-sm font-medium">Language</span>
+                            <Globe className="h-4 w-4 text-muted-foreground" aria-hidden />
+                            <span className="text-sm font-medium">{t('import.language')}</span>
                           </div>
                           <p className="text-xs text-muted-foreground">
-                            Language selection isn't supported for Parakeet. It always uses automatic detection.
+                            {t('import.parakeetLanguageNote')}
                           </p>
                         </div>
                       )}
@@ -318,16 +324,18 @@ export function ImportAudioDialog({
                       {availableModels.length > 0 && (
                         <div className="space-y-2">
                           <div className="flex items-center gap-2">
-                            <Cpu className="h-4 w-4 text-muted-foreground" />
-                            <span className="text-sm font-medium">Model</span>
+                            <Cpu className="h-4 w-4 text-muted-foreground" aria-hidden />
+                            <span className="text-sm font-medium">{t('import.model')}</span>
                           </div>
                           <Select
                             value={selectedModelKey}
                             onValueChange={setSelectedModelKey}
                             disabled={loadingModels}
                           >
-                            <SelectTrigger className="w-full">
-                              <SelectValue placeholder={loadingModels ? 'Loading models...' : 'Select model'} />
+                            <SelectTrigger className="w-full" aria-label={t('import.model')}>
+                              <SelectValue
+                                placeholder={loadingModels ? t('import.loadingModels') : t('import.selectModel')}
+                              />
                             </SelectTrigger>
                             <SelectContent>
                               {availableModels.map((model) => (
@@ -362,25 +370,25 @@ export function ImportAudioDialog({
           {!error && (
             <>
               <Button variant="outline" onClick={() => onOpenChange(false)}>
-                Cancel
+                {t('common.cancel')}
               </Button>
               <Button
                 onClick={handleStartImport}
                 className="bg-blue-600 hover:bg-blue-700"
                 disabled={!fileInfo}
               >
-                <Upload className="h-4 w-4 mr-2" />
-                Import
+                <Upload className="h-4 w-4 mr-2" aria-hidden />
+                {t('import.import')}
               </Button>
             </>
           )}
           {error && (
             <>
               <Button variant="outline" onClick={() => onOpenChange(false)}>
-                Close
+                {t('common.close')}
               </Button>
               <Button onClick={reset} variant="outline">
-                Try Again
+                {t('import.tryAgain')}
               </Button>
             </>
           )}
