@@ -499,6 +499,38 @@ pub fn audio_to_mono(audio: &[f32], channels: u16) -> Vec<f32> {
     mono_samples
 }
 
+/// Rubato parameters for one conversion ratio.
+///
+/// Shared by the one-shot `resample` and the streaming resampler so their
+/// anti-aliasing behaviour cannot drift apart.
+pub(crate) fn sinc_params_for_ratio(ratio: f64) -> SincInterpolationParameters {
+    let (sinc_len, interpolation, oversampling) = if ratio >= 2.0 {
+        // Large upsampling (e.g., 8kHz → 16kHz, 16kHz → 48kHz, 24kHz → 48kHz)
+        (512, SincInterpolationType::Cubic, 512)
+    } else if ratio >= 1.5 {
+        // Moderate upsampling (e.g., 32kHz → 48kHz)
+        (384, SincInterpolationType::Cubic, 384)
+    } else if ratio > 1.0 {
+        // Small upsampling (e.g., 44.1kHz → 48kHz)
+        (256, SincInterpolationType::Linear, 256)
+    } else if ratio <= 0.5 {
+        // Large downsampling (e.g., 48kHz → 16kHz, 48kHz → 8kHz): needs the
+        // strongest anti-aliasing.
+        (512, SincInterpolationType::Cubic, 512)
+    } else {
+        // Moderate downsampling (e.g., 48kHz → 24kHz, 48kHz → 32kHz)
+        (384, SincInterpolationType::Linear, 384)
+    };
+
+    SincInterpolationParameters {
+        sinc_len,
+        f_cutoff: 0.95, // Preserve most of the frequency content
+        interpolation,
+        oversampling_factor: oversampling,
+        window: WindowFunction::BlackmanHarris2, // Best window for audio
+    }
+}
+
 /// High-quality audio resampling with adaptive parameters based on sample rate ratio
 ///
 /// This function automatically selects the best resampling parameters based on:
@@ -518,64 +550,9 @@ pub fn resample(input: &[f32], from_sample_rate: u32, to_sample_rate: u32) -> Re
     }
 
     let ratio = to_sample_rate as f64 / from_sample_rate as f64;
-
-    // Adaptive parameters based on sample rate ratio
-    let (sinc_len, interpolation_type, oversampling) = if ratio >= 2.0 {
-        // Large upsampling (e.g., 8kHz → 16kHz, 16kHz → 48kHz, 24kHz → 48kHz)
-        // Needs high quality to avoid artifacts
-        debug!("High-quality upsampling: {}Hz → {}Hz (ratio: {:.2}x)",
-               from_sample_rate, to_sample_rate, ratio);
-        (
-            512,                              // Longer sinc for smoother interpolation
-            SincInterpolationType::Cubic,     // Cubic for best quality
-            512,                              // Higher oversampling
-        )
-    } else if ratio >= 1.5 {
-        // Moderate upsampling (e.g., 32kHz → 48kHz)
-        debug!("Moderate upsampling: {}Hz → {}Hz (ratio: {:.2}x)",
-               from_sample_rate, to_sample_rate, ratio);
-        (
-            384,
-            SincInterpolationType::Cubic,
-            384,
-        )
-    } else if ratio > 1.0 {
-        // Small upsampling (e.g., 44.1kHz → 48kHz)
-        debug!("Small upsampling: {}Hz → {}Hz (ratio: {:.2}x)",
-               from_sample_rate, to_sample_rate, ratio);
-        (
-            256,
-            SincInterpolationType::Linear,
-            256,
-        )
-    } else if ratio <= 0.5 {
-        // Large downsampling (e.g., 48kHz → 16kHz, 48kHz → 8kHz)
-        // Needs strong anti-aliasing
-        debug!("Anti-aliased downsampling: {}Hz → {}Hz (ratio: {:.2}x)",
-               from_sample_rate, to_sample_rate, ratio);
-        (
-            512,                              // Longer sinc for anti-aliasing
-            SincInterpolationType::Cubic,     // Cubic for quality
-            512,
-        )
-    } else {
-        // Moderate downsampling (e.g., 48kHz → 24kHz, 48kHz → 32kHz)
-        debug!("Moderate downsampling: {}Hz → {}Hz (ratio: {:.2}x)",
-               from_sample_rate, to_sample_rate, ratio);
-        (
-            384,
-            SincInterpolationType::Linear,
-            384,
-        )
-    };
-
-    let params = SincInterpolationParameters {
-        sinc_len,
-        f_cutoff: 0.95,                      // Preserve most of the frequency content
-        interpolation: interpolation_type,
-        oversampling_factor: oversampling,
-        window: WindowFunction::BlackmanHarris2,  // Best window for audio
-    };
+    debug!("Resampling: {}Hz → {}Hz (ratio: {:.2}x)",
+           from_sample_rate, to_sample_rate, ratio);
+    let params = sinc_params_for_ratio(ratio);
 
     let mut resampler = SincFixedIn::<f32>::new(
         ratio,
@@ -601,6 +578,134 @@ pub fn resample_audio(input: &[f32], from_sample_rate: u32, to_sample_rate: u32)
         Err(e) => {
             debug!("Resampling failed: {}, returning original audio", e);
             input.to_vec()
+        }
+    }
+}
+
+/// Streaming mono resampler that keeps its filter history across calls.
+///
+/// `resample` builds a new resampler per call, which is correct for one-shot files
+/// but creates seams when a live stream arrives in arbitrary chunks: each call
+/// restarts the filter and its fractional phase. This keeps one rubato Sinc
+/// resampler plus the unprocessed input remainder, so the anti-aliasing filter and
+/// the sample-phase stay continuous for the whole recording.
+pub struct StreamingResampler {
+    from: u32,
+    to: u32,
+    /// Input frames handed to rubato per call (~10 ms at the input rate).
+    chunk_size: usize,
+    input: Vec<f32>,
+    /// Total input samples pushed and output samples emitted, used to trim the
+    /// flushed tail to the exact output duration the ratio implies.
+    pushed_input: usize,
+    produced: usize,
+    resampler: Option<SincFixedIn<f32>>,
+}
+
+impl StreamingResampler {
+    pub fn new(from: u32, to: u32) -> Result<Self> {
+        // Fixed input chunks make chunked and one-shot processing bit-identical:
+        // rubato only ever sees whole `chunk_size` frames.
+        let chunk_size = (from as usize / 100).max(64);
+        let resampler = if from == to {
+            None
+        } else {
+            let ratio = to as f64 / from as f64;
+            Some(SincFixedIn::<f32>::new(
+                ratio,
+                2.0,
+                sinc_params_for_ratio(ratio),
+                chunk_size,
+                1,
+            )?)
+        };
+
+        Ok(Self {
+            from,
+            to,
+            chunk_size,
+            input: Vec::with_capacity(chunk_size * 2),
+            pushed_input: 0,
+            produced: 0,
+            resampler,
+        })
+    }
+
+    /// Feed more input; returns the output samples that are ready.
+    ///
+    /// Anything under one input chunk is kept for the next call so the filter never
+    /// restarts mid-stream.
+    pub fn push(&mut self, samples: &[f32]) -> Vec<f32> {
+        if self.resampler.is_none() {
+            return samples.to_vec();
+        }
+
+        self.pushed_input += samples.len();
+        self.input.extend_from_slice(samples);
+        let mut output = Vec::with_capacity(self.input.len() / 3 + self.chunk_size);
+        while self.input.len() >= self.chunk_size {
+            let chunk: Vec<f32> = self.input.drain(..self.chunk_size).collect();
+            self.process_chunk(&chunk, &mut output);
+        }
+        self.produced += output.len();
+        output
+    }
+
+    /// Emit the tail after the final push and report the exact duration.
+    ///
+    /// The remaining partial chunk is padded with silence so the resampler can flush
+    /// its filter, and the sinc's group delay is flushed the same way: without the
+    /// extra silence the output would end ~sinc_len/2 input frames short. The result
+    /// is trimmed to the sample count the input duration implies, so callers can
+    /// rely on length = input_len * to / from.
+    pub fn finish(&mut self) -> Vec<f32> {
+        let mut output = Vec::new();
+        if self.resampler.is_none() {
+            return output;
+        }
+
+        let expected_total =
+            (self.pushed_input as f64 * self.to as f64 / self.from as f64).round() as usize;
+        let remaining = expected_total.saturating_sub(self.produced);
+
+        if !self.input.is_empty() {
+            let mut last = std::mem::take(&mut self.input);
+            last.resize(self.chunk_size, 0.0);
+            self.process_chunk(&last, &mut output);
+        }
+
+        // SincFixedIn holds back sinc_len/2 frames of group delay; feeding silence
+        // releases that tail. 64 chunks (0.64 s of input) is far more than needed.
+        let silence = vec![0.0f32; self.chunk_size];
+        let mut guard = 0;
+        while output.len() < remaining && guard < 64 {
+            self.process_chunk(&silence, &mut output);
+            guard += 1;
+        }
+
+        output.truncate(remaining);
+        self.produced += output.len();
+        output
+    }
+
+    fn process_chunk(&mut self, chunk: &[f32], output: &mut Vec<f32>) {
+        let Some(resampler) = self.resampler.as_mut() else {
+            output.extend_from_slice(chunk);
+            return;
+        };
+        match resampler.process(&[chunk.to_vec()], None) {
+            Ok(mut waves) => {
+                if let Some(channel) = waves.pop() {
+                    output.extend_from_slice(&channel);
+                }
+            }
+            Err(error) => {
+                debug!(
+                    "Streaming resampler failed ({}); falling back to one-shot for this chunk",
+                    error
+                );
+                output.extend_from_slice(&resample_audio(chunk, self.from, self.to));
+            }
         }
     }
 }
@@ -737,4 +842,142 @@ pub fn write_transcript_json_to_file(
     std::fs::write(&file_path, json_string)?;
 
     Ok(file_path.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sine(frequency: f32, sample_rate: u32, seconds: f32, amplitude: f32) -> Vec<f32> {
+        let samples = (sample_rate as f32 * seconds) as usize;
+        (0..samples)
+            .map(|index| {
+                amplitude
+                    * (2.0 * std::f32::consts::PI * frequency * index as f32
+                        / sample_rate as f32)
+                        .sin()
+            })
+            .collect()
+    }
+
+    fn rms(samples: &[f32]) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        (samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32).sqrt()
+    }
+
+    /// The previous VAD path: linear interpolation with no anti-aliasing filter.
+    fn naive_linear_downsample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
+        let ratio = from as f64 / to as f64;
+        let output_len = (input.len() as f64 / ratio) as usize;
+        (0..output_len)
+            .map(|index| {
+                let position = index as f64 * ratio;
+                let source = position as usize;
+                let fraction = (position - source as f64) as f32;
+                if source + 1 < input.len() {
+                    input[source] * (1.0 - fraction) + input[source + 1] * fraction
+                } else {
+                    input.get(source).copied().unwrap_or(0.0)
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn streaming_resampler_48k_to_16k_has_the_expected_length() {
+        let mut resampler = StreamingResampler::new(48_000, 16_000).expect("resampler");
+        let input = sine(1_000.0, 48_000, 1.0, 0.5);
+
+        let mut output = resampler.push(&input);
+        output.extend(resampler.finish());
+
+        assert!(
+            (output.len() as i64 - 16_000).abs() <= 1,
+            "expected ~16000 output samples, got {}",
+            output.len()
+        );
+    }
+
+    #[test]
+    fn streaming_resampler_preserves_a_passband_tone_without_seams() {
+        let mut resampler = StreamingResampler::new(48_000, 16_000).expect("resampler");
+        let input = sine(1_000.0, 48_000, 1.0, 0.5);
+
+        let mut output = resampler.push(&input);
+        output.extend(resampler.finish());
+
+        let input_rms = rms(&input);
+        let output_rms = rms(&output);
+        assert!(
+            (output_rms / input_rms - 1.0).abs() < 0.05,
+            "1 kHz tone level changed too much: {} -> {}",
+            input_rms,
+            output_rms
+        );
+
+        // A seam/click at a chunk boundary would show up as a large single-sample jump.
+        let max_step = output
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_step < 0.25, "resampled tone has a discontinuity: {max_step}");
+    }
+
+    #[test]
+    fn streaming_resampler_suppresses_aliasing_that_naive_downsampling_keeps() {
+        // 12 kHz is above the 8 kHz Nyquist of the 16 kHz output, so it must be
+        // filtered out rather than folded down to 4 kHz.
+        let mut resampler = StreamingResampler::new(48_000, 16_000).expect("resampler");
+        let input = sine(12_000.0, 48_000, 1.0, 0.5);
+
+        let mut filtered = resampler.push(&input);
+        filtered.extend(resampler.finish());
+        let naive = naive_linear_downsample(&input, 48_000, 16_000);
+
+        let filtered_rms = rms(&filtered);
+        let naive_rms = rms(&naive);
+        assert!(
+            filtered_rms < naive_rms * 0.1,
+            "aliasing not suppressed: filtered rms {filtered_rms}, naive rms {naive_rms}"
+        );
+        assert!(
+            filtered_rms < 0.05,
+            "out-of-band tone leaked through: rms {filtered_rms}"
+        );
+    }
+
+    #[test]
+    fn chunked_streaming_resampling_matches_one_shot_processing() {
+        let input = sine(440.0, 48_000, 0.5, 0.4);
+
+        let mut one_shot = StreamingResampler::new(48_000, 16_000).expect("resampler");
+        let mut expected = one_shot.push(&input);
+        expected.extend(one_shot.finish());
+
+        let mut chunked = StreamingResampler::new(48_000, 16_000).expect("resampler");
+        let mut actual = Vec::new();
+        for chunk in input.chunks(137) {
+            actual.extend(chunked.push(chunk));
+        }
+        actual.extend(chunked.finish());
+
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected.iter()) {
+            assert!(
+                (actual - expected).abs() < 1e-6,
+                "chunked and one-shot resampling disagree: {actual} vs {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn equal_rates_pass_through_unchanged() {
+        let mut resampler = StreamingResampler::new(16_000, 16_000).expect("resampler");
+        let input = vec![0.1f32, -0.2, 0.3];
+
+        assert_eq!(resampler.push(&input), input);
+        assert!(resampler.finish().is_empty());
+    }
 }

@@ -4,6 +4,8 @@ use log::{debug, info, warn};
 use std::collections::VecDeque;
 use std::time::Duration;
 
+use super::audio_processing::StreamingResampler;
+
 /// Silero VAD only operates at 16kHz; input is resampled to this rate, and every
 /// sample count and timestamp inside this module is expressed in it.
 const VAD_SAMPLE_RATE: u32 = 16000;
@@ -22,6 +24,9 @@ pub struct ContinuousVadProcessor {
     session: VadSession,
     chunk_size: usize,
     sample_rate: u32,
+    /// Anti-aliased streaming 16 kHz conversion, kept across calls so the filter and
+    /// its fractional phase stay continuous (a per-call resampler seams every chunk).
+    resampler: Option<StreamingResampler>,
     buffer: Vec<f32>,
     speech_segments: VecDeque<SpeechSegment>,
     current_speech: Vec<f32>,
@@ -69,13 +74,32 @@ impl ContinuousVadProcessor {
         // VAD uses 30ms chunks at 16kHz (480 samples)
         let vad_chunk_size = (VAD_SAMPLE_RATE as f32 * 0.03) as usize; // 480 samples
 
+        // The mixed pipeline audio is 48 kHz; silero only understands 16 kHz, and the
+        // segment samples it returns become the ASR input, so this conversion decides
+        // how much speech detail Whisper ever sees.
+        let resampler = if input_sample_rate == VAD_SAMPLE_RATE {
+            None
+        } else {
+            match StreamingResampler::new(input_sample_rate, VAD_SAMPLE_RATE) {
+                Ok(resampler) => Some(resampler),
+                Err(error) => {
+                    warn!(
+                        "VAD could not build the streaming resampler ({}); falling back to per-chunk resampling",
+                        error
+                    );
+                    None
+                }
+            }
+        };
+
         info!("VAD processor created: input={}Hz, vad={}Hz, chunk_size={} samples",
               input_sample_rate, VAD_SAMPLE_RATE, vad_chunk_size);
 
         Ok(Self {
             session,
             chunk_size: vad_chunk_size,
-            sample_rate: input_sample_rate, // Store input rate for resampling ratio in resample_to_16k()
+            sample_rate: input_sample_rate,
+            resampler,
             buffer: Vec::with_capacity(vad_chunk_size * 2),
             speech_segments: VecDeque::new(),
             current_speech: Vec::new(),
@@ -91,10 +115,10 @@ impl ContinuousVadProcessor {
     /// Handles resampling from input sample rate to 16kHz for VAD processing
     pub fn process_audio(&mut self, samples: &[f32]) -> Result<Vec<SpeechSegment>> {
         // Resample to 16kHz if needed
-        let resampled_audio = if self.sample_rate == 16000 {
+        let resampled_audio = if self.sample_rate == VAD_SAMPLE_RATE {
             samples.to_vec()
         } else {
-            self.resample_to_16k(samples)?
+            self.resample_to_16k(samples)
         };
 
         self.buffer.extend_from_slice(&resampled_audio);
@@ -114,54 +138,21 @@ impl ContinuousVadProcessor {
         Ok(completed_segments)
     }
 
-    /// Improved resampling from input sample rate to 16kHz with anti-aliasing
-    /// Uses linear interpolation and basic low-pass filtering for better quality
-    fn resample_to_16k(&self, samples: &[f32]) -> Result<Vec<f32>> {
-        if self.sample_rate == 16000 {
-            return Ok(samples.to_vec());
+    /// Convert input-rate audio to the 16 kHz silero operates on.
+    ///
+    /// Uses the streaming rubato Sinc resampler so the anti-aliasing filter and its
+    /// fractional phase carry across calls; a per-chunk filter would restart at every
+    /// boundary and both alias and seam the speech that reaches Whisper.
+    fn resample_to_16k(&mut self, samples: &[f32]) -> Vec<f32> {
+        if let Some(resampler) = self.resampler.as_mut() {
+            return resampler.push(samples);
         }
-
-        // Calculate downsampling ratio
-        let ratio = self.sample_rate as f64 / 16000.0;
-        let output_len = (samples.len() as f64 / ratio) as usize;
-        let mut resampled = Vec::with_capacity(output_len);
-
-        // Apply simple low-pass filter before downsampling to reduce aliasing
-        let cutoff_freq = 0.4; // Normalized frequency (0.4 * Nyquist)
-        let mut filtered_samples = Vec::with_capacity(samples.len());
-        
-        // Simple moving average filter (basic low-pass)
-        let filter_size = (self.sample_rate as f64 / (cutoff_freq * self.sample_rate as f64)) as usize;
-        let filter_size = std::cmp::max(1, std::cmp::min(filter_size, 5)); // Limit filter size
-        
-        for i in 0..samples.len() {
-            let start = if i >= filter_size { i - filter_size } else { 0 };
-            let end = std::cmp::min(i + filter_size + 1, samples.len());
-            let sum: f32 = samples[start..end].iter().sum();
-            filtered_samples.push(sum / (end - start) as f32);
+        if self.sample_rate == VAD_SAMPLE_RATE {
+            return samples.to_vec();
         }
-
-        // Linear interpolation downsampling
-        for i in 0..output_len {
-            let source_pos = i as f64 * ratio;
-            let source_index = source_pos as usize;
-            let fraction = source_pos - source_index as f64;
-            
-            if source_index + 1 < filtered_samples.len() {
-                // Linear interpolation
-                let sample1 = filtered_samples[source_index];
-                let sample2 = filtered_samples[source_index + 1];
-                let interpolated = sample1 + (sample2 - sample1) * fraction as f32;
-                resampled.push(interpolated);
-            } else if source_index < filtered_samples.len() {
-                resampled.push(filtered_samples[source_index]);
-            }
-        }
-
-        debug!("Resampled from {} samples ({}Hz) to {} samples (16kHz) with anti-aliasing",
-               samples.len(), self.sample_rate, resampled.len());
-
-        Ok(resampled)
+        // Only reached when the streaming resampler could not be built: a stateless
+        // conversion is worse but keeps the recorder working.
+        super::audio_processing::resample_audio(samples, self.sample_rate, VAD_SAMPLE_RATE)
     }
 
     /// Flush any remaining audio and return final speech segments
@@ -170,6 +161,15 @@ impl ContinuousVadProcessor {
               self.in_speech, self.current_speech.len(), self.buffer.len(), self.speech_segments.len());
 
         let mut completed_segments = Vec::new();
+
+        // Push the resampler's last partial input chunk through before the endpoint is
+        // computed, so the final speech segment is not cut short by the ≤10 ms of
+        // audio still held in the streaming filter.
+        if let Some(resampler) = self.resampler.as_mut() {
+            let tail = resampler.finish();
+            self.buffer.extend_from_slice(&tail);
+        }
+
         // Preserve the real post-resampling endpoint before padding the final VAD frame.
         let real_end_sample = self.processed_samples + self.buffer.len();
 
@@ -524,6 +524,7 @@ mod tests {
 
         samples
     }
+
 
     #[test]
     fn test_vad_chunked_vs_single_processing() {
