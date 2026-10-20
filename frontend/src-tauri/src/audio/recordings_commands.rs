@@ -416,18 +416,45 @@ pub async fn rename_saved_recording(
     new_title: String,
 ) -> Result<RecordingMutationResult, String> {
     let original_path = folder_path.clone();
+    let original_folder = PathBuf::from(&folder_path);
+    // Snapshot what exists today so a failed database update can be undone: the
+    // folder name changes on disk before the row is updated, and leaving the two
+    // out of step would strand the meeting at a path that no longer exists.
+    let original_metadata = std::fs::read_to_string(original_folder.join(METADATA_FILE)).ok();
+    let original_audio_file = super::retention_commands::read_meeting_metadata(&original_folder)
+        .map(|metadata| metadata.audio_file)
+        .filter(|name| !name.is_empty());
+
     let result = rename_recording_on_disk(folder_path, new_title, true).await?;
 
     // The sidebar reads meetings from the database. Without this update a rename
     // changed the folder on disk but left the sidebar pointing at the old path, so
     // the two lists disagreed.
-    sqlx::query("UPDATE meetings SET folder_path = ?, title = ? WHERE folder_path = ?")
+    if let Err(e) = sqlx::query("UPDATE meetings SET folder_path = ?, title = ? WHERE folder_path = ?")
         .bind(&result.folder_path)
         .bind(&result.title)
         .bind(&original_path)
         .execute(state.db_manager.pool())
         .await
-        .map_err(|e| format!("The recording was renamed but its meeting could not be updated: {e}"))?;
+    {
+        let renamed_folder = PathBuf::from(&result.folder_path);
+        let rollback = rollback_rename(
+            &original_folder,
+            &renamed_folder,
+            original_metadata.as_deref(),
+            original_audio_file.as_deref(),
+        );
+
+        return Err(match rollback {
+            Ok(()) => format!(
+                "The recording name was not saved because its meeting could not be updated: {e}"
+            ),
+            Err(rollback_error) => format!(
+                "The recording was renamed but its meeting could not be updated ({e}), and restoring the old name failed ({rollback_error}). The recording is at {}.",
+                result.folder_path
+            ),
+        });
+    }
 
     Ok(result)
 }
@@ -545,12 +572,25 @@ pub async fn move_saved_recording<R: Runtime>(
     .map_err(|e| format!("Move task failed: {}", e))??;
 
     // Keep the sidebar and the library pointing at the same folder after a move.
-    sqlx::query("UPDATE meetings SET folder_path = ? WHERE folder_path = ?")
+    if let Err(e) = sqlx::query("UPDATE meetings SET folder_path = ? WHERE folder_path = ?")
         .bind(&result.folder_path)
         .bind(&original_path)
         .execute(state.db_manager.pool())
         .await
-        .map_err(|e| format!("The recording was moved but its meeting could not be updated: {e}"))?;
+    {
+        let original = PathBuf::from(&original_path);
+        let moved = PathBuf::from(&result.folder_path);
+
+        return Err(match restore_moved_folder(&original, &moved) {
+            Ok(()) => format!(
+                "The recording could not be moved because its meeting could not be updated: {e}"
+            ),
+            Err(restore_error) => format!(
+                "The recording was moved to '{}' but its meeting could not be updated ({e}), and restoring the original location failed: {restore_error}",
+                result.folder_path
+            ),
+        });
+    }
 
     Ok(result)
 }
@@ -572,6 +612,109 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> std::io::Result<()> {
     }
 
     Ok(())
+}
+
+/// Undo a recording rename after the database update failed.
+///
+/// Restores the original folder name, the audio file name recorded in the
+/// original metadata and the original metadata.json itself. The caller logs a
+/// failure here: the recording is still on disk, but possibly under the new name.
+fn rollback_rename(
+    original_folder: &Path,
+    renamed_folder: &Path,
+    original_metadata: Option<&str>,
+    original_audio_file: Option<&str>,
+) -> Result<(), String> {
+    if renamed_folder != original_folder && renamed_folder.is_dir() {
+        if original_folder.exists() {
+            return Err(format!(
+                "Cannot restore the original folder name because '{}' already exists",
+                original_folder.display()
+            ));
+        }
+        std::fs::rename(renamed_folder, original_folder).map_err(|e| {
+            format!(
+                "Failed to rename '{}' back to '{}': {}",
+                renamed_folder.display(),
+                original_folder.display(),
+                e
+            )
+        })?;
+    }
+
+    let folder = if original_folder.is_dir() {
+        original_folder
+    } else {
+        renamed_folder
+    };
+
+    if let Some(original_name) = original_audio_file {
+        if let Some(current) = find_audio_file(folder) {
+            if current.file_name().and_then(|name| name.to_str()) != Some(original_name) {
+                let target = folder.join(original_name);
+                if !target.exists() {
+                    std::fs::rename(&current, &target).map_err(|e| {
+                        format!(
+                            "Failed to restore the audio file name '{}': {}",
+                            original_name, e
+                        )
+                    })?;
+                }
+            }
+        }
+    }
+
+    if let Some(metadata) = original_metadata {
+        std::fs::write(folder.join(METADATA_FILE), metadata)
+            .map_err(|e| format!("Failed to restore {}: {}", METADATA_FILE, e))?;
+    }
+
+    Ok(())
+}
+
+/// Undo a move when the database update failed: put the recording back at its
+/// original path. A rename is preferred; when the two paths are on different
+/// volumes the copy-then-remove fallback is used.
+fn restore_moved_folder(original_folder: &Path, moved_folder: &Path) -> Result<(), String> {
+    if !moved_folder.is_dir() {
+        return Err(format!(
+            "The moved recording is missing: {}",
+            moved_folder.display()
+        ));
+    }
+    if original_folder.exists() {
+        return Err(format!(
+            "The original recording path is already in use: {}",
+            original_folder.display()
+        ));
+    }
+    if let Some(parent) = original_folder.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to recreate '{}': {}", parent.display(), e))?;
+    }
+
+    match std::fs::rename(moved_folder, original_folder) {
+        Ok(()) => Ok(()),
+        Err(rename_error) => {
+            // Cross-volume moves cannot be renamed; copy back and drop the copy.
+            copy_dir_recursive(moved_folder, original_folder).map_err(|copy_error| {
+                format!(
+                    "Failed to restore '{}': {} (copying it back also failed: {})",
+                    original_folder.display(),
+                    rename_error,
+                    copy_error
+                )
+            })?;
+            std::fs::remove_dir_all(moved_folder).map_err(|remove_error| {
+                format!(
+                    "Restored '{}' but could not remove the moved copy '{}': {}",
+                    original_folder.display(),
+                    moved_folder.display(),
+                    remove_error
+                )
+            })
+        }
+    }
 }
 
 /// Remove a generated summary, keeping the recording and its transcript.
@@ -772,5 +915,98 @@ mod tests {
         // Moving out of the root removes it from the list, which is the documented
         // behaviour rather than a bug.
         assert!(list_recordings(&root).is_empty());
+    }
+
+    #[test]
+    fn rollback_rename_restores_folder_metadata_and_audio_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let original = make_recording(tmp.path(), "Old_2026-05-01_10-00");
+        let original_metadata =
+            std::fs::read_to_string(original.join(METADATA_FILE)).expect("read metadata");
+
+        // Simulate the completed rename that the database update failed after.
+        let renamed = tmp.path().join("New_2026-05-01_10-00");
+        std::fs::rename(&original, &renamed).expect("rename folder");
+        std::fs::rename(renamed.join("audio.m4a"), renamed.join("New.m4a"))
+            .expect("rename audio file");
+        std::fs::write(
+            renamed.join(METADATA_FILE),
+            serde_json::json!({
+                "version": "1.0",
+                "meeting_name": "New",
+                "audio_file": "New.m4a",
+                "created_at": "2026-05-01T10:00:00Z",
+                "transcript_file": "transcripts.json",
+                "sample_rate": 48000,
+                "status": "completed"
+            })
+            .to_string(),
+        )
+        .expect("write updated metadata");
+
+        rollback_rename(&original, &renamed, Some(&original_metadata), Some("audio.m4a"))
+            .expect("rollback");
+
+        assert!(!renamed.exists(), "the renamed folder must be gone");
+        assert!(original.is_dir(), "the original folder name must be back");
+        assert!(
+            original.join("audio.m4a").is_file(),
+            "the original audio file name must be restored"
+        );
+        assert!(!original.join("New.m4a").exists());
+        assert_eq!(
+            std::fs::read_to_string(original.join(METADATA_FILE)).expect("read metadata"),
+            original_metadata,
+            "metadata must be restored byte for byte"
+        );
+    }
+
+    #[test]
+    fn rollback_rename_refuses_to_overwrite_an_existing_original() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let original = make_recording(tmp.path(), "Old_2026-05-01_10-00");
+        let renamed = make_recording(tmp.path(), "New_2026-05-01_10-00");
+
+        assert!(rollback_rename(&original, &renamed, None, None).is_err());
+        // Nothing was destroyed: both recordings still exist.
+        assert!(original.join("audio.m4a").is_file());
+        assert!(renamed.join("audio.m4a").is_file());
+    }
+
+    #[test]
+    fn restore_moved_folder_puts_a_recording_back_at_its_original_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("recordings");
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&root).expect("create root");
+        std::fs::create_dir_all(&elsewhere).expect("create elsewhere");
+        let original = make_recording(&root, "r_2026-05-01_10-00");
+        let moved = elsewhere.join("r_2026-05-01_10-00");
+
+        copy_dir_recursive(&original, &moved).expect("copy");
+        std::fs::remove_dir_all(&original).expect("remove source");
+
+        restore_moved_folder(&original, &moved).expect("restore");
+
+        assert!(
+            original.is_dir(),
+            "the recording must be back at its original path"
+        );
+        assert!(original.join(METADATA_FILE).is_file());
+        assert!(!moved.exists(), "the moved copy must be gone");
+    }
+
+    #[test]
+    fn restore_moved_folder_refuses_when_the_original_path_is_occupied() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let original = make_recording(tmp.path(), "r_2026-05-01_10-00");
+        let moved = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&moved).expect("create moved folder");
+
+        assert!(restore_moved_folder(&original, &moved).is_err());
+        assert!(
+            original.join("audio.m4a").is_file(),
+            "an existing folder must never be overwritten"
+        );
     }
 }

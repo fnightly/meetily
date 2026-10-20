@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { ModelConfig, ModelSettingsModal } from '@/components/ModelSettingsModal';
+import type { CustomOpenAIConfigResponse, ModelConfigResponse } from '@/types';
 import { SummaryLanguageSettings } from '@/components/SummaryLanguageSettings';
 import { Switch } from './ui/switch';
 import { useConfig } from '@/contexts/ConfigContext';
@@ -12,6 +13,9 @@ import { useI18n } from '@/contexts/I18nContext';
 interface SummaryModelSettingsProps {
   refetchTrigger?: number; // Change this to trigger refetch
 }
+
+/** Stored model config merged with the fields a custom-OpenAI provider adds. */
+type LoadedModelConfig = ModelConfig & ModelConfigResponse;
 
 export function SummaryModelSettings({ refetchTrigger }: SummaryModelSettingsProps) {
   const { t } = useI18n();
@@ -28,14 +32,14 @@ export function SummaryModelSettings({ refetchTrigger }: SummaryModelSettingsPro
   // Reusable fetch function
   const fetchModelConfig = useCallback(async () => {
     try {
-      const data = await invoke('api_get_model_config') as any;
+      const data = await invoke<LoadedModelConfig>('api_get_model_config');
       if (data && data.provider !== null) {
         // Fetch API key if not included and provider requires it
         if (data.provider !== 'ollama' && data.provider !== 'builtin-ai' && !data.apiKey) {
           try {
-            const apiKeyData = await invoke('api_get_api_key', {
+            const apiKeyData = await invoke<string>('api_get_api_key', {
               provider: data.provider
-            }) as string;
+            });
             data.apiKey = apiKeyData;
           } catch (err) {
             console.error('Failed to fetch API key:', err);
@@ -44,9 +48,8 @@ export function SummaryModelSettings({ refetchTrigger }: SummaryModelSettingsPro
         // Fetch Custom OpenAI config if that's the active provider
         if (data.provider === 'custom-openai') {
           try {
-            const customConfig = (await invoke('api_get_custom_openai_config')) as any;
+            const customConfig = await invoke<CustomOpenAIConfigResponse | null>('api_get_custom_openai_config');
             if (customConfig) {
-              data.customOpenAIDisplayName = customConfig.displayName || null;
               data.customOpenAIEndpoint = customConfig.endpoint || null;
               data.customOpenAIModel = customConfig.model || null;
               data.customOpenAIApiKey = customConfig.apiKey || null;

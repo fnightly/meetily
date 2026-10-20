@@ -1,7 +1,7 @@
 "use client"
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
 import { useState, useEffect, useCallback, Suspense } from "react";
-import { MeetingSummary, SummaryProcessResponse, Transcript } from "@/types";
+import { MeetingSummary, ModelConfigResponse, OllamaModelResponse, SummaryProcessResponse, Transcript } from "@/types";
 import PageContent from "./page-content";
 import { useRouter, useSearchParams } from "next/navigation";
 import { invoke } from "@tauri-apps/api/core";
@@ -55,8 +55,8 @@ function MeetingDetailsContent() {
   // Check if gemma3:1b model is available in Ollama
   const checkForGemmaModel = useCallback(async (): Promise<boolean> => {
     try {
-      const models = await invoke('get_ollama_models', { endpoint: null }) as any[];
-      const hasGemma = models.some((m: any) => m.name === 'gemma3:1b');
+      const models = await invoke<OllamaModelResponse[]>('get_ollama_models', { endpoint: null });
+      const hasGemma = models.some((m) => m.name === 'gemma3:1b');
       console.log('🔍 Checked for gemma3:1b:', hasGemma);
       return hasGemma;
     } catch (error) {
@@ -95,7 +95,7 @@ function MeetingDetailsContent() {
 
     try {
       // Check what's currently in database
-      const currentConfig = await invoke('api_get_model_config') as any;
+      const currentConfig = await invoke<ModelConfigResponse>('api_get_model_config');
 
       // If DB already has a model, use it (never override!)
       if (currentConfig && currentConfig.model) {

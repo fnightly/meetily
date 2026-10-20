@@ -210,7 +210,9 @@ pub async fn write_backup(
 /// Reject archive entries that would escape the extraction folder.
 fn safe_relative(name: &str) -> Option<PathBuf> {
     let path = Path::new(name);
-    if path.is_absolute() || name.contains("..") || name.contains(':') {
+    // has_root, not just is_absolute: on Windows "/abs" is rooted but not
+    // absolute, and joining a rooted path would discard the extraction folder.
+    if path.is_absolute() || path.has_root() || name.contains("..") || name.contains(':') {
         return None;
     }
     Some(path.to_path_buf())
@@ -326,6 +328,139 @@ pub async fn rewrite_paths(
     Ok(())
 }
 
+/// Remove the pieces of a restore that did not complete.
+///
+/// A half-written .restore-pending file would otherwise be swapped in at the next
+/// start, so every failure after the archive has been opened deletes it. The media
+/// tree is only removed when this restore created it.
+fn discard_staged_restore(
+    staged_db: &Path,
+    media_root: Option<&Path>,
+    dictionary_tmp: &Path,
+) {
+    if let Err(error) = fs::remove_file(staged_db) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            log::warn!(
+                "Failed to remove staged restore {}: {}",
+                staged_db.display(),
+                error
+            );
+        }
+    }
+
+    if let Some(media_root) = media_root {
+        if media_root.exists() {
+            if let Err(error) = fs::remove_dir_all(media_root) {
+                log::warn!(
+                    "Failed to remove partially restored media {}: {}",
+                    media_root.display(),
+                    error
+                );
+            }
+        }
+    }
+
+    let _ = fs::remove_file(dictionary_tmp);
+}
+
+/// Check that a staged restore is a usable database before it may replace the
+/// live one.
+///
+/// A truncated archive or a corrupt file can extract to something SQLite cannot
+/// open; swapping that in at the next start would replace a working database.
+pub async fn validate_staged_database(staged_db: &Path) -> Result<(), String> {
+    if !staged_db.is_file() {
+        return Err(format!(
+            "The staged restore is missing: {}",
+            staged_db.display()
+        ));
+    }
+
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(staged_db)
+        .read_only(true);
+    let pool = SqlitePool::connect_with(options)
+        .await
+        .map_err(|error| format!("The restored database cannot be opened: {error}"))?;
+
+    let check: Result<(), String> = async {
+        let integrity: (String,) = sqlx::query_as("PRAGMA integrity_check")
+            .fetch_one(&pool)
+            .await
+            .map_err(|error| format!("Integrity check failed: {error}"))?;
+        if integrity.0 != "ok" {
+            return Err(format!("The restored database is corrupt: {}", integrity.0));
+        }
+
+        // A valid SQLite file that is not a Meetily database has no meetings table.
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM meetings")
+            .fetch_one(&pool)
+            .await
+            .map_err(|error| format!("The restored database has no meetings table: {error}"))?;
+        Ok(())
+    }
+    .await;
+
+    pool.close().await;
+    check
+}
+
+/// Extract a backup into its staging locations, cleaning up on any failure.
+///
+/// Split from the command so the failure path — a corrupt archive must leave no
+/// .restore-pending file behind — can be tested without a Tauri handle.
+pub async fn stage_backup_for_restore(
+    archive: &Path,
+    staged_db: &Path,
+    notes_root: &Path,
+    media_root: &Path,
+    dictionary_tmp: &Path,
+) -> Result<BackupManifest, String> {
+    let media_root_existed = media_root.exists();
+    let cleanup_media = (!media_root_existed).then_some(media_root);
+
+    let (archive_c, staged_c, notes_c, media_c, dict_c) = (
+        archive.to_path_buf(),
+        staged_db.to_path_buf(),
+        notes_root.to_path_buf(),
+        media_root.to_path_buf(),
+        dictionary_tmp.to_path_buf(),
+    );
+
+    let extracted = tokio::task::spawn_blocking(move || {
+        extract_backup(&archive_c, &staged_c, &notes_c, &media_c, &dict_c)
+    })
+    .await
+    .map_err(|error| error.to_string());
+
+    let (manifest, mapping) = match extracted {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) | Err(error) => {
+            discard_staged_restore(staged_db, cleanup_media, dictionary_tmp);
+            return Err(error);
+        }
+    };
+
+    if let Err(error) = rewrite_paths(
+        staged_db,
+        &mapping,
+        manifest.notes_root.as_deref(),
+        &notes_root.to_string_lossy(),
+    )
+    .await
+    {
+        discard_staged_restore(staged_db, cleanup_media, dictionary_tmp);
+        return Err(error);
+    }
+
+    if let Err(error) = validate_staged_database(staged_db).await {
+        discard_staged_restore(staged_db, cleanup_media, dictionary_tmp);
+        return Err(format!("The restored database is not usable: {error}"));
+    }
+
+    Ok(manifest)
+}
+
 fn store_file<R: Runtime>(app: &AppHandle<R>, name: &str) -> Option<PathBuf> {
     app.path().app_data_dir().ok().map(|d| d.join(name))
 }
@@ -397,18 +532,17 @@ pub async fn api_restore_backup<R: Runtime>(
         .join(format!("restored-{}", chrono::Local::now().format("%Y%m%d-%H%M%S")));
     let dict_tmp = std::env::temp_dir().join(format!("meetily-dict-{}.json", uuid::Uuid::new_v4()));
 
-    let (staged_c, notes_c, media_c, dict_c, archive_c) =
-        (staged.clone(), notes_root.clone(), media_root.clone(), dict_tmp.clone(), archive.clone());
-    let (manifest, mapping) = tokio::task::spawn_blocking(move || {
-        extract_backup(&archive_c, &staged_c, &notes_c, &media_c, &dict_c)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
-    if let Err(e) = rewrite_paths(&staged, &mapping, manifest.notes_root.as_deref(), &notes_root.to_string_lossy()).await {
-        let _ = fs::remove_file(&staged);
-        return Err(e);
-    }
+    // Staging handles extraction, path rewriting, validation and cleanup on every
+    // failure path, so a corrupt archive can never leave a half-written restore
+    // behind for the next start to swap in.
+    let manifest = stage_backup_for_restore(
+        &archive,
+        &staged,
+        &notes_root,
+        &media_root,
+        &dict_tmp,
+    )
+    .await?;
 
     // Merge the vocabulary instead of replacing it: the user may have added
     // terms on this machine since the backup was taken.
@@ -486,6 +620,9 @@ mod tests {
         assert!(new_folder.join("audio.mp4").is_file());
 
         rewrite_paths(&staged, &mapping, manifest.notes_root.as_deref(), &new_notes.to_string_lossy()).await.unwrap();
+        // The staged file must pass the same validation the restore command and
+        // the startup swap apply.
+        validate_staged_database(&staged).await.unwrap();
         let restored = SqlitePool::connect(&format!("sqlite://{}", staged.to_string_lossy())).await.unwrap();
         let (folder,): (String,) = sqlx::query_as("SELECT folder_path FROM meetings WHERE id = 'm1'").fetch_one(&restored).await.unwrap();
         assert_eq!(folder, new_folder.to_string_lossy());
@@ -503,6 +640,88 @@ mod tests {
         let safety = fs::read_dir(root.join("restore")).unwrap().filter_map(|e| e.ok())
             .any(|e| e.file_name().to_string_lossy().contains("before-restore"));
         assert!(safety);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discard_staged_restore_removes_only_what_it_is_given() {
+        let root = std::env::temp_dir().join(format!("meetily-bk-discard-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let staged = root.join("db.sqlite.restore-pending");
+        let dictionary = root.join("dict.json");
+        let media = root.join("restored-media");
+        fs::write(&staged, b"partial").unwrap();
+        fs::write(&dictionary, b"{}").unwrap();
+        fs::create_dir_all(&media).unwrap();
+        fs::write(media.join("audio.mp4"), b"x").unwrap();
+
+        // With no media path, only the database and dictionary are removed.
+        discard_staged_restore(&staged, None, &dictionary);
+        assert!(!staged.exists());
+        assert!(!dictionary.exists());
+        assert!(media.exists(), "media must be kept when it is not ours to remove");
+
+        discard_staged_restore(&staged, Some(&media), &dictionary);
+        assert!(!media.exists(), "partial media must be removed on failure");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn corrupt_archive_leaves_no_staged_restore_behind() {
+        let root = std::env::temp_dir().join(format!("meetily-bk-corrupt-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("broken.zip");
+        fs::write(&archive, b"PK\x03\x04 this is not a complete zip").unwrap();
+
+        let staged = root.join("db.sqlite.restore-pending");
+        let notes_root = root.join("notes");
+        let media_root = root.join("restored-recordings");
+        let dictionary = root.join("dict.json");
+
+        let result =
+            stage_backup_for_restore(&archive, &staged, &notes_root, &media_root, &dictionary).await;
+
+        assert!(result.is_err(), "a corrupt archive must fail before replacing anything");
+        assert!(
+            !staged.exists(),
+            "no .restore-pending file may survive a failed extraction"
+        );
+        assert!(!media_root.exists(), "partially restored media must be removed");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn staged_validation_rejects_a_non_database_file() {
+        let root = std::env::temp_dir().join(format!("meetily-bk-bogus-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let bogus = root.join("bogus.sqlite");
+        fs::write(&bogus, b"definitely not a sqlite database").unwrap();
+
+        assert!(validate_staged_database(&bogus).await.is_err());
+        assert!(
+            validate_staged_database(&root.join("missing.sqlite")).await.is_err(),
+            "a missing staging file must not validate"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn staged_validation_accepts_a_migrated_database() {
+        let root = std::env::temp_dir().join(format!("meetily-bk-valid-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let db_file = root.join("staged.sqlite");
+
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&db_file)
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool.close().await;
+
+        assert!(validate_staged_database(&db_file).await.is_ok());
+
         let _ = fs::remove_dir_all(&root);
     }
 }

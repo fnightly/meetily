@@ -249,7 +249,7 @@ export function HomeDashboard({ hasMicrophone, onStart, isStarting = false }: Ho
                 <div className="text-sm font-semibold text-slate-900">
                   {isStarting ? t('home.hero.starting') : t('nav.startRecording')}
                 </div>
-                <div className="text-xs text-slate-400">
+                <div className="text-xs text-slate-500">
                   {canStartRecording ? t('home.hero.ready') : t('home.hero.noMic')}
                 </div>
               </div>

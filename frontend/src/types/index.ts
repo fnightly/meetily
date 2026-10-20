@@ -101,6 +101,37 @@ export interface SummaryDataResponse {
 
 export type MeetingSummary = Summary | SummaryDataResponse;
 
+/** Response of the `api_get_model_config` command (Rust `api::ModelConfig`). */
+export interface ModelConfigResponse {
+  provider: string;
+  model: string;
+  whisperModel: string;
+  apiKey?: string | null;
+  ollamaEndpoint?: string | null;
+}
+
+/** Response of the `api_get_transcript_config` command. */
+export interface TranscriptConfigResponse {
+  provider: string;
+  model: string;
+  apiKey?: string | null;
+}
+
+/** Response of the `api_get_custom_openai_config` command. */
+export interface CustomOpenAIConfigResponse {
+  endpoint: string;
+  apiKey: string | null;
+  model: string;
+  maxTokens: number | null;
+  temperature: number | null;
+  topP: number | null;
+}
+
+/** One entry returned by `get_ollama_models`. */
+export interface OllamaModelResponse {
+  name: string;
+}
+
 export type SummaryProcessStatus =
   | 'pending'
   | 'processing'

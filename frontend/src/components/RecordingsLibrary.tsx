@@ -43,6 +43,9 @@ import {
   type LibrarySort,
 } from '@/lib/library-view';
 import { transcriptionStageKey } from '@/lib/transcription-queue';
+
+/** Longest transcript-search term sent to the backend (it is a LIKE scan). */
+const MAX_TRANSCRIPT_SEARCH_CHARS = 200;
 import type { ModelOption } from '@/lib/transcription-model-options';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -156,8 +159,9 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
   });
 
   // Full-text search over transcripts, debounced; hits are mapped to folders.
+  // The Rust query is a LIKE scan, so the input is capped as well as the result set.
   useEffect(() => {
-    const q = query.trim();
+    const q = query.trim().slice(0, MAX_TRANSCRIPT_SEARCH_CHARS);
     if (q.length < 2) {
       setTranscriptHits(new Set());
       return;
@@ -397,7 +401,7 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
       generateSummary: '1',
       folderPath: entry.folder_path,
     });
-    window.location.href = `/meeting-details?${params.toString()}`;
+    router.push(`/meeting-details?${params.toString()}`);
   };
 
   const handleRemoveSummary = (entry: RecordingEntry) =>
@@ -762,7 +766,7 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
                 </Button>
 
                 {isTranscribing && transcriptionItem ? (
-                  <div className="flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50/70 px-2.5 py-1.5">
+                  <div role="status" aria-live="polite" className="flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50/70 px-2.5 py-1.5">
                     <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin text-blue-600" />
                     <div className="min-w-0">
                       <div className="truncate text-xs font-medium text-blue-900">
@@ -801,7 +805,7 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
                   </div>
                 ) : transcriptionItem &&
                   (transcriptionItem.status === 'error' || transcriptionItem.status === 'cancelled') ? (
-                  <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-2.5 py-1.5">
+                  <div role="alert" className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-2.5 py-1.5">
                     <span className="text-xs text-red-800">
                       {transcriptionItem.status === 'cancelled'
                         ? t('library.transcribeCancelled')

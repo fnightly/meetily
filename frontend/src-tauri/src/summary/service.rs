@@ -621,6 +621,43 @@ impl SummaryService {
                                     .await
                             {
                                 error!("Failed to update meeting name for {}: {}", meeting_id, error);
+                            } else {
+                                // Keep the saved recording's metadata/audio name in step with the
+                                // AI-generated title, best effort. The folder path stays stable.
+                                let folder_path: Option<String> = sqlx::query_scalar(
+                                    "SELECT folder_path FROM meetings WHERE id = ?",
+                                )
+                                .bind(&meeting_id)
+                                .fetch_optional(&pool)
+                                .await
+                                .ok()
+                                .flatten();
+                                if let Some(folder_path) = folder_path {
+                                    match crate::audio::recordings_commands::rename_recording_on_disk(
+                                        folder_path,
+                                        name.clone(),
+                                        false,
+                                    )
+                                    .await
+                                    {
+                                        Ok(renamed) => {
+                                            if let Err(e) = sqlx::query(
+                                                "UPDATE meetings SET folder_path = ? WHERE id = ?",
+                                            )
+                                            .bind(&renamed.folder_path)
+                                            .bind(&meeting_id)
+                                            .execute(&pool)
+                                            .await
+                                            {
+                                                warn!("Summary title saved but folder path update failed for {}: {}", meeting_id, e);
+                                            }
+                                        }
+                                        Err(e) => warn!(
+                                            "Summary title saved but recording rename failed for {}: {}",
+                                            meeting_id, e
+                                        ),
+                                    }
+                                }
                             }
                         }
                         info!("Summary saved successfully for meeting_id: {}", meeting_id);

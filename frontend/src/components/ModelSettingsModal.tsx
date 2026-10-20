@@ -31,6 +31,8 @@ import {
 import { cn, isOllamaNotInstalledError } from '@/lib/utils';
 import { useI18n } from '@/contexts/I18nContext';
 import { LLM_PRESETS, applyPreset, presetForEndpoint, type LlmPreset } from '@/lib/llm-presets';
+import type { BuiltInModelInfo } from '@/lib/builtin-ai';
+import type { CustomOpenAIConfigResponse } from '@/types';
 import { toast } from 'sonner';
 
 export interface ModelConfig {
@@ -47,6 +49,14 @@ export interface ModelConfig {
   temperature?: number | null;
   topP?: number | null;
 }
+
+/**
+ * Response of `api_get_model_config`.
+ *
+ * The Rust payload carries only these five fields; the custom-OpenAI fields are
+ * filled in from `api_get_custom_openai_config` when that provider is active.
+ */
+type ModelConfigResponse = Pick<ModelConfig, 'provider' | 'model' | 'whisperModel' | 'apiKey' | 'ollamaEndpoint'>;
 
 interface OllamaModel {
   name: string;
@@ -182,7 +192,7 @@ export function ModelSettingsModal({
   const { isDownloading, getProgress, downloadingModels } = useOllamaDownload();
 
   // Built-in AI models state
-  const [builtinAiModels, setBuiltinAiModels] = useState<any[]>([]);
+  const [builtinAiModels, setBuiltinAiModels] = useState<BuiltInModelInfo[]>([]);
 
   // Cache models by endpoint to avoid refetching when reverting endpoint changes
   const modelsCache = useRef<Map<string, OllamaModel[]>>(new Map());
@@ -275,16 +285,16 @@ export function ModelSettingsModal({
       }
 
       try {
-        const data = (await invoke('api_get_model_config')) as any;
+        const data = await invoke<ModelConfigResponse>('api_get_model_config');
         if (data && data.provider !== null) {
           setModelConfig(data);
 
           // Fetch API key if not included in response and provider requires it
           if (data.provider !== 'ollama' && !data.apiKey) {
             try {
-              const apiKeyData = await invoke('api_get_api_key', {
+              const apiKeyData = await invoke<string>('api_get_api_key', {
                 provider: data.provider
-              }) as string;
+              });
               data.apiKey = apiKeyData;
               setApiKey(apiKeyData);
             } catch (err) {
@@ -302,7 +312,7 @@ export function ModelSettingsModal({
           // Fetch Custom OpenAI config if that's the active provider
           if (data.provider === 'custom-openai') {
             try {
-              const customConfig = (await invoke('api_get_custom_openai_config')) as any;
+              const customConfig = await invoke<CustomOpenAIConfigResponse | null>('api_get_custom_openai_config');
               if (customConfig) {
                 setCustomOpenAIEndpoint(customConfig.endpoint || '');
                 setCustomOpenAIModel(customConfig.model || '');
@@ -504,12 +514,12 @@ export function ModelSettingsModal({
     if (builtinAiModels.length > 0) return; // Already loaded
 
     try {
-      const data = (await invoke('builtin_ai_list_models')) as any[];
+      const data = await invoke<BuiltInModelInfo[]>('builtin_ai_list_models');
       setBuiltinAiModels(data);
 
       // Auto-select first available model if none selected
       if (data.length > 0 && !modelConfig.model) {
-        const firstAvailable = data.find((m: any) => m.status?.type === 'available');
+        const firstAvailable = data.find((m) => m.status.type === 'available');
         if (firstAvailable) {
           setModelConfig((prev: ModelConfig) => ({ ...prev, model: firstAvailable.name }));
         }
@@ -928,7 +938,7 @@ export function ModelSettingsModal({
                 own readiness here instead of borrowing the preset card. */}
             {modelConfig.provider === 'builtin-ai' && (
               <p className="text-xs text-gray-600">
-                {builtinAiModels.some((m: any) => m.status?.type === 'available')
+                {builtinAiModels.some((m) => m.status.type === 'available')
                   ? t('llm.builtinOnDevice')
                   : t('llm.builtinNeedsDownload')}
               </p>

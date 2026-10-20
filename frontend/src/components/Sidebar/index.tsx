@@ -593,14 +593,23 @@ const Sidebar: React.FC = () => {
                     <span
                       key={i}
                       role="link"
-                      tabIndex={-1}
+                      tabIndex={0}
                       onClick={(e) => {
                         e.stopPropagation();
                         const q = encodeURIComponent(searchQuery.trim());
                         const time = hit.audio_start_time !== null && hit.audio_start_time !== undefined ? `&t=${Math.floor(hit.audio_start_time)}` : '';
                         router.push(`/meeting-details?id=${encodeURIComponent(entry.meetingId as string)}${time}&q=${q}`);
                       }}
-                      className="block text-[11px] text-slate-600 bg-amber-50 hover:bg-amber-100 px-1.5 py-1 rounded border border-amber-100 line-clamp-2 cursor-pointer"
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          const q = encodeURIComponent(searchQuery.trim());
+                          const time = hit.audio_start_time !== null && hit.audio_start_time !== undefined ? '&t=' + Math.floor(hit.audio_start_time) : '';
+                          router.push('/meeting-details?id=' + encodeURIComponent(entry.meetingId as string) + time + '&q=' + q);
+                        }
+                      }}
+                      className="block text-[11px] text-slate-600 bg-amber-50 hover:bg-amber-100 focus-visible:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 px-1.5 py-1 rounded border border-amber-100 line-clamp-2 cursor-pointer"
                     >
                       <span className="font-medium text-amber-600">
                         {t(`search.source.${hit.source}`)}

@@ -54,6 +54,26 @@ interface MeetingMetadata {
 }
 
 /**
+ * Read a file as plain base64 (no `data:...;base64,` prefix).
+ *
+ * Image bytes used to be sent as a JSON number array, which inflated the IPC
+ * payload several times over and allocated a large temporary array in the
+ * renderer. A single base64 string keeps one copy of the image in flight.
+ */
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read the image"));
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
  * Render a note image.
  *
  * Images come back as data URLs from `api_read_note_image` rather than through
@@ -155,6 +175,23 @@ export function MeetingNotesEditor({
   // a reader should see the rendered result, not the raw block inputs.
   const [mode, setMode] = useState<"preview" | "edit">("preview");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Keep refs for unmount-time best-effort flush and for not clobbering edits
+  // that happened while a save request was in flight.
+  const blocksRef = useRef<NoteBlock[]>([]);
+  const dirtyRef = useRef(false);
+  const savingRef = useRef(false);
+
+  useEffect(() => {
+    blocksRef.current = blocks;
+  }, [blocks]);
+
+  useEffect(() => {
+    dirtyRef.current = dirty;
+  }, [dirty]);
+
+  useEffect(() => {
+    savingRef.current = saving;
+  }, [saving]);
 
   // Let the embedding pane show an unsaved dot next to the tab label.
   useEffect(() => {
@@ -238,15 +275,24 @@ export function MeetingNotesEditor({
 
   const handleSave = useCallback(async () => {
     if (!meetingId) return;
+    const snapshot = blocks;
     setSaving(true);
+    savingRef.current = true;
     setError(null);
     try {
       const saved = await invoke<MeetingNote>("api_save_meeting_note", {
         meetingId,
-        note: { blocks },
+        note: { blocks: snapshot },
       });
-      setBlocks(saved.blocks ?? []);
-      setDirty(false);
+      // If the user kept typing while the request was in flight, keep those newer
+      // edits and leave the note dirty instead of replacing them with the stale
+      // server response.
+      if (blocksRef.current === snapshot) {
+        setBlocks(saved.blocks ?? []);
+        setDirty(false);
+      } else {
+        setDirty(true);
+      }
       toast.success(t("notes.saved"));
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -254,10 +300,35 @@ export function MeetingNotesEditor({
       toast.error(t("notes.saveFailed"), { description: message });
     } finally {
       setSaving(false);
+      savingRef.current = false;
     }
   }, [meetingId, blocks, t]);
 
-  /** Upload image bytes; the backend writes them to the notes folder. */
+  // Debounced autosave while editing: beforeunload does not cover SPA navigation,
+  // so this is the primary guard against losing notes when switching meetings or
+  // going back to the library. It only runs when there are real unsaved edits.
+  useEffect(() => {
+    if (!meetingId || loading || saving || !dirty) return;
+    const timer = window.setTimeout(() => {
+      void handleSave();
+    }, 1200);
+    return () => window.clearTimeout(timer);
+  }, [meetingId, loading, saving, dirty, handleSave]);
+
+  // Best-effort flush on unmount (SPA navigation). Fire-and-forget; if the app is
+  // closing the beforeunload guard above still handles the reliable case.
+  useEffect(() => {
+    return () => {
+      if (meetingId && dirtyRef.current) {
+        void invoke("api_save_meeting_note", {
+          meetingId,
+          note: { blocks: blocksRef.current },
+        }).catch(() => {});
+      }
+    };
+  }, [meetingId]);
+
+  /** Upload image data; the backend decodes it and writes it to the notes folder. */
   const handleImageFiles = useCallback(
     async (files: FileList | null) => {
       if (!files || files.length === 0) return;
@@ -274,10 +345,10 @@ export function MeetingNotesEditor({
             continue;
           }
 
-          const buffer = await file.arrayBuffer();
+          const data = await readFileAsBase64(file);
           const saved = await invoke<SavedNoteImage>("api_save_note_image", {
             fileName: file.name,
-            bytes: Array.from(new Uint8Array(buffer)),
+            data,
           });
 
           added.push({ type: "image", path: saved.path, alt: file.name });

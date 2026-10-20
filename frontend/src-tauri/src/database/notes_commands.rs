@@ -129,15 +129,23 @@ fn sanitize_file_name(name: &str) -> String {
     }
 }
 
-/// Save pasted or dropped image bytes into the notes folder.
+/// Save pasted or dropped image data into the notes folder.
+///
+/// `data` is standard base64 (what `FileReader.readAsDataURL` produces, minus
+/// the `data:...;base64,` prefix). The bytes used to travel as a JSON number
+/// array, which made the IPC payload several times larger than the image and
+/// allocated a large temporary array in the renderer.
 ///
 /// Returns the absolute path to reference from a note block.
 #[tauri::command]
 pub async fn api_save_note_image<R: Runtime>(
     app: AppHandle<R>,
     file_name: String,
-    bytes: Vec<u8>,
+    data: String,
 ) -> Result<SavedNoteImage, String> {
+    let bytes = base64_decode(&data)
+        .map_err(|e| format!("Invalid base64 image data: {e}"))?;
+
     if bytes.is_empty() {
         return Err("Image data is empty".to_string());
     }
@@ -290,6 +298,71 @@ fn base64_encode(input: &[u8]) -> String {
     out
 }
 
+/// Minimal standard base64 decoder (inverse of `base64_encode`).
+///
+/// Accepts the padded standard alphabet and ignores ASCII whitespace. Invalid
+/// characters, misplaced padding and impossible lengths are reported instead of
+/// quietly producing a corrupt image file.
+fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
+    fn value(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+
+    let cleaned: Vec<u8> = input
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+
+    if cleaned.len() % 4 != 0 {
+        return Err("base64 length must be a multiple of 4".to_string());
+    }
+
+    let mut out = Vec::with_capacity(cleaned.len() / 4 * 3);
+    let quads = cleaned.len() / 4;
+
+    for (index, chunk) in cleaned.chunks(4).enumerate() {
+        let is_last = index + 1 == quads;
+        let mut values = [0u8; 4];
+        let mut padding = 0usize;
+
+        for (position, &byte) in chunk.iter().enumerate() {
+            if byte == b'=' {
+                padding += 1;
+                values[position] = 0;
+            } else if padding > 0 {
+                return Err("base64 contains data after padding".to_string());
+            } else {
+                values[position] = value(byte)
+                    .ok_or_else(|| format!("invalid base64 character: {}", byte as char))?;
+            }
+        }
+
+        if padding > 2 {
+            return Err("too much base64 padding".to_string());
+        }
+        if padding > 0 && !is_last {
+            return Err("base64 padding before the end of the input".to_string());
+        }
+
+        out.push((values[0] << 2) | (values[1] >> 4));
+        if padding < 2 {
+            out.push((values[1] << 4) | (values[2] >> 2));
+        }
+        if padding < 1 {
+            out.push((values[2] << 6) | values[3]);
+        }
+    }
+
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +386,41 @@ mod tests {
         // 256 bytes -> 344 chars including padding.
         assert_eq!(encoded.len(), 344);
         assert!(encoded.ends_with("=="));
+    }
+
+    #[test]
+    fn base64_decode_matches_known_vectors() {
+        // RFC 4648 test vectors.
+        assert_eq!(base64_decode("").unwrap(), b"");
+        assert_eq!(base64_decode("Zg==").unwrap(), b"f");
+        assert_eq!(base64_decode("Zm8=").unwrap(), b"fo");
+        assert_eq!(base64_decode("Zm9v").unwrap(), b"foo");
+        assert_eq!(base64_decode("Zm9vYg==").unwrap(), b"foob");
+        assert_eq!(base64_decode("Zm9vYmE=").unwrap(), b"fooba");
+        assert_eq!(base64_decode("Zm9vYmFy").unwrap(), b"foobar");
+    }
+
+    #[test]
+    fn base64_round_trips_arbitrary_bytes() {
+        let all: Vec<u8> = (0u8..=255).collect();
+        assert_eq!(base64_decode(&base64_encode(&all)).unwrap(), all);
+        for length in 0usize..12 {
+            let sample: Vec<u8> = (0..length).map(|index| (index * 37) as u8).collect();
+            assert_eq!(base64_decode(&base64_encode(&sample)).unwrap(), sample);
+        }
+    }
+
+    #[test]
+    fn base64_decode_ignores_whitespace() {
+        assert_eq!(base64_decode("Zm9v\nYmFy").unwrap(), b"foobar");
+    }
+
+    #[test]
+    fn base64_decode_rejects_malformed_input() {
+        assert!(base64_decode("Zm9v!").is_err());
+        assert!(base64_decode("Zm9").is_err());
+        assert!(base64_decode("Zg==Zg==").is_err());
+        assert!(base64_decode("Z===").is_err());
     }
 
     #[test]

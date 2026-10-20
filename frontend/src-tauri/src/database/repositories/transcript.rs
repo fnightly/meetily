@@ -82,6 +82,12 @@ impl TranscriptsRepository {
         Ok(meeting_id)
     }
 
+    /// How many matching transcripts one search returns.
+    ///
+    /// The library search only needs the matching meeting ids (and a snippet), so
+    /// there is no reason to stream every match of a broad query over IPC.
+    const SEARCH_RESULT_LIMIT: i64 = 200;
+
     /// Searches for a query string within the transcripts.
     /// It returns a list of matching transcripts with context.
     pub async fn search_transcripts(
@@ -98,9 +104,11 @@ impl TranscriptsRepository {
             "SELECT m.id, m.title, t.transcript, t.timestamp
              FROM meetings m
              JOIN transcripts t ON m.id = t.meeting_id
-             WHERE LOWER(t.transcript) LIKE ?",
+             WHERE LOWER(t.transcript) LIKE ?
+             LIMIT ?",
         )
         .bind(&search_query)
+        .bind(Self::SEARCH_RESULT_LIMIT)
         .fetch_all(pool)
         .await?;
 

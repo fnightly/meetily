@@ -4,6 +4,18 @@ use chrono::Utc;
 use sqlx::{Connection, Error as SqlxError, SqliteConnection, SqlitePool};
 use tracing::{error, info};
 
+/// Largest page of transcripts one request may load.
+///
+/// SQLite treats a negative LIMIT as "no limit", so an unchecked value from the
+/// interface would pull the whole table into memory. The window is clamped to
+/// this ceiling, and a zero or negative page size is clamped up to one row.
+pub const MAX_TRANSCRIPTS_PAGE_LIMIT: i64 = 1000;
+
+/// Clamp a renderer-supplied transcript page window to something bounded.
+pub fn clamp_transcript_page(limit: i64, offset: i64) -> (i64, i64) {
+    (limit.clamp(1, MAX_TRANSCRIPTS_PAGE_LIMIT), offset.max(0))
+}
+
 pub struct MeetingsRepository;
 
 impl MeetingsRepository {
@@ -142,6 +154,10 @@ impl MeetingsRepository {
             ));
         }
 
+        // Defense in depth: the command clamps too, but a direct repository caller
+        // must not be able to ask SQLite for "-1 LIMIT = everything".
+        let (limit, offset) = clamp_transcript_page(limit, offset);
+
         // Get total count of transcripts for this meeting
         let total: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM transcripts WHERE meeting_id = ?"
@@ -228,6 +244,33 @@ impl MeetingsRepository {
 
         transaction.commit().await?;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transcript_page_is_clamped_to_a_bounded_window() {
+        // A normal request is passed through unchanged.
+        assert_eq!(clamp_transcript_page(50, 0), (50, 0));
+        assert_eq!(clamp_transcript_page(1, 40), (1, 40));
+
+        // Zero/negative limits and offsets can only mean "everything"/"before the
+        // start", which must not reach SQLite as LIMIT -1.
+        assert_eq!(clamp_transcript_page(0, 0), (1, 0));
+        assert_eq!(clamp_transcript_page(-1, -5), (1, 0));
+
+        // An oversized request is capped instead of loading the whole table.
+        assert_eq!(
+            clamp_transcript_page(i64::MAX, 10),
+            (MAX_TRANSCRIPTS_PAGE_LIMIT, 10)
+        );
+        assert_eq!(
+            clamp_transcript_page(MAX_TRANSCRIPTS_PAGE_LIMIT + 1, 0),
+            (MAX_TRANSCRIPTS_PAGE_LIMIT, 0)
+        );
     }
 }
 

@@ -171,6 +171,26 @@ impl MeetingNotesRepository {
         .await?;
         Ok(count.0 > 0)
     }
+
+    /// Absolute paths of the images referenced by a meeting's note.
+    ///
+    /// Used when a meeting is deleted: the note row is removed by the database
+    /// cascade, but the image files live in the notes folder and would otherwise
+    /// be orphaned. Only image blocks carry files; text is stored in the row.
+    pub async fn image_paths(
+        pool: &SqlitePool,
+        meeting_id: &str,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        Ok(Self::get(pool, meeting_id)
+            .await?
+            .blocks
+            .into_iter()
+            .filter_map(|block| match block {
+                NoteBlock::Image { path, .. } => Some(path),
+                _ => None,
+            })
+            .collect())
+    }
 }
 
 /// Render blocks to markdown, so notes stay readable outside the app.
@@ -304,5 +324,62 @@ mod tests {
         // An unterminated image must not be silently dropped.
         let blocks = markdown_to_blocks("![alt](/tmp/a.png");
         assert_eq!(blocks, vec![NoteBlock::Text { text: "![alt](/tmp/a.png".into() }]);
+    }
+
+    #[tokio::test]
+    async fn image_paths_extracts_images_from_structured_and_markdown_notes() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory database");
+        sqlx::query(
+            "CREATE TABLE meeting_notes (
+                meeting_id TEXT PRIMARY KEY,
+                notes_markdown TEXT,
+                notes_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create meeting_notes table");
+
+        let block_note = NoteInput {
+            blocks: vec![
+                NoteBlock::Text { text: "hello".into() },
+                NoteBlock::Image { path: "/notes/images/a.png".into(), alt: "a".into() },
+            ],
+            markdown: None,
+        };
+        MeetingNotesRepository::save(&pool, "m-structured", &block_note)
+            .await
+            .expect("save note");
+
+        let structured = MeetingNotesRepository::image_paths(&pool, "m-structured")
+            .await
+            .expect("image paths");
+        assert_eq!(structured, vec!["/notes/images/a.png".to_string()]);
+
+        // A note stored only as markdown (the recovery path) still exposes images.
+        // notes_json is NULL, not "[]": a readable empty document takes precedence
+        // over the markdown fallback.
+        sqlx::query(
+            "INSERT INTO meeting_notes (meeting_id, notes_markdown, notes_json, created_at, updated_at)
+             VALUES ('m-markdown', '![b](/notes/images/b.png)', NULL, 'x', 'x')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert legacy note");
+
+        let legacy = MeetingNotesRepository::image_paths(&pool, "m-markdown")
+            .await
+            .expect("legacy image paths");
+        assert_eq!(legacy, vec!["/notes/images/b.png".to_string()]);
+
+        // A meeting without a note is not an error and yields nothing to delete.
+        assert!(MeetingNotesRepository::image_paths(&pool, "missing")
+            .await
+            .expect("missing note")
+            .is_empty());
     }
 }

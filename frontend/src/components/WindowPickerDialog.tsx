@@ -117,7 +117,7 @@ export function WindowPickerDialog({
         </div>
 
         {failed ? (
-          <div className="flex h-[260px] flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-slate-200 px-6 text-center">
+          <div role="alert" className="flex h-[260px] flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-slate-200 px-6 text-center">
             <p className="text-sm text-slate-600">{t('windowPicker.error')}</p>
             <button
               type="button"
@@ -129,7 +129,7 @@ export function WindowPickerDialog({
             </button>
           </div>
         ) : loading && windows.length === 0 ? (
-          <div className="flex h-[260px] items-center justify-center gap-2 text-sm text-slate-500">
+          <div role="status" className="flex h-[260px] items-center justify-center gap-2 text-sm text-slate-500">
             <Loader2 className="h-4 w-4 animate-spin" />
             {t('windowPicker.loading')}
           </div>
@@ -163,7 +163,7 @@ export function WindowPickerDialog({
               <div className="flex flex-col items-center justify-center gap-1 px-6 py-10 text-center">
                 <AppWindow className="h-6 w-6 text-slate-300" />
                 <p className="text-sm text-slate-600">{t('windowPicker.empty')}</p>
-                <p className="text-xs text-slate-400">{t('windowPicker.emptyHint')}</p>
+                <p className="text-xs text-slate-500">{t('windowPicker.emptyHint')}</p>
               </div>
             ) : visibleWindows.length === 0 ? (
               <p className="px-3 py-10 text-center text-sm text-slate-500">

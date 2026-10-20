@@ -134,26 +134,41 @@ function AppLayout({
       return () => document.removeEventListener('contextmenu', handleContextMenu);
     }
   }, []);
+  // Surface backend errors/warnings that no page-local listener owns. Recording
+  // errors arrive from an async manager callback (the start invoke has already
+  // returned); transcription/import warnings are the only signal that part of the
+  // audio was skipped. A fixed toast id keeps repeated warnings from stacking.
   useEffect(() => {
-    // Listen for tray recording toggle request
-    const unlisten = listen('request-recording-toggle', () => {
-      console.log('[Layout] Received request-recording-toggle from tray');
-
-      if (showOnboarding) {
-        toast.error(tr('setup.incomplete'), {
-          description: tr('setup.incompleteDetail')
+    const unlisteners: Array<Promise<UnlistenFn>> = [
+      listen<string>('recording-error', (event) => {
+        toast.error(tr('toast.recordingError'), {
+          id: 'backend-recording-error',
+          description: event.payload,
+          duration: 8000,
         });
-      } else {
-        // If in main app, forward to useRecordingStart via window event
-        console.log('[Layout] Forwarding to start-recording-from-sidebar');
-        window.dispatchEvent(new CustomEvent('start-recording-from-sidebar'));
-      }
-    });
+      }),
+      listen<string>('transcription-warning', (event) => {
+        toast.warning(tr('toast.transcriptionWarning'), {
+          id: 'backend-transcription-warning',
+          description: event.payload,
+          duration: 6000,
+        });
+      }),
+      listen<{ warning?: string; details?: string | null }>('import-warning', (event) => {
+        toast.warning(tr('toast.importWarning'), {
+          id: 'backend-import-warning',
+          description: event.payload?.details ?? event.payload?.warning,
+          duration: 8000,
+        });
+      }),
+    ];
 
     return () => {
-      unlisten.then(fn => fn());
+      unlisteners.forEach((pending) => {
+        pending.then((stop) => stop()).catch(() => {});
+      });
     };
-  }, [showOnboarding]);
+  }, []);
 
   // Handle file drop for audio import
   const handleFileDrop = useCallback((paths: string[]) => {

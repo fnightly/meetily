@@ -26,7 +26,6 @@ interface RecordingControlsProps {
   onRecordingStop: (callApi?: boolean) => void;
   onRecordingStart: () => void;
   onTranscriptReceived: (summary: SummaryResponse) => void;
-  onTranscriptionError?: (message: string) => void;
   onStopInitiated?: () => void; // Called immediately when stop button is clicked
   isRecordingDisabled: boolean;
   isParentProcessing: boolean;
@@ -43,7 +42,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   onRecordingStop,
   onRecordingStart,
   onTranscriptReceived,
-  onTranscriptionError,
   onStopInitiated,
   isRecordingDisabled,
   isParentProcessing,
@@ -329,27 +327,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
 
     const setupListeners = async () => {
       try {
-        // Transcript error listener - handles both regular and actionable errors
-        const transcriptErrorUnsubscribe = await listen('transcript-error', (event) => {
-          console.log('transcript-error event received:', event);
-          console.error('Transcription error received:', event.payload);
-          const errorMessage = event.payload as string;
-
-          console.log('Tracked transcription error:', errorMessage);
-
-          setTranscriptionErrors(prev => {
-            const newCount = prev + 1;
-            console.log('Transcription error count incremented:', newCount);
-            return newCount;
-          });
-          setIsProcessing(false);
-          console.log('Calling onRecordingStop(false) due to transcript error');
-          onRecordingStop(false);
-          if (onTranscriptionError) {
-            onTranscriptionError(errorMessage);
-          }
-        });
-
         // Transcription error listener - handles structured error objects with actionable flag
         const transcriptionErrorUnsubscribe = await listen<TranscriptionErrorPayload>('transcription-error', (event) => {
           console.log('transcription-error event received:', event);
@@ -407,7 +384,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
         });
 
         unsubscribes = [
-          transcriptErrorUnsubscribe,
           transcriptionErrorUnsubscribe,
           speechDetectedUnsubscribe,
           providerSwitchedUnsubscribe
@@ -428,7 +404,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
         }
       });
     };
-  }, [onRecordingStop, onTranscriptionError]);
+  }, [onRecordingStop]);
 
   return (
     <TooltipProvider>

@@ -86,12 +86,38 @@ impl DatabaseManager {
         log::info!("Tauri DB path: {}", tauri_db_path);
         log::info!("Legacy backend DB path: {}", backend_db_path);
 
-        // A restore staged by the previous session is swapped in before the
-        // pool opens; the replaced database is kept as a dated safety copy.
-        match crate::workspace::backup::apply_pending_restore(Path::new(&tauri_db_path)) {
-            Ok(true) => log::info!("Restored database from backup"),
-            Ok(false) => {}
-            Err(e) => log::error!("Failed to apply staged restore: {}", e),
+        // A restore staged by the previous session is swapped in before the pool
+        // opens; the replaced database is kept as a dated safety copy. Validate it
+        // first: a truncated staging file must be discarded rather than replacing a
+        // working database with something SQLite cannot open.
+        let pending_restore =
+            crate::workspace::backup::pending_restore_path(Path::new(&tauri_db_path));
+        if pending_restore.exists() {
+            match crate::workspace::backup::validate_staged_database(&pending_restore).await {
+                Ok(()) => {
+                    match crate::workspace::backup::apply_pending_restore(Path::new(
+                        &tauri_db_path,
+                    )) {
+                        Ok(true) => log::info!("Restored database from backup"),
+                        Ok(false) => {}
+                        Err(e) => log::error!("Failed to apply staged restore: {}", e),
+                    }
+                }
+                Err(error) => {
+                    log::error!(
+                        "Discarding invalid staged restore {}: {}",
+                        pending_restore.display(),
+                        error
+                    );
+                    if let Err(remove_error) = fs::remove_file(&pending_restore) {
+                        log::warn!(
+                            "Failed to remove invalid staged restore {}: {}",
+                            pending_restore.display(),
+                            remove_error
+                        );
+                    }
+                }
+            }
         }
 
         // Try to open database with defensive WAL handling

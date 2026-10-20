@@ -1,6 +1,8 @@
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
 
+use super::recording_state::MutexRecover;
+
 /// Audio buffer pool for reducing memory allocations during recording
 pub struct AudioBufferPool {
     pool: Arc<Mutex<VecDeque<Vec<f32>>>>,
@@ -20,7 +22,7 @@ impl AudioBufferPool {
 
     /// Get a buffer from the pool, or create a new one if pool is empty
     pub fn get_buffer(&self) -> Vec<f32> {
-        let mut pool = self.pool.lock().unwrap();
+        let mut pool = self.pool.lock_recover();
 
         match pool.pop_front() {
             Some(mut buffer) => {
@@ -40,7 +42,7 @@ impl AudioBufferPool {
         // Clear the buffer but keep its allocated capacity
         buffer.clear();
 
-        let mut pool = self.pool.lock().unwrap();
+        let mut pool = self.pool.lock_recover();
 
         // Only keep buffers if we haven't exceeded max pool size
         if pool.len() < self.max_size {
@@ -51,12 +53,12 @@ impl AudioBufferPool {
 
     /// Get current pool size (for monitoring)
     pub fn pool_size(&self) -> usize {
-        self.pool.lock().unwrap().len()
+        self.pool.lock_recover().len()
     }
 
     /// Clear all buffers in the pool
     pub fn clear(&self) {
-        self.pool.lock().unwrap().clear();
+        self.pool.lock_recover().clear();
     }
 }
 

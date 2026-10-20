@@ -335,7 +335,9 @@ export function SyncDialog({
                       variant="outline"
                       size="sm"
                       onClick={() =>
-                        void invoke('open_external_url', { url: result.notion.page_url })
+                        void invoke('open_external_url', { url: result.notion.page_url }).catch(
+                          (error) => console.error('Failed to open the synced page:', error),
+                        )
                       }
                     >
                       {t('sync.openPage')}

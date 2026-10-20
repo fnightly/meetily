@@ -810,7 +810,7 @@ impl AudioCapture {
         // }
 
         // Use global recording timestamp for proper synchronization
-        let timestamp = self.state.get_recording_duration().unwrap_or(0.0);
+        let timestamp = self.state.get_active_recording_duration().unwrap_or(0.0);
 
         // RAW AUDIO CHUNK: No gain applied - will be mixed and gained downstream
         // Use 48kHz if we resampled, otherwise use original rate
@@ -897,7 +897,7 @@ impl AudioCapture {
         let chunk = AudioChunk {
             data: stereo,
             sample_rate: 48_000,
-            timestamp: self.state.get_recording_duration().unwrap_or(0.0),
+            timestamp: self.state.get_active_recording_duration().unwrap_or(0.0),
             chunk_id,
             device_type: DeviceType::System,
         };
@@ -1035,6 +1035,11 @@ pub struct AudioPipeline {
     recording_channels: u16,
     /// Timestamp of the newest capture chunk, used for the window drained at stop.
     last_chunk_timestamp: f64,
+    /// Session state, consulted for the resume counter so a pause boundary can flush
+    /// the buffered partial window instead of splicing it into post-resume audio.
+    state: Arc<RecordingState>,
+    /// Resume epoch last observed by the receive loop.
+    last_resume_epoch: u64,
 }
 
 impl AudioPipeline {
@@ -1112,6 +1117,7 @@ impl AudioPipeline {
         let _ = target_chunk_duration_ms;
 
         let recording_channels = state.recording_channels();
+        let last_resume_epoch = state.resume_epoch();
         if recording_channels == 2 {
             info!("🎧 Pipeline using the stereo internal-recording path");
         }
@@ -1131,6 +1137,8 @@ impl AudioPipeline {
             recording_sender_for_mixed: None,  // Will be set by manager
             recording_channels,
             last_chunk_timestamp: 0.0,
+            state,
+            last_resume_epoch,
         })
     }
 
@@ -1249,6 +1257,12 @@ impl AudioPipeline {
                     self.processed_chunks += 1;
                     self.last_chunk_timestamp = chunk.timestamp;
 
+                    // While paused the capture path discards chunks, so the ring
+                    // buffer keeps a sub-window tail from before the pause. Flush it
+                    // as its own window now that audio resumed; mixing it with the
+                    // first post-resume audio would splice two moments together.
+                    self.flush_mix_remainder_if_resumed();
+
                     // CRITICAL: Log summary only every 200 chunks OR every 60 seconds (99.5% reduction)
                     // This eliminates I/O overhead in the audio processing hot path
                     // Use performance-optimized debug macro that compiles to nothing in release builds
@@ -1306,17 +1320,35 @@ impl AudioPipeline {
         Ok(())
     }
 
+    /// Flush the buffered partial window as its own padded window.
+    ///
+    /// Used both at stop (the receive loop only mixes complete windows) and at a
+    /// pause boundary. Stereo sessions never write mixer output to the recorder,
+    /// matching the receive loop; their drain only feeds the VAD.
+    fn flush_mix_remainder(&mut self) {
+        while let Some((mic_window, sys_window)) = self.ring_buffer.drain_remainder() {
+            let stereo_system = self.recording_channels == 2;
+            self.process_window(mic_window, sys_window, stereo_system, self.last_chunk_timestamp);
+        }
+    }
+
+    /// Flush the buffered partial window when the session resumed from a pause.
+    fn flush_mix_remainder_if_resumed(&mut self) {
+        let epoch = self.state.resume_epoch();
+        if epoch != self.last_resume_epoch {
+            self.last_resume_epoch = epoch;
+            debug!("Pause boundary: flushing the buffered partial mix window");
+            self.flush_mix_remainder();
+        }
+    }
+
     fn flush_remaining_audio(&mut self) -> Result<()> {
         info!("Flushing remaining audio from pipeline (processed {} chunks)", self.processed_chunks);
 
         // A stop can land mid-window: the receive loop above only mixes complete
         // windows, so push the remainder through the same path before the VAD is
         // flushed, otherwise up to one window of mono recording is silently lost.
-        // Stereo sessions never write mixer output to the recorder, matching the loop.
-        while let Some((mic_window, sys_window)) = self.ring_buffer.drain_remainder() {
-            let stereo_system = self.recording_channels == 2;
-            self.process_window(mic_window, sys_window, stereo_system, self.last_chunk_timestamp);
-        }
+        self.flush_mix_remainder();
 
         // Flush any remaining audio from VAD processor and send segments to transcription
         match self.vad_processor.flush() {

@@ -21,6 +21,7 @@ use super::{
     RecordingManager,
 };
 use super::device_monitor::{DeviceEvent, DeviceMonitorType};
+use super::recording_state::MutexRecover;
 
 // Import transcription modules
 use super::transcription::{
@@ -92,6 +93,37 @@ impl Drop for StoppingGuard {
     }
 }
 
+/// True between the start command beginning and the session going live.
+static IS_RECORDING_STARTING: AtomicBool = AtomicBool::new(false);
+/// A stop that arrived while starting; the start path aborts instead of going live.
+static START_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// RAII marker for the starting window.
+///
+/// Cleared on every exit path, including errors and unwinding, so a start that fails
+/// before going live cannot leave stop_recording treating the next call as a
+/// cancellation of nothing.
+struct StartingGuard;
+
+impl StartingGuard {
+    fn acquire() -> Self {
+        IS_RECORDING_STARTING.store(true, Ordering::SeqCst);
+        START_CANCELLED.store(false, Ordering::SeqCst);
+        StartingGuard
+    }
+
+    fn cancelled(&self) -> bool {
+        START_CANCELLED.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for StartingGuard {
+    fn drop(&mut self) {
+        IS_RECORDING_STARTING.store(false, Ordering::SeqCst);
+        START_CANCELLED.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Shared start-path finalize. Both start commands MUST call this so a new
 /// start path can't silently ship with a per-session flag left unreset (e.g.
 /// the mic-recovery budget already exhausted).
@@ -153,7 +185,7 @@ impl Drop for FinalizingGuard {
 
 /// Id of the live recording session, if any.
 pub fn current_session_id() -> Option<String> {
-    ACTIVE_SESSION.lock().unwrap().as_ref().map(|s| s.id.clone())
+    ACTIVE_SESSION.lock_recover().as_ref().map(|s| s.id.clone())
 }
 
 /// True when `session_id` is the live recording (not one finishing in the background).
@@ -221,7 +253,7 @@ fn start_session_transcription<R: Runtime>(
         })
     };
 
-    *ACTIVE_SESSION.lock().unwrap() = Some(SessionTranscripts {
+    *ACTIVE_SESSION.lock_recover() = Some(SessionTranscripts {
         id: session_id.clone(),
         listener_id,
         late,
@@ -234,7 +266,7 @@ fn start_session_transcription<R: Runtime>(
         defer_transcription,
         session_id.clone(),
     );
-    *TRANSCRIPTION_TASK.lock().unwrap() = Some(task_handle);
+    *TRANSCRIPTION_TASK.lock_recover() = Some(task_handle);
 
     info!("✅ Recording session {} transcription started", session_id);
 }
@@ -439,6 +471,70 @@ async fn prepare_audio_for_recording(
 // RECORDING COMMANDS
 // ============================================================================
 
+/// Forward capture-thread levels to a normal task that owns the Tauri emit.
+///
+/// The level callback runs on the cpal capture thread (the audio thread on Windows).
+/// Building and emitting a Tauri JSON event there means a busy or slow WebView can
+/// stall audio capture. The callback now only allocates one update and does a
+/// non-blocking try_send; a bounded channel drops stale frames under backpressure
+/// instead of blocking, and the spawned task emits each one in order.
+fn install_level_emitter<R: Runtime>(manager: &RecordingManager, app: AppHandle<R>) {
+    let (sender, mut receiver) =
+        tokio::sync::mpsc::channel::<super::level_monitor::AudioLevelUpdate>(4);
+
+    manager.set_level_callback(move |device_name, device_type, rms, peak| {
+        let update = super::level_monitor::AudioLevelUpdate {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or(0),
+            levels: vec![super::level_monitor::AudioLevelData {
+                device_name: device_name.to_string(),
+                device_type: device_type.to_string(),
+                rms_level: rms,
+                peak_level: peak,
+                // Far below speech: this only has to separate a device that is
+                // delivering something from one that is muted or disconnected.
+                is_active: rms > 0.001,
+            }],
+        };
+        // A full channel means the UI is behind; dropping a frame is better than
+        // blocking the audio callback.
+        let _ = sender.try_send(update);
+    });
+
+    tauri::async_runtime::spawn(async move {
+        while let Some(update) = receiver.recv().await {
+            let _ = app.emit("audio-levels", update);
+        }
+    });
+}
+
+/// Undo a start that was cancelled after its manager was published but before
+/// the session went live.
+async fn abort_cancelled_start<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    warn!("Recording start cancelled before the session went live; tearing capture down");
+    let manager = RECORDING_MANAGER.lock_recover().take();
+    if let Some(mut manager) = manager {
+        if let Err(e) = manager.stop_streams_and_force_flush().await {
+            error!("Failed to tear down a cancelled recording start: {}", e);
+        }
+    }
+    IS_RECORDING.store(false, Ordering::SeqCst);
+    // recording-starting may already have reached the frontend; reuse the stop
+    // event so it leaves STARTING instead of waiting for a session that never comes.
+    let _ = app.emit("recording-stopped", serde_json::json!({
+        "message": "Recording start cancelled",
+        "folder_path": serde_json::Value::Null,
+        "meeting_name": serde_json::Value::Null,
+        "transcription_deferred": false,
+        "session_id": current_session_id(),
+        "finalizing_in_background": false
+    }));
+    crate::tray::update_tray_menu(app);
+    Err("Recording start cancelled".to_string())
+}
+
 /// Start recording with default devices
 pub async fn start_recording<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     start_recording_with_meeting_name(app, None).await
@@ -462,6 +558,10 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     if current_recording_state {
         return Err("Recording already in progress".to_string());
     }
+
+    // From here until finalize_recording_start a stop request cancels this start
+    // instead of being ignored while model validation runs.
+    let starting_guard = StartingGuard::acquire();
 
     if let Err(error) = crate::ensure_onnx_runtime_available() {
         return Err(map_recording_start_error(
@@ -605,6 +705,12 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     crate::audio::transcription::residency::touch();
     info!("✅ Transcription model validation passed");
 
+    // A stop may have arrived during model validation (the slowest part of startup).
+    if starting_guard.cancelled() {
+        info!("Recording start cancelled during model validation");
+        return Err("Recording start cancelled".to_string());
+    }
+
     // Notify frontend that startup has begun (surfaces STARTING state)
     app.emit("recording-starting", serde_json::json!({
         "message": "Recording initialization started"
@@ -641,29 +747,8 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         let _ = app_for_error.emit("recording-error", error.user_message());
     });
 
-    // Publish each device's measured level as the `audio-levels` event the interface
-    // already listens for. Devices report through this callback one at a time, so
-    // each is forwarded as its own update rather than being batched; the capture side
-    // throttles to something an eye can follow.
-    let app_for_levels = app.clone();
-    manager.set_level_callback(move |device_name, device_type, rms, peak| {
-        let update = super::level_monitor::AudioLevelUpdate {
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_millis() as u64)
-                .unwrap_or(0),
-            levels: vec![super::level_monitor::AudioLevelData {
-                device_name: device_name.to_string(),
-                device_type: device_type.to_string(),
-                rms_level: rms,
-                peak_level: peak,
-                // Far below speech: this only has to separate a device that is
-                // delivering something from one that is muted or disconnected.
-                is_active: rms > 0.001,
-            }],
-        };
-        let _ = app_for_levels.emit("audio-levels", update);
-    });
+    // Levels are emitted off the capture thread; see install_level_emitter.
+    install_level_emitter(&manager, app.clone());
 
     // The capture pipeline reads these when it builds the microphone stream, so they
     // have to be in place before recording starts.
@@ -686,6 +771,16 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         .await
         .map_err(|error| map_recording_start_error(&app, error))?;
 
+    // A stop can arrive while capture is starting too: tear the fresh capture down
+    // before it is published as a session.
+    if starting_guard.cancelled() {
+        warn!("Recording start cancelled during capture startup; tearing capture down");
+        if let Err(e) = manager.stop_streams_and_force_flush().await {
+            error!("Failed to stop capture after a cancelled start: {}", e);
+        }
+        return Err("Recording start cancelled".to_string());
+    }
+
     // Take the device event receiver BEFORE storing manager globally.
     // A background task will process device events (hot-swap) without frontend polling.
     let device_event_receiver = manager.take_device_event_receiver();
@@ -695,7 +790,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     // Store the manager globally to keep it alive
     {
-        let mut global_manager = RECORDING_MANAGER.lock().unwrap();
+        let mut global_manager = RECORDING_MANAGER.lock_recover();
         *global_manager = Some(manager);
     }
 
@@ -706,6 +801,9 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     // Flip recording live + reset per-session flags (speech-detected latch,
     // mic-recovery budget). Shared with the other start path — see helper.
+    if starting_guard.cancelled() {
+        return abort_cancelled_start(&app).await;
+    }
     finalize_recording_start();
     drop(engine_lifecycle_guard);
 
@@ -766,6 +864,10 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     if current_recording_state {
         return Err("Recording already in progress".to_string());
     }
+
+    // From here until finalize_recording_start a stop request cancels this start
+    // instead of being ignored while model validation runs.
+    let starting_guard = StartingGuard::acquire();
 
     if let Err(error) = crate::ensure_onnx_runtime_available() {
         return Err(map_recording_start_error(
@@ -926,6 +1028,12 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     crate::audio::transcription::residency::touch();
     info!("✅ Transcription model validation passed");
 
+    // A stop may have arrived during model validation (the slowest part of startup).
+    if starting_guard.cancelled() {
+        info!("Recording start cancelled during model validation");
+        return Err("Recording start cancelled".to_string());
+    }
+
     // Notify frontend that startup has begun (surfaces STARTING state)
     app.emit("recording-starting", serde_json::json!({
         "message": "Recording initialization started"
@@ -962,29 +1070,8 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         let _ = app_for_error.emit("recording-error", error.user_message());
     });
 
-    // Publish each device's measured level as the `audio-levels` event the interface
-    // already listens for. Devices report through this callback one at a time, so
-    // each is forwarded as its own update rather than being batched; the capture side
-    // throttles to something an eye can follow.
-    let app_for_levels = app.clone();
-    manager.set_level_callback(move |device_name, device_type, rms, peak| {
-        let update = super::level_monitor::AudioLevelUpdate {
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_millis() as u64)
-                .unwrap_or(0),
-            levels: vec![super::level_monitor::AudioLevelData {
-                device_name: device_name.to_string(),
-                device_type: device_type.to_string(),
-                rms_level: rms,
-                peak_level: peak,
-                // Far below speech: this only has to separate a device that is
-                // delivering something from one that is muted or disconnected.
-                is_active: rms > 0.001,
-            }],
-        };
-        let _ = app_for_levels.emit("audio-levels", update);
-    });
+    // Levels are emitted off the capture thread; see install_level_emitter.
+    install_level_emitter(&manager, app.clone());
 
     // The capture pipeline reads these when it builds the microphone stream, so they
     // have to be in place before recording starts.
@@ -1015,6 +1102,16 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         .await
         .map_err(|error| map_recording_start_error(&app, error))?;
 
+    // A stop can arrive while capture is starting too: tear the fresh capture down
+    // before it is published as a session.
+    if starting_guard.cancelled() {
+        warn!("Recording start cancelled during capture startup; tearing capture down");
+        if let Err(e) = manager.stop_streams_and_force_flush().await {
+            error!("Failed to stop capture after a cancelled start: {}", e);
+        }
+        return Err("Recording start cancelled".to_string());
+    }
+
     // Take the device event receiver BEFORE storing manager globally.
     // A background task will process device events (hot-swap) without frontend polling.
     let device_event_receiver = manager.take_device_event_receiver();
@@ -1024,7 +1121,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     // Store the manager globally to keep it alive
     {
-        let mut global_manager = RECORDING_MANAGER.lock().unwrap();
+        let mut global_manager = RECORDING_MANAGER.lock_recover();
         *global_manager = Some(manager);
     }
 
@@ -1035,6 +1132,9 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     // Flip recording live + reset per-session flags (speech-detected latch,
     // mic-recovery budget). Shared with the other start path — see helper.
+    if starting_guard.cancelled() {
+        return abort_cancelled_start(&app).await;
+    }
     finalize_recording_start();
     drop(engine_lifecycle_guard);
 
@@ -1102,10 +1202,20 @@ pub async fn stop_recording<R: Runtime>(
 ) -> Result<(), String> {
     info!("🛑 Stopping capture; transcription and saving continue in the background");
 
-    // Check if recording is active
+    // A stop while the start path is still validating/starting is not a no-op:
+    // flag the start for cancellation so it tears capture down instead of going live.
+    // If the start won the race and is already live, fall through to the normal stop.
     if !IS_RECORDING.load(Ordering::SeqCst) {
-        info!("Recording was not active");
-        return Ok(());
+        if !IS_RECORDING_STARTING.load(Ordering::SeqCst) {
+            info!("Recording was not active");
+            return Ok(());
+        }
+        START_CANCELLED.store(true, Ordering::SeqCst);
+        if !IS_RECORDING.load(Ordering::SeqCst) {
+            info!("Recording start cancelled before it went live");
+            return Ok(());
+        }
+        info!("Stop raced with start completion; stopping the live session");
     }
 
     // Mark the stop as in progress so a mic-disconnect fallback that was queued
@@ -1129,13 +1239,13 @@ pub async fn stop_recording<R: Runtime>(
     // Detach the transcript collection before the manager is taken: segments that
     // arrive from here on are buffered for the finalizer rather than looked up on
     // a manager that is gone or already belongs to the next recording.
-    let session = ACTIVE_SESSION.lock().unwrap().take();
+    let session = ACTIVE_SESSION.lock_recover().take();
     if let Some(session) = session.as_ref() {
         session.detached.store(true, Ordering::SeqCst);
     }
 
-    let mut manager = RECORDING_MANAGER.lock().unwrap().take();
-    let transcription_task = TRANSCRIPTION_TASK.lock().unwrap().take();
+    let mut manager = RECORDING_MANAGER.lock_recover().take();
+    let transcription_task = TRANSCRIPTION_TASK.lock_recover().take();
 
     // Hold the speech model until the drain finishes. IS_RECORDING goes false
     // below, and without this the idle reaper or an engine switch for the next
@@ -1275,9 +1385,13 @@ async fn finalize_stopped_session<R: Runtime>(app: AppHandle<R>, stopped: Stoppe
         // `unload_model` waits on its read guard, so the model cannot vanish under it.
         let abort_handle = task_handle.abort_handle();
 
-        // Wait up to 10 minutes for transcription completion to prevent indefinite hangs
+        // Two minutes is deliberately shorter than the old ten: this wait happens
+        // while FINALIZE_QUEUE is held, so a pathological backlog used to delay every
+        // later session's save by up to ten minutes. A live session drains far faster
+        // than that; if this fires the task is aborted below and the remaining chunks
+        // are reported missing, exactly as before.
         match tokio::time::timeout(
-            tokio::time::Duration::from_secs(600), // 10 minutes max
+            tokio::time::Duration::from_secs(120), // 2 minutes max
             task_handle,
         )
         .await
@@ -1290,7 +1404,7 @@ async fn finalize_stopped_session<R: Runtime>(app: AppHandle<R>, stopped: Stoppe
                 // Continue anyway - the worker may have processed most chunks
             }
             Err(_) => {
-                warn!("⏱️ Transcription timeout (10 minutes) reached; aborting the remaining task so it cannot run against a released model");
+                warn!("⏱️ Transcription timeout (2 minutes) reached; aborting the remaining task so it cannot run against a released model");
                 abort_handle.abort();
             }
         }
@@ -1303,7 +1417,7 @@ async fn finalize_stopped_session<R: Runtime>(app: AppHandle<R>, stopped: Stoppe
     if let Some(session) = session {
         use tauri::Listener;
         app.unlisten(session.listener_id);
-        let late = std::mem::take(&mut *session.late.lock().unwrap());
+        let late = std::mem::take(&mut *session.late.lock_recover());
         if let Some(manager) = manager.as_ref() {
             info!("Adding {} late transcript segments to session {}", late.len(), session_id);
             for segment in late {
@@ -1443,7 +1557,7 @@ pub async fn pause_recording<R: Runtime>(app: AppHandle<R>) -> Result<(), String
     }
 
     // Access the recording manager and pause it
-    let manager_guard = RECORDING_MANAGER.lock().unwrap();
+    let manager_guard = RECORDING_MANAGER.lock_recover();
     if let Some(manager) = manager_guard.as_ref() {
         manager.pause_recording().map_err(|e| e.to_string())?;
 
@@ -1477,7 +1591,7 @@ pub async fn resume_recording<R: Runtime>(app: AppHandle<R>) -> Result<(), Strin
     }
 
     // Access the recording manager and resume it
-    let manager_guard = RECORDING_MANAGER.lock().unwrap();
+    let manager_guard = RECORDING_MANAGER.lock_recover();
     if let Some(manager) = manager_guard.as_ref() {
         manager.resume_recording().map_err(|e| e.to_string())?;
 
@@ -1503,7 +1617,7 @@ pub async fn resume_recording<R: Runtime>(app: AppHandle<R>) -> Result<(), Strin
 /// Check if recording is currently paused
 #[tauri::command]
 pub async fn is_recording_paused() -> bool {
-    let manager_guard = RECORDING_MANAGER.lock().unwrap();
+    let manager_guard = RECORDING_MANAGER.lock_recover();
     if let Some(manager) = manager_guard.as_ref() {
         manager.is_paused()
     } else {
@@ -1518,7 +1632,7 @@ pub async fn get_recording_state() -> serde_json::Value {
     // Read before taking the manager lock so the two are never held together.
     let session_id = current_session_id();
     let finalizing = pending_finalization_count();
-    let manager_guard = RECORDING_MANAGER.lock().unwrap();
+    let manager_guard = RECORDING_MANAGER.lock_recover();
 
     if let Some(manager) = manager_guard.as_ref() {
         serde_json::json!({
@@ -1551,7 +1665,7 @@ pub async fn get_recording_state() -> serde_json::Value {
 /// Returns the path if a meeting name was set and folder structure initialized
 #[tauri::command]
 pub async fn get_meeting_folder_path() -> Result<Option<String>, String> {
-    let manager_guard = RECORDING_MANAGER.lock().unwrap();
+    let manager_guard = RECORDING_MANAGER.lock_recover();
     if let Some(manager) = manager_guard.as_ref() {
         Ok(manager.get_meeting_folder().map(|p| p.to_string_lossy().to_string()))
     } else {
@@ -1563,7 +1677,7 @@ pub async fn get_meeting_folder_path() -> Result<Option<String>, String> {
 /// Used for syncing frontend state after page reload during active recording
 #[tauri::command]
 pub async fn get_transcript_history() -> Result<Vec<crate::audio::recording_saver::TranscriptSegment>, String> {
-    let manager_guard = RECORDING_MANAGER.lock().unwrap();
+    let manager_guard = RECORDING_MANAGER.lock_recover();
 
     if let Some(manager) = manager_guard.as_ref() {
         Ok(manager.get_transcript_segments())
@@ -1576,7 +1690,7 @@ pub async fn get_transcript_history() -> Result<Vec<crate::audio::recording_save
 /// Used for syncing frontend state after page reload during active recording
 #[tauri::command]
 pub async fn get_recording_meeting_name() -> Result<Option<String>, String> {
-    let manager_guard = RECORDING_MANAGER.lock().unwrap();
+    let manager_guard = RECORDING_MANAGER.lock_recover();
 
     if let Some(manager) = manager_guard.as_ref() {
         Ok(manager.get_meeting_name())
@@ -1665,7 +1779,7 @@ async fn perform_mic_hot_swap_task<R: Runtime>(
 async fn do_mic_swap(device_name: &str, session: &Arc<super::RecordingState>) -> Result<(), String> {
     // Phase 1: Lock briefly — verify identity, take old stream OUT (no teardown under lock)
     let old_mic = {
-        let mut guard = RECORDING_MANAGER.lock().unwrap();
+        let mut guard = RECORDING_MANAGER.lock_recover();
         let manager = guard.as_mut().ok_or_else(|| "Recording manager not available".to_string())?;
         if !manager.is_recording() {
             return Err("Recording stopped — aborting mic hot-swap".to_string());
@@ -1716,7 +1830,7 @@ async fn do_mic_swap(device_name: &str, session: &Arc<super::RecordingState>) ->
 
     // Phase 3: Lock briefly — install ONLY if still the same session
     {
-        let mut guard = RECORDING_MANAGER.lock().unwrap();
+        let mut guard = RECORDING_MANAGER.lock_recover();
         match guard.as_mut() {
             Some(manager) if Arc::ptr_eq(manager.get_state(), session) => {
                 manager.set_mic_stream_after_swap(new_stream, device_arc, system_name);

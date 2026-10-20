@@ -8,7 +8,9 @@ use crate::{
     database::{
         models::MeetingModel,
         repositories::{
-            meeting::MeetingsRepository, setting::SettingsRepository,
+            meeting::{clamp_transcript_page, MeetingsRepository},
+            meeting_notes::MeetingNotesRepository,
+            setting::SettingsRepository,
             transcript::TranscriptsRepository,
         },
     },
@@ -756,9 +758,36 @@ pub async fn api_delete_api_key<R: Runtime>(
     }
 }
 
+/// Best-effort removal of a deleted meeting's recording folder.
+///
+/// Only a folder that still looks like a recording (metadata.json present) is
+/// removed, so a stale or crafted folder_path cannot delete an unrelated
+/// directory. A failure is logged and ignored: the database row is already gone,
+/// and disk cleanup must not turn a successful delete into an error.
+fn remove_meeting_recording_folder(folder_path: &str) {
+    let path = std::path::Path::new(folder_path);
+
+    if !path.is_dir() || !crate::audio::recordings::is_recording_folder(path) {
+        log_warn!(
+            "Not removing meeting folder (no longer a recording folder): {}",
+            folder_path
+        );
+        return;
+    }
+
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => log_info!("Removed meeting recording folder {}", folder_path),
+        Err(e) => log_warn!(
+            "Failed to remove meeting recording folder {}: {}",
+            folder_path,
+            e
+        ),
+    }
+}
+
 #[tauri::command]
 pub async fn api_delete_meeting<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     meeting_id: String,
     auth_token: Option<String>,
@@ -771,9 +800,59 @@ pub async fn api_delete_meeting<R: Runtime>(
 
     let pool = state.db_manager.pool();
 
+    // Collect what lives on disk before the rows disappear: the folder comes from
+    // the meeting row and the image paths from the note, and both are deleted
+    // below. A read failure here only means "nothing extra to clean up".
+    let folder_path = match sqlx::query_scalar::<_, Option<String>>(
+        "SELECT folder_path FROM meetings WHERE id = ?",
+    )
+    .bind(&meeting_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(row) => row.flatten(),
+        Err(e) => {
+            log_warn!("Could not read the meeting folder before deleting: {}", e);
+            None
+        }
+    };
+    let note_images = match MeetingNotesRepository::image_paths(pool, &meeting_id).await {
+        Ok(paths) => paths,
+        Err(e) => {
+            log_warn!(
+                "Could not read the meeting's note images before deleting: {}",
+                e
+            );
+            Vec::new()
+        }
+    };
+
     match MeetingsRepository::delete_meeting(pool, &meeting_id).await {
         Ok(true) => {
             log_info!("Successfully deleted meeting {}", meeting_id);
+
+            // Best effort: the row is committed as deleted, so disk cleanup
+            // failures are logged rather than reported as a failed deletion.
+            if let Some(folder_path) = folder_path {
+                remove_meeting_recording_folder(&folder_path);
+            }
+            for image_path in note_images {
+                match crate::database::notes_commands::api_delete_note_image(
+                    app.clone(),
+                    image_path.clone(),
+                )
+                .await
+                {
+                    Ok(true) => log_info!("Deleted meeting note image {}", image_path),
+                    Ok(false) => {}
+                    Err(e) => log_warn!(
+                        "Failed to delete meeting note image {}: {}",
+                        image_path,
+                        e
+                    ),
+                }
+            }
+
             Ok(serde_json::json!({
                 "status": "success",
                 "message": "Meeting deleted successfully"
@@ -872,6 +951,10 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
         limit,
         offset
     );
+
+    // SQLite reads a negative LIMIT as "no limit"; clamp before the query so a
+    // bad call cannot load the whole transcript table into memory.
+    let (limit, offset) = clamp_transcript_page(limit, offset);
 
     let pool = state.db_manager.pool();
 
@@ -1629,5 +1712,45 @@ mod external_url_tests {
         assert!(validate_external_url("   ").is_err());
         assert!(validate_external_url("example.com").is_err());
         assert!(validate_external_url("/etc/passwd").is_err());
+    }
+}
+
+#[cfg(test)]
+mod meeting_delete_tests {
+    use super::remove_meeting_recording_folder;
+
+    fn recording_folder(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let folder = root.join(name);
+        std::fs::create_dir_all(&folder).expect("create folder");
+        std::fs::write(
+            folder.join(crate::audio::recordings::METADATA_FILE),
+            r#"{"version":"1.0","status":"completed"}"#,
+        )
+        .expect("write metadata");
+        std::fs::write(folder.join("audio.m4a"), b"audio").expect("write audio");
+        folder
+    }
+
+    #[test]
+    fn removes_the_recording_folder_of_a_deleted_meeting() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let folder = recording_folder(tmp.path(), "Meeting_2026-01-01_10-00");
+
+        remove_meeting_recording_folder(&folder.to_string_lossy());
+
+        assert!(!folder.exists(), "the deleted meeting's folder must be gone");
+    }
+
+    #[test]
+    fn leaves_a_folder_that_is_no_longer_a_recording() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plain = tmp.path().join("unrelated");
+        std::fs::create_dir_all(&plain).expect("create");
+        std::fs::write(plain.join("keep.txt"), b"x").expect("write");
+
+        remove_meeting_recording_folder(&plain.to_string_lossy());
+
+        assert!(plain.is_dir(), "an unrelated folder must not be removed");
+        assert!(plain.join("keep.txt").is_file());
     }
 }

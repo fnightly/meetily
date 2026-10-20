@@ -1,8 +1,9 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { Suspense, useState, useEffect } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { Settings2, Mic, Database as DatabaseIcon, SparkleIcon, FlaskConical, BookA, Archive, Share2 } from 'lucide-react';
-import { invoke } from '@tauri-apps/api/core';
+import { configService } from '@/services/configService';
 import { TranscriptSettings } from '@/components/TranscriptSettings';
 import { RecordingSettings } from '@/components/RecordingSettings';
 import { PreferenceSettings } from '@/components/PreferenceSettings';
@@ -31,27 +32,29 @@ const TABS = [
   { value: 'beta', labelKey: 'settings.tabs.beta', icon: FlaskConical }
 ] as const;
 
-export default function SettingsPage() {
+function SettingsContent() {
   const { transcriptModelConfig, setTranscriptModelConfig } = useConfig();
   const { t, locale, setLocale } = useI18n();
+  const searchParams = useSearchParams();
 
   // Animation state for tabs
   const [activeTab, setActiveTab] = useState('general');
 
   // Deep link from the sync dialog's "Open settings" button, so an unconfigured
-  // Notion target lands on the panel that fixes it instead of on General.
+  // Notion target lands on the panel that fixes it instead of on General. Also
+  // follows later in-app query changes while the page stays mounted.
+  const requestedTab = searchParams.get('tab');
   useEffect(() => {
-    const requested = new URLSearchParams(window.location.search).get('tab');
-    if (requested && TABS.some((tab) => tab.value === requested)) {
-      setActiveTab(requested);
+    if (requestedTab && TABS.some((tab) => tab.value === requestedTab)) {
+      setActiveTab(requestedTab);
     }
-  }, []);
+  }, [requestedTab]);
 
   // Load saved transcript configuration on mount
   useEffect(() => {
     const loadTranscriptConfig = async () => {
       try {
-        const config = await invoke('api_get_transcript_config') as any;
+        const config = await configService.getTranscriptConfig();
         if (config) {
           console.log('Loaded saved transcript config:', config);
           setTranscriptModelConfig({
@@ -161,4 +164,13 @@ export default function SettingsPage() {
       </div>
     </div>
   );
-};
+}
+
+export default function SettingsPage() {
+  // `useSearchParams` must sit inside a Suspense boundary for static export.
+  return (
+    <Suspense fallback={null}>
+      <SettingsContent />
+    </Suspense>
+  );
+}

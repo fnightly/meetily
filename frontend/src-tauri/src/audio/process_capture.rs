@@ -454,11 +454,22 @@ mod layout_probe {
             let cb_size = *(base.add(8) as *const u32);
             let data = *(base.add(16) as *const *const u8);
 
-            println!("vt={vt} cbSize={cb_size} data_is_params={}", data == &p as *const _ as *const u8);
+            println!("vt={vt} cbSize={cb_size}");
 
             assert_eq!(vt, 65, "vt should be VT_BLOB(65)");
             assert_eq!(cb_size as usize, std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>());
-            assert_eq!(data, &p as *const _ as *const u8, "blob must point at the params");
+            assert_ne!(
+                data,
+                &p as *const _ as *const u8,
+                "blob must be heap-owned, not a stack pointer"
+            );
+            let actual = std::slice::from_raw_parts(data, cb_size as usize);
+            let expected = std::slice::from_raw_parts(
+                &p as *const AUDIOCLIENT_ACTIVATION_PARAMS as *const u8,
+                cb_size as usize,
+            );
+            assert_eq!(actual, expected, "blob bytes must equal the activation params");
+
         }
     }
 }

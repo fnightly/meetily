@@ -254,9 +254,9 @@ export function SummaryPanel({
       {/* Top-level actions — always visible, same pattern as TranscriptPanel */}
       <div className="px-4 py-2.5 border-b border-slate-200">
         <div className="flex items-center justify-between w-full min-w-0 gap-2 flex-wrap">
-          <h2 className="text-sm font-semibold text-slate-900 whitespace-nowrap flex items-center gap-1.5">
-            <Sparkles className="h-4 w-4 text-violet-500" />{t('meeting.summaryPane')}
-          </h2>
+          <div aria-hidden="true" className="text-sm font-semibold text-slate-900 whitespace-nowrap flex items-center gap-1.5">
+            <Sparkles className="h-4 w-4 text-violet-500" />
+          </div>
           <div className="flex items-center gap-2 flex-wrap justify-end min-w-0">
           <div className="flex-shrink-0 min-w-0">
             <SummaryGeneratorButtonGroup
