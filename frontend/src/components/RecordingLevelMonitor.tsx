@@ -169,23 +169,23 @@ export function RecordingLevelMonitor({ active, className = '' }: RecordingLevel
   return (
     <div className={`space-y-2 ${className}`}>
       {(captureMicrophone || captureSystemAudio) && (
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-600">
-          <span className="font-medium text-slate-500">{tr('live.sources')}</span>
+        <div className="flex flex-wrap items-center gap-2 rounded-xl bg-slate-50/80 border border-slate-100 px-2.5 py-2">
+          <span className="text-[10px] font-medium uppercase tracking-[0.08em] text-slate-400">{tr('live.sources')}</span>
           {captureMicrophone && (
-            <span className="inline-flex items-center gap-1 min-w-0">
-              <Mic className="w-3 h-3 shrink-0 text-gray-500" />
-              <span className="truncate" title={micName}>{micName}</span>
-              <span className="inline-flex items-center gap-1 shrink-0 text-slate-400">
+            <span className="inline-flex min-w-0 items-center gap-1.5 rounded-full border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700 shadow-sm">
+              <Mic className="h-3 w-3 shrink-0 text-slate-400" />
+              <span className="max-w-[11rem] truncate" title={micName}>{micName}</span>
+              <span className="inline-flex shrink-0 items-center gap-1 text-[10px] text-slate-500">
                 <span className={`h-1.5 w-1.5 rounded-full ${micStatus.dot}`} />
                 {micStatus.label}
               </span>
             </span>
           )}
           {captureSystemAudio && (
-            <span className="inline-flex items-center gap-1 min-w-0">
-              <MonitorSpeaker className="w-3 h-3 shrink-0 text-gray-500" />
-              <span className="truncate" title={systemName}>{systemName}</span>
-              <span className="inline-flex items-center gap-1 shrink-0 text-slate-400">
+            <span className="inline-flex min-w-0 items-center gap-1.5 rounded-full border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700 shadow-sm">
+              <MonitorSpeaker className="h-3 w-3 shrink-0 text-slate-400" />
+              <span className="max-w-[11rem] truncate" title={systemName}>{systemName}</span>
+              <span className="inline-flex shrink-0 items-center gap-1 text-[10px] text-slate-500">
                 <span className={`h-1.5 w-1.5 rounded-full ${systemStatus.dot}`} />
                 {systemStatus.label}
               </span>
@@ -219,7 +219,7 @@ export function RecordingLevelMonitor({ active, className = '' }: RecordingLevel
 
       {warning && (
         <div
-          className={`flex items-start gap-2 p-2 rounded border text-xs ${
+          className={`mt-1 flex items-start gap-2 rounded-lg border px-2.5 py-2 text-[11px] leading-relaxed ${
             diagnosis?.verdict === 'clipping'
               ? 'bg-red-50 border-red-200 text-red-900'
               : 'bg-amber-50 border-amber-200 text-amber-900'
@@ -265,8 +265,8 @@ function LevelBar({ sample }: { sample: LevelSample }) {
   const dbLabel = formatDbfs(rmsDb);
 
   return (
-    <div className="flex items-center gap-2">
-      <span className="text-[10px] text-gray-500 w-24 truncate" title={sample.device_name}>
+    <div className="flex items-center gap-2 py-0.5">
+      <span className="w-28 truncate text-[10px] text-slate-500" title={sample.device_name}>
         {sample.device_name}
       </span>
       <div
@@ -276,20 +276,20 @@ function LevelBar({ sample }: { sample: LevelSample }) {
         aria-valuemax={0}
         aria-valuenow={Number.isFinite(rmsDb) ? Math.max(-60, Math.round(rmsDb)) : -60}
         aria-valuetext={dbLabel}
-        className="flex-1 h-2 bg-gray-200 rounded-sm overflow-hidden relative"
+        className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-slate-100 shadow-[inset_0_1px_2px_rgba(15,23,42,0.08)]"
       >
         <div
-          className={`h-full ${colour} transition-[width,background-color] duration-150 ease-out`}
+          className={`h-full rounded-full ${colour} transition-[width,background-color] duration-150 ease-out`}
           style={{ width: `${rmsPercent}%` }}
         />
         {peakPercent > rmsPercent && (
           <div
-            className="absolute top-0 bottom-0 w-0.5 bg-gray-700/60"
+            className="absolute bottom-0 top-0 w-0.5 rounded-full bg-slate-600/70"
             style={{ left: `${peakPercent}%` }}
           />
         )}
       </div>
-      <span className="text-[10px] font-mono text-gray-500 w-[4.5rem] text-right">{dbLabel}</span>
+      <span className="w-14 text-right font-mono text-[10px] tabular-nums text-slate-500">{dbLabel}</span>
     </div>
   );
 }

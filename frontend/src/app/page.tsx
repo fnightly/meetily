@@ -291,7 +291,7 @@ export default function Home() {
                 }}
               >
                 <div className="w-2/3 max-w-[750px] flex justify-center">
-                  <div className="bg-white/95 backdrop-blur rounded-full border border-slate-200 shadow-[0_12px_32px_-12px_rgba(15,23,42,0.25)] flex items-center">
+                  <div className="bg-white/95 backdrop-blur rounded-[28px] border border-slate-200 shadow-[0_12px_32px_-12px_rgba(15,23,42,0.25)] p-2">
                     <RecordingControls
                       isRecording={recordingState.isRecording}
                       onRecordingStop={(callApi = true) => handleRecordingStop(callApi)}

@@ -381,7 +381,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   return (
     <TooltipProvider>
       <div className="flex flex-col space-y-2">
-        <div className="flex items-center space-x-2 bg-white rounded-full shadow-lg px-4 py-2">
+        <div className="flex items-center justify-center gap-2 px-2 py-1.5">
           {isProcessing && !isParentProcessing ? (
             <div className="flex items-center space-x-2">
               <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-gray-900"></div>
@@ -526,7 +526,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                       still matters, rather than after the meeting. */}
                   <RecordingLevelMonitor
                     active={isRecording && !isPaused}
-                    className="mx-4 min-w-[16rem]"
+                    className="border-t border-slate-100 px-2 pt-2 pb-1"
                   />
                 </>
               )}
