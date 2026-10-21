@@ -52,6 +52,8 @@ interface SummaryPanelProps {
   getSummaryStatusMessage: (status: 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error') => string;
   availableTemplates: TemplateInfo[];
   selectedTemplate: string;
+  defaultTemplateId?: string | null;
+  onSetDefaultTemplate?: (templateId: string, templateName: string) => void;
   onTemplateSelect: (templateId: string, templateName: string) => void;
   isModelConfigLoading?: boolean;
   onOpenModelSettings?: (openFn: () => void) => void;
@@ -86,6 +88,8 @@ export function SummaryPanel({
   getSummaryStatusMessage,
   availableTemplates,
   selectedTemplate,
+  defaultTemplateId = null,
+  onSetDefaultTemplate,
   onTemplateSelect,
   isModelConfigLoading = false,
   onOpenModelSettings,
@@ -269,6 +273,8 @@ export function SummaryPanel({
               summaryStatus={summaryStatus}
               availableTemplates={availableTemplates}
               selectedTemplate={selectedTemplate}
+              defaultTemplateId={defaultTemplateId}
+              onSetDefaultTemplate={onSetDefaultTemplate}
               onTemplateSelect={onTemplateSelect}
               hasTranscripts={transcripts.length > 0}
               hasSummary={hasSummary}

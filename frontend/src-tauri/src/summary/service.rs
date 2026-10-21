@@ -1,5 +1,6 @@
 use crate::database::repositories::{
     meeting::MeetingsRepository, setting::SettingsRepository, summary::SummaryProcessesRepository,
+    transcript::TranscriptsRepository,
 };
 use crate::summary::llm_client::LLMProvider;
 use crate::summary::language_detection::detect_summary_language;
@@ -553,6 +554,12 @@ impl SummaryService {
         // nouns survive into the notes with the spelling the user expects.
         let dictionary = crate::dictionary::load_dictionary(&_app);
 
+        let meeting_duration_minutes = TranscriptsRepository::meeting_duration_seconds(&pool, &meeting_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|seconds| seconds / 60.0);
+
         let result = generate_meeting_summary(
             &client,
             &provider,
@@ -574,6 +581,7 @@ impl SummaryService {
             detected_summary_language.as_deref(),
             cached_english.as_deref(),
             &dictionary,
+            meeting_duration_minutes,
         )
         .await;
 
@@ -856,6 +864,7 @@ mod tests {
             description: "Test template".to_string(),
             detail_level: None,
             granularity: None,
+            length_bands: None,
             sections: vec![crate::summary::templates::TemplateSection {
                 title: section_title.to_string(),
                 instruction: "Summarize this section".to_string(),

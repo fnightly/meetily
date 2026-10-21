@@ -19,12 +19,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Plus, Pencil, Copy, Trash2, ChevronUp, ChevronDown, ArrowLeft } from "lucide-react";
+import { Plus, Pencil, Copy, Trash2, ChevronUp, ChevronDown, ArrowLeft, Star } from "lucide-react";
 import { toast } from "sonner";
 import type {
   TemplateDetailLevel,
   TemplateGranularity,
   TemplateInfo,
+  TemplateLengthBand,
   TemplateSectionPayload,
 } from "@/hooks/meeting-details/useTemplates";
 
@@ -54,6 +55,11 @@ const GRANULARITIES: Array<{ value: TemplateGranularity; label: string }> = [
   { value: "fine", label: "Fine — every point, decision and owner" },
 ];
 
+interface LengthBandDraft {
+  upToMinutes: string;
+  targetWords: string;
+}
+
 interface SectionDraft {
   title: string;
   instruction: string;
@@ -68,6 +74,7 @@ interface TemplateDraft {
   description: string;
   detailLevel: TemplateDetailLevel;
   granularity: TemplateGranularity;
+  lengthBands: LengthBandDraft[];
   sections: SectionDraft[];
 }
 
@@ -82,6 +89,7 @@ function emptyDraft(): TemplateDraft {
     description: "",
     detailLevel: "standard",
     granularity: "balanced",
+    lengthBands: [{ upToMinutes: "30", targetWords: "500" }],
     sections: [emptySection()],
   };
 }
@@ -95,6 +103,7 @@ export interface TemplateManagerModalProps {
     description: string;
     detail_level?: TemplateDetailLevel | null;
     granularity?: TemplateGranularity | null;
+    length_bands?: TemplateLengthBand[] | null;
     sections: TemplateSectionPayload[];
   }>;
   saveTemplate: (params: {
@@ -103,11 +112,14 @@ export interface TemplateManagerModalProps {
     description: string;
     detail_level?: TemplateDetailLevel | null;
     granularity?: TemplateGranularity | null;
+    length_bands?: TemplateLengthBand[] | null;
     sections: TemplateSectionPayload[];
     overwrite?: boolean;
   }) => Promise<{ id: string; overwritten: boolean }>;
   duplicateTemplate: (id: string, newName?: string) => Promise<{ id: string }>;
   deleteTemplate: (id: string) => Promise<void>;
+  defaultTemplateId?: string | null;
+  onSetDefaultTemplate?: (id: string, name: string) => void;
   getCustomTemplatesDir: () => Promise<string>;
 }
 
@@ -119,6 +131,8 @@ export function TemplateManagerModal({
   saveTemplate,
   duplicateTemplate,
   deleteTemplate,
+  defaultTemplateId = null,
+  onSetDefaultTemplate,
   getCustomTemplatesDir,
 }: TemplateManagerModalProps) {
   const [draft, setDraft] = useState<TemplateDraft | null>(null);
@@ -156,6 +170,10 @@ export function TemplateManagerModal({
           description: full.description,
           detailLevel: full.detail_level ?? "standard",
           granularity: full.granularity ?? "balanced",
+          lengthBands: (full.length_bands ?? []).map((band) => ({
+            upToMinutes: band.up_to_minutes == null ? "" : String(band.up_to_minutes),
+            targetWords: String(band.target_words),
+          })),
           sections:
             full.sections.length > 0
               ? full.sections.map((s) => ({
@@ -261,6 +279,22 @@ export function TemplateManagerModal({
       return setError(`Section ${emptyIndex + 1} needs both a title and an instruction.`);
     }
 
+    const lengthBands: TemplateLengthBand[] = [];
+    for (const [index, band] of draft.lengthBands.entries()) {
+      const targetWords = Number(band.targetWords);
+      if (!Number.isFinite(targetWords) || targetWords <= 0) {
+        return setError(`Length target ${index + 1} needs a positive word count.`);
+      }
+      let upToMinutes: number | null = null;
+      if (band.upToMinutes.trim()) {
+        upToMinutes = Number(band.upToMinutes);
+        if (!Number.isFinite(upToMinutes) || upToMinutes <= 0) {
+          return setError(`Length target ${index + 1} needs a positive minute limit or an empty limit.`);
+        }
+      }
+      lengthBands.push({ up_to_minutes: upToMinutes, target_words: Math.round(targetWords) });
+    }
+
     setBusy(true);
     setError(null);
     try {
@@ -270,6 +304,7 @@ export function TemplateManagerModal({
         description,
         detail_level: draft.detailLevel,
         granularity: draft.granularity,
+        length_bands: lengthBands.length > 0 ? lengthBands : null,
         sections,
         // Editing an existing custom template replaces it; creating never does.
         overwrite: draft.id !== null,
@@ -336,12 +371,30 @@ export function TemplateManagerModal({
                       >
                         {t.is_custom ? "Custom" : "Built-in"}
                       </span>
+                      {defaultTemplateId === t.id && (
+                        <span className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">
+                          <Star className="w-3 h-3" />
+                          Default
+                        </span>
+                      )}
                     </div>
                     <p className="text-xs text-gray-600 mt-1">{t.description}</p>
                     <p className="text-[10px] text-gray-400 font-mono mt-1">{t.id}</p>
                   </div>
 
                   <div className="flex items-center gap-1 shrink-0">
+                    {onSetDefaultTemplate && defaultTemplateId !== t.id && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        title="Set as default template"
+                        aria-label={'Set ' + t.name + ' as default template'}
+                        disabled={busy}
+                        onClick={() => onSetDefaultTemplate(t.id, t.name)}
+                      >
+                        <Star className="w-4 h-4" />
+                      </Button>
+                    )}
                     {t.is_custom && (
                       <Button
                         variant="outline"
@@ -488,6 +541,79 @@ export function TemplateManagerModal({
                   </SelectContent>
                 </Select>
               </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <Label>Length targets by meeting duration</Label>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    setDraft({
+                      ...draft,
+                      lengthBands: [...draft.lengthBands, { upToMinutes: "", targetWords: "800" }],
+                    })
+                  }
+                >
+                  <Plus className="w-4 h-4 mr-2" />
+                  Add target
+                </Button>
+              </div>
+              {draft.lengthBands.map((band, index) => (
+                <div key={index} className="grid items-end gap-2 rounded-lg border bg-gray-50 p-2 sm:grid-cols-[1fr_1fr_auto]">
+                  <div className="space-y-1">
+                    <Label className="text-[11px] text-gray-500">Up to minutes</Label>
+                    <Input
+                      value={band.upToMinutes}
+                      inputMode="numeric"
+                      placeholder="30 — blank means longer meetings"
+                      onChange={(e) =>
+                        setDraft({
+                          ...draft,
+                          lengthBands: draft.lengthBands.map((item, itemIndex) =>
+                            itemIndex === index ? { ...item, upToMinutes: e.target.value } : item,
+                          ),
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-[11px] text-gray-500">Target words</Label>
+                    <Input
+                      value={band.targetWords}
+                      inputMode="numeric"
+                      placeholder="500"
+                      onChange={(e) =>
+                        setDraft({
+                          ...draft,
+                          lengthBands: draft.lengthBands.map((item, itemIndex) =>
+                            itemIndex === index ? { ...item, targetWords: e.target.value } : item,
+                          ),
+                        })
+                      }
+                    />
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    title="Remove length target"
+                    aria-label={'Remove length target ' + (index + 1)}
+                    disabled={draft.lengthBands.length <= 1}
+                    onClick={() =>
+                      setDraft({
+                        ...draft,
+                        lengthBands: draft.lengthBands.filter((_, itemIndex) => itemIndex !== index),
+                      })
+                    }
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </Button>
+                </div>
+              ))}
+              <p className="text-[11px] text-gray-500">
+                Use one band per duration range; leave the last minute limit blank to cover longer meetings.
+              </p>
             </div>
 
             <div className="space-y-3">

@@ -20,7 +20,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Sparkles, Settings, Loader2, FileText, Check, Square, SlidersHorizontal } from 'lucide-react';
 import { TemplateManagerModal } from './TemplateManagerModal';
-import type { TemplateInfo } from '@/hooks/meeting-details/useTemplates';
+import type { SaveTemplateResult, TemplateFull, TemplateInfo } from '@/hooks/meeting-details/useTemplates';
 import { useState, useEffect, ReactNode } from 'react';
 
 export interface SummaryGeneratorButtonGroupProps {
@@ -42,16 +42,21 @@ export interface SummaryGeneratorButtonGroupProps {
   isModelConfigLoading?: boolean;
   onOpenModelSettings?: (openFn: () => void) => void;
   /** Template management (optional: the selector still works without it). */
+  defaultTemplateId?: string | null;
+  onSetDefaultTemplate?: (id: string, name: string) => void;
   templateActions?: {
-    loadTemplate: (id: string) => Promise<{ name: string; description: string; sections: Array<{ title: string; instruction: string; format: string; item_format?: string | null }> }>;
+    loadTemplate: (id: string) => Promise<TemplateFull>;
     saveTemplate: (params: {
       templateId?: string | null;
       name: string;
       description: string;
-      sections: Array<{ title: string; instruction: string; format: string; item_format?: string | null }>;
+      detail_level?: TemplateFull['detail_level'];
+      granularity?: TemplateFull['granularity'];
+      length_bands?: TemplateFull['length_bands'];
+      sections: TemplateFull['sections'];
       overwrite?: boolean;
-    }) => Promise<{ id: string; overwritten: boolean }>;
-    duplicateTemplate: (id: string, newName?: string) => Promise<{ id: string }>;
+    }) => Promise<SaveTemplateResult>;
+    duplicateTemplate: (id: string, newName?: string) => Promise<SaveTemplateResult>;
     deleteTemplate: (id: string) => Promise<void>;
     getCustomTemplatesDir: () => Promise<string>;
   };
@@ -73,6 +78,8 @@ export function SummaryGeneratorButtonGroup({
   isModelConfigLoading = false,
   onOpenModelSettings,
   templateActions,
+  defaultTemplateId = null,
+  onSetDefaultTemplate,
   recommendedTemplate = null,
   languageSlot
 }: SummaryGeneratorButtonGroupProps) {
@@ -244,6 +251,8 @@ export function SummaryGeneratorButtonGroup({
           saveTemplate={templateActions.saveTemplate}
           duplicateTemplate={templateActions.duplicateTemplate}
           deleteTemplate={templateActions.deleteTemplate}
+          defaultTemplateId={defaultTemplateId}
+          onSetDefaultTemplate={onSetDefaultTemplate}
           getCustomTemplatesDir={templateActions.getCustomTemplatesDir}
         />
       )}

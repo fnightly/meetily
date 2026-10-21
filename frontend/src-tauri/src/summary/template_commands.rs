@@ -1,4 +1,4 @@
-use crate::summary::templates::{self, Template, TemplateSection};
+use crate::summary::templates::{self, Template, TemplateLengthBand, TemplateSection};
 use serde::{Deserialize, Serialize};
 use tauri::Runtime;
 use tracing::{info, warn};
@@ -155,6 +155,7 @@ pub async fn api_save_template<R: Runtime>(
     description: String,
     detail_level: Option<String>,
     granularity: Option<String>,
+    length_bands: Option<Vec<TemplateLengthBand>>,
     sections: Vec<TemplateSectionInput>,
     overwrite: Option<bool>,
 ) -> Result<SaveTemplateResult, String> {
@@ -170,6 +171,7 @@ pub async fn api_save_template<R: Runtime>(
         description,
         detail_level,
         granularity,
+        length_bands,
         sections: sections
             .into_iter()
             .map(|s| TemplateSection {
@@ -237,6 +239,7 @@ pub async fn api_duplicate_template<R: Runtime>(
         description: source.description.clone(),
         detail_level: source.detail_level.clone(),
         granularity: source.granularity.clone(),
+        length_bands: source.length_bands.clone(),
         sections: source.sections.clone(),
     };
 

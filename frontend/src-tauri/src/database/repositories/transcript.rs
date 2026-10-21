@@ -82,6 +82,18 @@ impl TranscriptsRepository {
         Ok(meeting_id)
     }
 
+    pub async fn meeting_duration_seconds(
+        pool: &SqlitePool,
+        meeting_id: &str,
+    ) -> Result<Option<f64>, SqlxError> {
+        sqlx::query_scalar::<_, Option<f64>>(
+            "SELECT MAX(audio_end_time) FROM transcripts WHERE meeting_id = ?",
+        )
+        .bind(meeting_id)
+        .fetch_one(pool)
+        .await
+    }
+
     /// How many matching transcripts one search returns.
     ///
     /// The library search only needs the matching meeting ids (and a snippet), so

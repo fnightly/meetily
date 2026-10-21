@@ -654,6 +654,7 @@ pub(crate) async fn generate_meeting_summary(
     detected_transcript_language: Option<&str>,
     cached_english: Option<&str>,
     dictionary: &crate::dictionary::UserDictionary,
+    meeting_duration_minutes: Option<f64>,
 ) -> Result<GeneratedMeetingSummary, String> {
     if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
         return Err("Summary generation was cancelled".to_string());
@@ -776,12 +777,12 @@ pub(crate) async fn generate_meeting_summary(
             info!("Generating final markdown report with template: {}", template_id);
             let final_system_prompt = if native_chinese {
                 super::chinese::chinese_final_report_system_prompt(
-                    &template.to_section_instructions(),
+                    &template.to_section_instructions_with_length(meeting_duration_minutes),
                     &template.to_markdown_structure(),
                 )
             } else {
                 build_final_report_system_prompt_in(
-                    &template.to_section_instructions(),
+                    &template.to_section_instructions_with_length(meeting_duration_minutes),
                     &template.to_markdown_structure(),
                     direct_language,
                 )

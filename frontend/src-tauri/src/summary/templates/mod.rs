@@ -49,7 +49,7 @@ pub use loader::{
     set_bundled_templates_dir, slugify_template_id, unique_template_id,
     validate_and_parse_template, validate_template_id,
 };
-pub use types::{Template, TemplateSection};
+pub use types::{Template, TemplateLengthBand, TemplateSection};
 
 #[cfg(test)]
 mod tests {

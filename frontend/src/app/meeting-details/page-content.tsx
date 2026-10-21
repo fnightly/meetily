@@ -369,6 +369,8 @@ export default function PageContent({
               getSummaryStatusMessage={summaryGeneration.getSummaryStatusMessage}
               availableTemplates={templates.availableTemplates}
               selectedTemplate={templates.selectedTemplate}
+              defaultTemplateId={templates.defaultTemplateId}
+              onSetDefaultTemplate={templates.setDefaultTemplate}
               onTemplateSelect={templates.handleTemplateSelection}
               templateActions={{
                 loadTemplate: templates.loadTemplate,
