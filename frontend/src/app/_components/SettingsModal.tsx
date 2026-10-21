@@ -7,6 +7,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { toast } from "sonner";
 import { useConfig } from "@/contexts/ConfigContext";
 import { useRecordingState } from "@/contexts/RecordingStateContext";
+import { useI18n } from "@/contexts/I18nContext";
 import { tr } from '@/lib/i18n';
 
 type modalType = "modelSettings" | "deviceSettings" | "languageSettings" | "modelSelector" | "errorAlert" | "chunkDropWarning";
@@ -40,6 +41,7 @@ export function SettingsModals({
   messages,
   onClose,
 }: SettingsModalsProps) {
+  const { t } = useI18n();
   // Contexts
   const {
     modelConfig,
@@ -85,7 +87,7 @@ export function SettingsModals({
 
             {/* Divider */}
             <div className="border-t pt-8">
-              <h4 className="text-lg font-semibold text-gray-900 mb-4">AI Model Configuration</h4>
+              <h4 className="text-lg font-semibold text-gray-900 mb-4">{t('settings.aiModelConfiguration')}</h4>
               <div className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -127,13 +129,13 @@ export function SettingsModals({
                 </div>
                 {modelConfig.provider === 'ollama' && (
                   <div>
-                    <h4 className="text-lg font-bold mb-4">Available Ollama Models</h4>
+                    <h4 className="text-lg font-bold mb-4">{t('model.ollamaModels')}</h4>
                     {error && (
                       <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
                         {error}
                       </div>
                     )}
-                    <div role="radiogroup" aria-label="Ollama models" className="grid gap-4 max-h-[400px] overflow-y-auto pr-2">
+                    <div role="radiogroup" aria-label={t('model.ollamaModels')} className="grid gap-4 max-h-[400px] overflow-y-auto pr-2">
                       {models.map((model) => (
                         <div
                           key={model.id}

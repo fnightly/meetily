@@ -7,7 +7,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
-import { TranscriptUpdate, Transcript } from '@/types';
+import { TranscriptHistorySegment, TranscriptUpdate } from '@/types';
 
 export interface TranscriptionStatus {
   chunks_in_queue: number;
@@ -33,10 +33,10 @@ export interface ModelDownloadCompletePayload {
 export class TranscriptService {
   /**
    * Get transcript history from backend (for reload sync)
-   * @returns Promise<Transcript[]>
+   * @returns Promise<TranscriptHistorySegment[]>
    */
-  async getTranscriptHistory(): Promise<Transcript[]> {
-    return invoke<Transcript[]>('get_transcript_history');
+  async getTranscriptHistory(): Promise<TranscriptHistorySegment[]> {
+    return invoke<TranscriptHistorySegment[]>('get_transcript_history');
   }
 
   /**

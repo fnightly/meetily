@@ -104,9 +104,9 @@ export function RecordingsLibrary({ onChanged }: RecordingsLibraryProps) {
   const [exportIds, setExportIds] = useState<string[] | null>(null);
   const [exportTitle, setExportTitle] = useState<string | undefined>(undefined);
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
-  // Deleting a row from the unified library should remove the row, so the meeting
-  // record goes with the audio by default; unchecking keeps the notes.
-  const [deleteMeetingsToo, setDeleteMeetingsToo] = useState(true);
+  // Deleting the recording is the explicit action; removing the meeting row (and
+  // with it the notes/transcript) is opt-in, so the checkbox starts unchecked.
+  const [deleteMeetingsToo, setDeleteMeetingsToo] = useState(false);
   const [batchBusy, setBatchBusy] = useState(false);
   /** Folder whose inline audio player is expanded; only one at a time. */
   const [previewFolder, setPreviewFolder] = useState<string | null>(null);

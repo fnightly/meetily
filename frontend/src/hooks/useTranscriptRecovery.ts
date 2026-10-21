@@ -167,12 +167,14 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         text: t.text,
         timestamp: t.timestamp,
         sequence_id: t.sequenceId || index,
-        chunk_start_time: (t as any).chunk_start_time,
-        is_partial: (t as any).is_partial || false,
+        // StoredTranscript keeps the recording-relative timing under its own
+        // field names; older crash files may not have them, hence the fallbacks.
+        chunk_start_time: t.audio_start_time ?? 0,
+        is_partial: false,
         confidence: t.confidence,
-        audio_start_time: (t as any).audio_start_time,
-        audio_end_time: (t as any).audio_end_time,
-        duration: (t as any).duration,
+        audio_start_time: t.audio_start_time ?? 0,
+        audio_end_time: t.audio_end_time ?? 0,
+        duration: t.duration ?? 0,
       }));
 
       // 6. Save to backend database using existing save utilities

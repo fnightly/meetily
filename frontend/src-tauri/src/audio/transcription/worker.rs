@@ -312,7 +312,7 @@ pub fn start_transcription_task<R: Runtime>(
                             let should_log_this_chunk = chunk.chunk_id % 10 == 0;
 
                             if should_log_this_chunk {
-                                info!(
+                                debug!(
                                     "👷 Worker {} processing chunk {} with {} samples",
                                     worker_id,
                                     chunk.chunk_id,
@@ -356,12 +356,12 @@ pub fn start_transcription_task<R: Runtime>(
                                         None => "N/A".to_string(),
                                     };
 
-                                    info!("🔍 Worker {} transcription result: text='{}', confidence={}, partial={}",
+                                    debug!("🔍 Worker {} transcription result: text='{}', confidence={}, partial={}",
                 worker_id, transcript, confidence_str, is_partial);
 
                                     if should_emit_transcript(&transcript) {
                                         // PERFORMANCE: Only log transcription results, not every processing step
-                                        info!("✅ Worker {} transcribed: {} (confidence: {}, partial: {})",
+                                        debug!("✅ Worker {} transcribed: {} (confidence: {}, partial: {})",
                                               worker_id, transcript, confidence_str, is_partial);
 
                                         // Emit speech-detected event for frontend UX (only on first detection per session)
@@ -370,7 +370,7 @@ pub fn start_transcription_task<R: Runtime>(
                                         // flip the latch for the recording that replaced it.
                                         let current_flag = SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst);
                                         let is_live_session = crate::audio::recording_commands::is_current_session(&session_id_clone);
-                                        info!("🔍 Checking speech-detected flag: current={}, live_session={}", current_flag, is_live_session);
+                                        debug!("🔍 Checking speech-detected flag: current={}, live_session={}", current_flag, is_live_session);
 
                                         if !current_flag && is_live_session {
                                             SPEECH_DETECTED_EMITTED.store(true, Ordering::SeqCst);
@@ -381,7 +381,7 @@ pub fn start_transcription_task<R: Runtime>(
                                                 Err(e) => error!("🎤 ❌ Failed to emit speech-detected event: {}", e),
                                             }
                                         } else {
-                                            info!("🔍 Speech already detected in this session, not re-emitting");
+                                            debug!("🔍 Speech already detected in this session, not re-emitting");
                                         }
 
                                         // Generate sequence ID and calculate timestamps FIRST
@@ -436,7 +436,7 @@ pub fn start_transcription_task<R: Runtime>(
                                     match e {
                                         TranscriptionError::AudioTooShort { .. } => {
                                             // Skip silently, this is expected for very short chunks
-                                            info!("Worker {}: {}", worker_id, e);
+                                            debug!("Worker {}: {}", worker_id, e);
                                             chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
                                             note_chunk_finished();
                                             continue;
@@ -463,7 +463,7 @@ pub fn start_transcription_task<R: Runtime>(
 
                             // PERFORMANCE: Only log progress every 5th chunk to reduce I/O overhead
                             if completed % 5 == 0 || should_log_this_chunk {
-                                info!(
+                                debug!(
                                     "Worker {}: Progress {}/{} chunks ({:.1}%)",
                                     worker_id,
                                     completed,
@@ -524,7 +524,7 @@ pub fn start_transcription_task<R: Runtime>(
         while let Some(chunk) = receiver.recv().await {
             let queued = chunks_queued.fetch_add(1, Ordering::SeqCst) + 1;
             note_chunk_started();
-            info!(
+            debug!(
                 "📥 Dispatching chunk {} to workers (total queued: {})",
                 chunk.chunk_id, queued
             );

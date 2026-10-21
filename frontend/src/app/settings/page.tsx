@@ -56,7 +56,6 @@ function SettingsContent() {
       try {
         const config = await configService.getTranscriptConfig();
         if (config) {
-          console.log('Loaded saved transcript config:', config);
           setTranscriptModelConfig({
             provider: config.provider || 'localWhisper',
             model: config.model || 'large-v3',

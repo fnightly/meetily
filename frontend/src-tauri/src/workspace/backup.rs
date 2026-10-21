@@ -122,8 +122,7 @@ fn add_dir_to_zip<W: Write + std::io::Seek>(
 
 async fn media_folders(pool: &SqlitePool) -> Result<Vec<String>, sqlx::Error> {
     let mut folders: Vec<String> = sqlx::query_as::<_, (String,)>(
-        "SELECT folder_path FROM meetings WHERE folder_path IS NOT NULL AND folder_path != ''
-         UNION SELECT folder_path FROM recordings WHERE folder_path IS NOT NULL AND folder_path != ''",
+        "SELECT folder_path FROM meetings WHERE folder_path IS NOT NULL AND folder_path != ''",
     )
     .fetch_all(pool)
     .await?
@@ -309,15 +308,12 @@ pub async fn rewrite_paths(
     let opts = sqlx::sqlite::SqliteConnectOptions::new().filename(staged_db);
     let pool = SqlitePool::connect_with(opts).await.map_err(|e| format!("无法打开备份数据库：{e}"))?;
     for (old, new) in folders {
-        for sql in [
-            "UPDATE meetings SET folder_path = ? WHERE folder_path = ?",
-            "UPDATE recordings SET folder_path = ? WHERE folder_path = ?",
-        ] {
-            sqlx::query(sql).bind(new).bind(old).execute(&pool).await.map_err(|e| e.to_string())?;
-        }
-        sqlx::query("UPDATE recordings SET file_path = ? || substr(file_path, length(?) + 1) WHERE substr(file_path, 1, length(?)) = ?")
-            .bind(new).bind(old).bind(old).bind(old)
-            .execute(&pool).await.map_err(|e| e.to_string())?;
+        sqlx::query("UPDATE meetings SET folder_path = ? WHERE folder_path = ?")
+            .bind(new)
+            .bind(old)
+            .execute(&pool)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     if let Some(old_notes) = old_notes_root.filter(|o| *o != new_notes_root) {
         sqlx::query("UPDATE meeting_notes SET notes_markdown = replace(notes_markdown, ?, ?), notes_json = replace(notes_json, ?, ?)")

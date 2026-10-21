@@ -170,12 +170,10 @@ export function useRecordingStart(
   // Handle manual recording start (from button click)
   const handleRecordingStart = useCallback(async () => {
     if (isStartingRef.current) {
-      console.log('handleRecordingStart ignored - start already in progress');
       return;
     }
     isStartingRef.current = true;
     try {
-      console.log('handleRecordingStart called - checking selected transcription model status');
 
       // Check the selected transcription model before starting.
       const modelReady = await checkModelReady();
@@ -203,7 +201,6 @@ export function useRecordingStart(
         return;
       }
 
-      console.log('Selected transcription model ready - setting up meeting title and state');
 
       const randomTitle = generateMeetingTitle();
       setMeetingTitle(randomTitle);
@@ -212,18 +209,15 @@ export function useRecordingStart(
       setStatus(RecordingStatus.STARTING, 'Initializing recording...');
 
       // Start the actual backend recording
-      console.log('Starting backend recording with meeting:', randomTitle);
       await recordingService.startRecordingWithDevices(
         selectedDevices?.micDevice || null,
         selectedDevices?.systemDevice || null,
         randomTitle,
         selectedWindow?.process_id ?? null
       );
-      console.log('Backend recording started successfully');
 
       // Update state after successful backend start
       // Note: RECORDING status will be set by RecordingStateContext event listener
-      console.log('Setting isRecordingState to true');
       setIsRecording(true); // This will also update the sidebar via the useEffect
       clearTranscripts(); // Clear previous transcripts when starting new recording
       setIsMeetingActive(true);
@@ -267,7 +261,6 @@ export function useRecordingStart(
       if (typeof window !== 'undefined') {
         const shouldAutoStart = sessionStorage.getItem('autoStartRecording');
         if (shouldAutoStart === 'true' && !isRecording && !isAutoStarting) {
-          console.log('Auto-starting recording from navigation...');
           setIsAutoStarting(true);
           sessionStorage.removeItem('autoStartRecording'); // Clear the flag
 
@@ -305,14 +298,12 @@ export function useRecordingStart(
             // Set STARTING status before initiating backend recording
             setStatus(RecordingStatus.STARTING, 'Initializing recording...');
 
-            console.log('Auto-starting backend recording with meeting:', generatedMeetingTitle);
             const result = await recordingService.startRecordingWithDevices(
               selectedDevices?.micDevice || null,
               selectedDevices?.systemDevice || null,
               generatedMeetingTitle,
               selectedWindow?.process_id ?? null
             );
-            console.log('Auto-start backend recording result:', result);
 
             // Update UI state after successful backend start
             // Note: RECORDING status will be set by RecordingStateContext event listener
@@ -366,11 +357,9 @@ export function useRecordingStart(
   useEffect(() => {
     const handleDirectStart = async () => {
       if (isRecording || isAutoStarting) {
-        console.log('Recording already in progress, ignoring direct start event');
         return;
       }
 
-      console.log('Direct start from sidebar - checking selected transcription model status');
       setIsAutoStarting(true);
 
       // Check the selected transcription model before starting.
@@ -406,14 +395,12 @@ export function useRecordingStart(
         // Set STARTING status before initiating backend recording
         setStatus(RecordingStatus.STARTING, 'Initializing recording...');
 
-        console.log('Starting backend recording with meeting:', generatedMeetingTitle);
         const result = await recordingService.startRecordingWithDevices(
           selectedDevices?.micDevice || null,
           selectedDevices?.systemDevice || null,
           generatedMeetingTitle,
           selectedWindow?.process_id ?? null
         );
-        console.log('Backend recording result:', result);
 
         // Update UI state after successful backend start
         // Note: RECORDING status will be set by RecordingStateContext event listener

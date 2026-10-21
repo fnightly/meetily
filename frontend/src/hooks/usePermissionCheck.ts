@@ -32,7 +32,7 @@ export function usePermissionCheck() {
       const outputDevices = devices.filter(d => d.device_type === 'Output');
       const hasSystemAudio = outputDevices.length > 0;
 
-      console.log('Permission check:', {
+      console.debug('Permission check:', {
         hasMicrophone,
         hasSystemAudio,
         inputDevices: inputDevices.length,

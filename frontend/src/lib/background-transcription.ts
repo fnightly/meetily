@@ -194,6 +194,18 @@ const recordingOptions = new Map<string, RecordingOptions>();
 const importRequests = new Map<string, ImportRequest>();
 /** meeting id -> folder, set before the start so an early event still matches. */
 const meetingToFolder = new Map<string, string>();
+/** Bound for stale mappings in a long-lived window (crashed/cancelled jobs). */
+const MAX_MEETING_FOLDER_ENTRIES = 100;
+
+/** Remember a session's folder, evicting the oldest mapping beyond the cap. */
+function rememberMeetingFolder(meetingId: string, folderPath: string) {
+  meetingToFolder.set(meetingId, folderPath);
+  while (meetingToFolder.size > MAX_MEETING_FOLDER_ENTRIES) {
+    const oldest = meetingToFolder.keys().next().value;
+    if (oldest === undefined) break;
+    meetingToFolder.delete(oldest);
+  }
+}
 const cancelledFolders = new Set<string>();
 /** Guards against starting the same item twice while its start is in flight. */
 const startingFolders = new Set<string>();
@@ -269,7 +281,7 @@ export function enqueueTranscription(requests: TranscribeRequest[]) {
       language: request.language !== undefined ? request.language : previous?.language,
       summarize: request.summarize ?? false,
     });
-    if (request.meetingId) meetingToFolder.set(request.meetingId, request.folderPath);
+    if (request.meetingId) rememberMeetingFolder(request.meetingId, request.folderPath);
     dispatchRecording({ type: 'enqueue', folderPath: request.folderPath, meetingId: request.meetingId ?? null });
   }
 }
@@ -366,6 +378,11 @@ function settleRecording(folderPath: string, event: TranscriptionQueueEvent) {
     errorMessage: after.errorMessage,
   });
 
+  // The job is settled: drop its per-run bookkeeping so a long session does not
+  // accumulate one entry per finished recording.
+  recordingOptions.delete(folderPath);
+  if (after.meetingId) meetingToFolder.delete(after.meetingId);
+
   if (recordings.order.length === 0) {
     void finishRun('transcribe');
     return;
@@ -419,7 +436,7 @@ async function runRecording(folderPath: string) {
       recordings = transcriptionQueueReducer(recordings, { type: 'resolved', folderPath, meetingId });
       publish();
     }
-    meetingToFolder.set(meetingId, folderPath);
+    rememberMeetingFolder(meetingId, folderPath);
     if (isCancelled()) throw new Cancelled();
 
     const args = {

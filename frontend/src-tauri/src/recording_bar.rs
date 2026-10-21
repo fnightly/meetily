@@ -14,7 +14,10 @@ const BAR_WIDTH: f64 = 320.0;
 const BAR_HEIGHT: f64 = 56.0;
 const BAR_TOP_MARGIN: f64 = 48.0;
 
-/// Whether the main window currently has focus. Starts true: the app opens in front.
+/// Last known main-window focus, used only when the window is not available yet.
+/// Starts true: the app opens in front. `apply` prefers the window's real state, so
+/// a recording started while the main window is already in the background still
+/// shows the bar even though no focus event has been delivered.
 static MAIN_FOCUSED: AtomicBool = AtomicBool::new(true);
 
 /// Serialises window creation so two quick syncs cannot both build it.
@@ -51,7 +54,14 @@ pub fn sync<R: Runtime>(app: &AppHandle<R>) {
 
 fn apply<R: Runtime>(app: &AppHandle<R>) {
     let recording = crate::audio::recording_commands::is_recording_now();
-    let should_show = recording && !MAIN_FOCUSED.load(Ordering::SeqCst);
+    // Ask the main window instead of relying on the last focus event: `recording-started`
+    // can arrive while the window has been in the background since before the
+    // recording started, in which case the atomic still says focused.
+    let focused = app
+        .get_webview_window("main")
+        .and_then(|main| main.is_focused().ok())
+        .unwrap_or_else(|| MAIN_FOCUSED.load(Ordering::SeqCst));
+    let should_show = recording && !focused;
 
     let _guard = WINDOW_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 

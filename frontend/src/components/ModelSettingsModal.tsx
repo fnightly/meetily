@@ -1242,7 +1242,7 @@ export function ModelSettingsModal({
               onClick={() => setIsEndpointSectionCollapsed(!isEndpointSectionCollapsed)}
               className="flex w-full items-center justify-between cursor-pointer rounded py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50"
             >
-              <span className="text-sm font-medium leading-none">Custom Endpoint (optional)</span>
+              <span className="text-sm font-medium leading-none">{t('model.customEndpoint')}</span>
               {isEndpointSectionCollapsed ? (
                 <ChevronDown className="h-4 w-4 text-muted-foreground" aria-hidden />
               ) : (
@@ -1317,10 +1317,10 @@ export function ModelSettingsModal({
         {modelConfig.provider === 'ollama' && (
           <div>
             <div className="flex items-center justify-between mb-4">
-              <h4 className="text-sm font-bold">Available Ollama Models</h4>
+              <h4 className="text-sm font-bold">{t('model.ollamaModels')}</h4>
               {lastFetchedEndpoint && models.length > 0 && (
                 <div className="flex items-center gap-2 text-sm">
-                  <span className="text-muted-foreground">Using:</span>
+                  <span className="text-muted-foreground">{t('model.using')}</span>
                   <code className="px-2 py-1 bg-muted rounded text-xs">
                     {lastFetchedEndpoint || 'http://localhost:11434'}
                   </code>
@@ -1428,7 +1428,7 @@ export function ModelSettingsModal({
                     </AlertDescription>
                   </Alert>
                 ) : (
-                  <div role="radiogroup" aria-label="Ollama models" className="grid gap-4">
+                  <div role="radiogroup" aria-label={t('model.ollamaModels')} className="grid gap-4">
                     {filteredModels.map((model) => {
                       const progress = getProgress(model.name);
                       const modelIsDownloading = isDownloading(model.name);

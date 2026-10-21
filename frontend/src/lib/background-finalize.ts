@@ -77,6 +77,8 @@ export function segmentsToTranscripts(segments: FinalizedSegment[]): Transcript[
 export function createFinalizedRegistry() {
   const results = new Map<string, FinalizedRecording>();
   const waiters = new Map<string, (result: FinalizedRecording | null) => void>();
+  /** Unclaimed results only matter until the matching stop handler looks; keep few. */
+  const MAX_UNCLAIMED_RESULTS = 8;
 
   return {
     deliver(result: FinalizedRecording) {
@@ -86,6 +88,11 @@ export function createFinalizedRegistry() {
         waiter(result);
       } else {
         results.set(result.session_id, result);
+        while (results.size > MAX_UNCLAIMED_RESULTS) {
+          const oldest = results.keys().next().value;
+          if (oldest === undefined) break;
+          results.delete(oldest);
+        }
       }
     },
 
@@ -153,6 +160,18 @@ export const FINALIZE_WAIT_MS = 20 * 60 * 1000;
 const registry = createFinalizedRegistry();
 const queue = createSerialQueue();
 const finishedSessions = new Set<string>();
+/** Late transcript updates only matter while a stop/finalize is in flight. */
+const MAX_FINISHED_SESSIONS = 64;
+
+/** Remember a finished session id, evicting the oldest beyond the cap. */
+function rememberFinishedSession(sessionId: string) {
+  finishedSessions.add(sessionId);
+  while (finishedSessions.size > MAX_FINISHED_SESSIONS) {
+    const oldest = finishedSessions.values().next().value;
+    if (!oldest) break;
+    finishedSessions.delete(oldest);
+  }
+}
 let lastStopped: StoppedRecording | null = null;
 const stoppedWaiters: Array<(stopped: StoppedRecording) => void> = [];
 let listenersReady: Promise<void> | null = null;
@@ -166,7 +185,7 @@ export function ensureRecordingSessionListeners(): Promise<void> {
     listenersReady = (async () => {
       await listen<StoppedRecording>('recording-stopped', (event) => {
         const payload = event.payload ?? {};
-        if (payload.session_id) finishedSessions.add(payload.session_id);
+        if (payload.session_id) rememberFinishedSession(payload.session_id);
         const waiter = stoppedWaiters.shift();
         if (waiter) waiter(payload);
         else lastStopped = payload;

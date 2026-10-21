@@ -213,6 +213,90 @@ fn normalize_folder(path: &str) -> String {
     path.trim().replace('\\', "/").trim_end_matches('/').to_string()
 }
 
+/// Decide whether a destructive operation may act on a recording folder.
+///
+/// The filesystem guard only proves "this directory looks like a recording";
+/// without this check a folder anywhere on disk that merely contains a planted
+/// metadata.json could be renamed, moved or deleted through the command surface.
+/// A folder is allowed only when it resolves inside the configured recordings
+/// root, or when the database still lists it as a meeting folder (recordings
+/// moved outside the root keep working).
+fn destructive_target_is_allowed(
+    canonical_target: &Path,
+    supplied_folder_path: &str,
+    recordings_root: Option<&Path>,
+    known_folder_paths: &[String],
+) -> bool {
+    if let Some(root) = recordings_root {
+        if canonical_target.starts_with(root) {
+            return true;
+        }
+    }
+
+    let supplied_normalized = normalize_folder(supplied_folder_path);
+
+    known_folder_paths.iter().any(|stored| {
+        // Compare resolved paths first (both sides canonicalised), then fall back
+        // to a normalized string match for rows whose folder is gone or whose
+        // spelling differs only in separators/trailing slash.
+        std::fs::canonicalize(stored)
+            .map(|resolved| resolved == canonical_target)
+            .unwrap_or(false)
+            || normalize_folder(stored) == supplied_normalized
+    })
+}
+
+/// Canonical preflight for the destructive recording commands.
+///
+/// Fails closed: a database error or an unresolvable path refuses the operation.
+async fn ensure_destructive_target_is_allowed<R: Runtime>(
+    app: &AppHandle<R>,
+    pool: &sqlx::SqlitePool,
+    supplied_folder_path: &str,
+    target: &Path,
+) -> Result<(), String> {
+    let canonical_target = target.canonicalize().map_err(|e| {
+        format!(
+            "Cannot resolve recording folder '{}': {}",
+            target.display(),
+            e
+        )
+    })?;
+
+    let recordings_root =
+        match super::recording_preferences::load_recording_preferences(app).await {
+            Ok(prefs) => prefs.save_folder.canonicalize().ok(),
+            Err(error) => {
+                log::warn!(
+                    "Could not load recording preferences while guarding a destructive operation: {}",
+                    error
+                );
+                None
+            }
+        };
+
+    let known_folder_paths: Vec<String> = sqlx::query_scalar::<_, String>(
+        "SELECT folder_path FROM meetings WHERE folder_path IS NOT NULL AND folder_path != ''",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to verify the recording's meeting: {}", e))?;
+
+    if destructive_target_is_allowed(
+        &canonical_target,
+        supplied_folder_path,
+        recordings_root.as_deref(),
+        &known_folder_paths,
+    ) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Refusing to change '{}': it is neither inside the recordings folder nor linked to a meeting",
+            target.display()
+        ))
+    }
+}
+
 /// Resolve the audio file inside a saved recording folder.
 ///
 /// Meeting details already knows the folder but not the encoder's file name
@@ -410,13 +494,21 @@ pub async fn rename_recording_on_disk(
 /// Writes the new title into `metadata.json` and renames the folder and audio
 /// file, preserving the folder's time stamp so ordering survives the rename.
 #[tauri::command]
-pub async fn rename_saved_recording(
+pub async fn rename_saved_recording<R: Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     folder_path: String,
     new_title: String,
 ) -> Result<RecordingMutationResult, String> {
     let original_path = folder_path.clone();
-    let original_folder = PathBuf::from(&folder_path);
+    let original_folder = require_recording_folder(&folder_path)?;
+    ensure_destructive_target_is_allowed(
+        &app,
+        state.db_manager.pool(),
+        &folder_path,
+        &original_folder,
+    )
+    .await?;
     // Snapshot what exists today so a failed database update can be undone: the
     // folder name changes on disk before the row is updated, and leaving the two
     // out of step would strand the meeting at a path that no longer exists.
@@ -461,12 +553,16 @@ pub async fn rename_saved_recording(
 
 /// Delete a recording from disk.
 #[tauri::command]
-pub async fn delete_saved_recording(
+pub async fn delete_saved_recording<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
     folder_path: String,
 ) -> Result<RecordingMutationResult, String> {
-    tokio::task::spawn_blocking(move || {
-        let path = require_recording_folder(&folder_path)?;
+    let path = require_recording_folder(&folder_path)?;
+    ensure_destructive_target_is_allowed(&app, state.db_manager.pool(), &folder_path, &path)
+        .await?;
 
+    tokio::task::spawn_blocking(move || {
         let freed = folder_size_bytes(&path);
         let name = path
             .file_name()
@@ -502,6 +598,8 @@ pub async fn move_saved_recording<R: Runtime>(
 
     let original_path = folder_path.clone();
     let source = require_recording_folder(&folder_path)?;
+    ensure_destructive_target_is_allowed(&app, state.db_manager.pool(), &folder_path, &source)
+        .await?;
 
     let destination = match destination {
         Some(value) if !value.trim().is_empty() => PathBuf::from(value.trim()),
@@ -1008,5 +1106,92 @@ mod tests {
             original.join("audio.m4a").is_file(),
             "an existing folder must never be overwritten"
         );
+    }
+
+    #[test]
+    fn a_planted_recording_outside_the_root_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("recordings");
+        std::fs::create_dir_all(&root).expect("create root");
+
+        // A folder that looks exactly like a recording but lives elsewhere, with
+        // no meeting row naming it: this is what a crafted IPC call would pass.
+        let planted = make_recording(tmp.path(), "Planted_2026-01-01_10-00");
+        let canonical_root = root.canonicalize().expect("canonical root");
+        let canonical_planted = planted.canonicalize().expect("canonical planted");
+
+        assert!(
+            !destructive_target_is_allowed(
+                &canonical_planted,
+                &planted.to_string_lossy(),
+                Some(&canonical_root),
+                &[],
+            ),
+            "a recording-shaped folder outside the root and unknown to the DB must be refused"
+        );
+    }
+
+    #[test]
+    fn a_recording_inside_the_configured_root_is_allowed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("recordings");
+        std::fs::create_dir_all(&root).expect("create root");
+        let recording = make_recording(&root, "Inside_2026-01-01_10-00");
+        let canonical_root = root.canonicalize().expect("canonical root");
+        let canonical_recording = recording.canonicalize().expect("canonical recording");
+
+        assert!(destructive_target_is_allowed(
+            &canonical_recording,
+            &recording.to_string_lossy(),
+            Some(&canonical_root),
+            &[],
+        ));
+    }
+
+    #[test]
+    fn a_recording_moved_outside_the_root_is_allowed_when_a_meeting_names_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("recordings");
+        std::fs::create_dir_all(&root).expect("create root");
+        let canonical_root = root.canonicalize().expect("canonical root");
+
+        let moved = make_recording(tmp.path(), "Moved_2026-01-01_10-00");
+        let canonical_moved = moved.canonicalize().expect("canonical moved");
+        let known = vec![moved.to_string_lossy().to_string()];
+
+        assert!(
+            destructive_target_is_allowed(
+                &canonical_moved,
+                &moved.to_string_lossy(),
+                Some(&canonical_root),
+                &known,
+            ),
+            "a moved recording must stay actionable while a meeting names it"
+        );
+
+        // A second, unlisted folder next to it is still refused.
+        let other = make_recording(tmp.path(), "Other_2026-01-01_10-00");
+        let canonical_other = other.canonicalize().expect("canonical other");
+        assert!(!destructive_target_is_allowed(
+            &canonical_other,
+            &other.to_string_lossy(),
+            Some(&canonical_root),
+            &known,
+        ));
+    }
+
+    #[test]
+    fn the_db_fallback_ignores_separator_and_trailing_slash_differences() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let recording = make_recording(tmp.path(), "Legacy_2026-01-01_10-00");
+        let canonical_recording = recording.canonicalize().expect("canonical recording");
+        let stored = recording.to_string_lossy().replace('\\', "/") + "/";
+
+        assert!(destructive_target_is_allowed(
+            &canonical_recording,
+            &recording.to_string_lossy(),
+            None,
+            &[stored],
+        ));
     }
 }

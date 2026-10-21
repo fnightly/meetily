@@ -805,10 +805,27 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         return abort_cancelled_start(&app).await;
     }
     finalize_recording_start();
+
+    // A stop can land in the gap between going live and publishing the session:
+    // it flips IS_RECORDING false (or marks this starting guard cancelled) and
+    // emits recording-stopped. Bail out before registering the transcript listener,
+    // spawning process capture, or emitting recording-started.
+    if starting_guard.cancelled() || !IS_RECORDING.load(Ordering::SeqCst) {
+        warn!("Recording stopped during the start tail; skipping post-start events");
+        return Ok(());
+    }
+
     drop(engine_lifecycle_guard);
 
     // Start the transcription task and per-session transcript collection
     start_session_transcription(&app, transcription_receiver, defer_transcription_session);
+
+    // Last check before announcing: a stop that completed while the listener was
+    // being registered must not be followed by recording-started.
+    if starting_guard.cancelled() || !IS_RECORDING.load(Ordering::SeqCst) {
+        warn!("Recording stopped during the start tail; not emitting recording-started");
+        return Ok(());
+    }
 
     let mut device_labels: Vec<&str> = Vec::new();
     if capture_microphone {
@@ -1136,6 +1153,16 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         return abort_cancelled_start(&app).await;
     }
     finalize_recording_start();
+
+    // A stop can land in the gap between going live and publishing the session:
+    // it flips IS_RECORDING false (or marks this starting guard cancelled) and
+    // emits recording-stopped. Bail out before registering the transcript listener,
+    // spawning process capture, or emitting recording-started.
+    if starting_guard.cancelled() || !IS_RECORDING.load(Ordering::SeqCst) {
+        warn!("Recording stopped during the start tail; skipping post-start events");
+        return Ok(());
+    }
+
     drop(engine_lifecycle_guard);
 
     // Only after the session is live: the capture thread's loop condition is the
@@ -1161,6 +1188,13 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     // Start the transcription task and per-session transcript collection
     start_session_transcription(&app, transcription_receiver, defer_transcription_session);
+
+    // Last check before announcing: a stop that completed while the listener was
+    // being registered must not be followed by recording-started.
+    if starting_guard.cancelled() || !IS_RECORDING.load(Ordering::SeqCst) {
+        warn!("Recording stopped during the start tail; not emitting recording-started");
+        return Ok(());
+    }
 
     let mut device_labels: Vec<String> = Vec::new();
     if capture_microphone {
@@ -1216,6 +1250,12 @@ pub async fn stop_recording<R: Runtime>(
             return Ok(());
         }
         info!("Stop raced with start completion; stopping the live session");
+    }
+
+    // The start path is still publishing itself (finalize -> recording-started):
+    // mark it so it does not announce a session this stop is already tearing down.
+    if IS_RECORDING_STARTING.load(Ordering::SeqCst) {
+        START_CANCELLED.store(true, Ordering::SeqCst);
     }
 
     // Mark the stop as in progress so a mic-disconnect fallback that was queued

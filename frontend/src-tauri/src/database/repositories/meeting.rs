@@ -272,6 +272,123 @@ mod tests {
             (MAX_TRANSCRIPTS_PAGE_LIMIT, 0)
         );
     }
+
+    /// In-memory schema with one row in every meeting-scoped table for two
+    /// meetings, so a delete can be checked for both cleanup and over-deletion.
+    async fn pool_with_child_rows() -> sqlx::SqlitePool {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory database");
+
+        for statement in [
+            "CREATE TABLE meetings (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, folder_path TEXT)",
+            "CREATE TABLE transcripts (meeting_id TEXT NOT NULL)",
+            "CREATE TABLE transcript_chunks (meeting_id TEXT NOT NULL)",
+            "CREATE TABLE summary_processes (meeting_id TEXT NOT NULL)",
+            "CREATE TABLE meeting_notes (meeting_id TEXT NOT NULL)",
+            "CREATE TABLE meeting_tags (meeting_id TEXT NOT NULL, tag TEXT NOT NULL)",
+            "CREATE TABLE meeting_speakers (meeting_id TEXT NOT NULL, speaker TEXT NOT NULL)",
+            "CREATE TABLE meeting_projects (meeting_id TEXT NOT NULL, project TEXT NOT NULL)",
+            "CREATE TABLE action_items (id TEXT NOT NULL, meeting_id TEXT)",
+            "CREATE TABLE action_item_imports (meeting_id TEXT NOT NULL)",
+        ] {
+            sqlx::query(statement)
+                .execute(&pool)
+                .await
+                .expect("create table");
+        }
+
+        for meeting_id in ["m1", "m2"] {
+            for (statement, extra) in [
+                (
+                    "INSERT INTO meetings (id, title, created_at, updated_at) VALUES (?, 'title', 'now', 'now')",
+                    false,
+                ),
+                ("INSERT INTO transcripts (meeting_id) VALUES (?)", false),
+                ("INSERT INTO transcript_chunks (meeting_id) VALUES (?)", false),
+                ("INSERT INTO summary_processes (meeting_id) VALUES (?)", false),
+                ("INSERT INTO meeting_notes (meeting_id) VALUES (?)", false),
+                (
+                    "INSERT INTO meeting_tags (meeting_id, tag) VALUES (?, 'tag')",
+                    false,
+                ),
+                (
+                    "INSERT INTO meeting_speakers (meeting_id, speaker) VALUES (?, 'speaker_1')",
+                    false,
+                ),
+                (
+                    "INSERT INTO meeting_projects (meeting_id, project) VALUES (?, 'project')",
+                    false,
+                ),
+                (
+                    "INSERT INTO action_items (id, meeting_id) VALUES (?, ?)",
+                    true,
+                ),
+                ("INSERT INTO action_item_imports (meeting_id) VALUES (?)", false),
+            ] {
+                let mut query = sqlx::query(statement).bind(meeting_id);
+                if extra {
+                    query = query.bind(meeting_id);
+                }
+                query.execute(&pool).await.expect("insert child row");
+            }
+        }
+
+        pool
+    }
+
+    async fn count_for(pool: &sqlx::SqlitePool, table: &str, meeting_id: &str) -> i64 {
+        let (count,): (i64,) =
+            sqlx::query_as(&format!("SELECT COUNT(*) FROM {table} WHERE meeting_id = ?"))
+                .bind(meeting_id)
+                .fetch_one(pool)
+                .await
+                .expect("count rows");
+        count
+    }
+
+    #[tokio::test]
+    async fn delete_meeting_removes_every_child_row_explicitly() {
+        let pool = pool_with_child_rows().await;
+
+        assert!(
+            MeetingsRepository::delete_meeting(&pool, "m1")
+                .await
+                .expect("delete meeting"),
+            "the meeting existed and must be reported deleted"
+        );
+
+        const CHILD_TABLES: &[&str] = &[
+            "transcripts",
+            "transcript_chunks",
+            "summary_processes",
+            "meeting_notes",
+            "meeting_tags",
+            "meeting_speakers",
+            "meeting_projects",
+            "action_items",
+            "action_item_imports",
+        ];
+
+        for table in CHILD_TABLES {
+            assert_eq!(
+                count_for(&pool, table, "m1").await,
+                0,
+                "{table} still has rows for the deleted meeting"
+            );
+            assert_eq!(
+                count_for(&pool, table, "m2").await,
+                1,
+                "{table} lost a row of another meeting"
+            );
+        }
+
+        let (meetings,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM meetings")
+            .fetch_one(&pool)
+            .await
+            .expect("count meetings");
+        assert_eq!(meetings, 1, "only the deleted meeting row may be gone");
+    }
 }
 
 async fn delete_meeting_with_transaction(
@@ -308,7 +425,41 @@ async fn delete_meeting_with_transaction(
         .execute(&mut *transaction)
         .await?;
 
-    // 4. Finally, delete the meeting
+    // 4. Workspace and notes data. The schema also declares ON DELETE CASCADE for
+    // these tables, but deleting them explicitly keeps the operation correct if
+    // foreign-key enforcement is ever off (a maintenance connection, a future
+    // default change) instead of silently orphaning the rows.
+    sqlx::query("DELETE FROM meeting_notes WHERE meeting_id = ?")
+        .bind(meeting_id)
+        .execute(&mut *transaction)
+        .await?;
+
+    sqlx::query("DELETE FROM meeting_tags WHERE meeting_id = ?")
+        .bind(meeting_id)
+        .execute(&mut *transaction)
+        .await?;
+
+    sqlx::query("DELETE FROM meeting_speakers WHERE meeting_id = ?")
+        .bind(meeting_id)
+        .execute(&mut *transaction)
+        .await?;
+
+    sqlx::query("DELETE FROM meeting_projects WHERE meeting_id = ?")
+        .bind(meeting_id)
+        .execute(&mut *transaction)
+        .await?;
+
+    sqlx::query("DELETE FROM action_items WHERE meeting_id = ?")
+        .bind(meeting_id)
+        .execute(&mut *transaction)
+        .await?;
+
+    sqlx::query("DELETE FROM action_item_imports WHERE meeting_id = ?")
+        .bind(meeting_id)
+        .execute(&mut *transaction)
+        .await?;
+
+    // 5. Finally, delete the meeting
     let result = sqlx::query("DELETE FROM meetings WHERE id = ?")
         .bind(meeting_id)
         .execute(&mut *transaction)

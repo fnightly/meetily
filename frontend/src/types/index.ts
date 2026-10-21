@@ -132,6 +132,22 @@ export interface OllamaModelResponse {
   name: string;
 }
 
+/**
+ * One segment returned by `get_transcript_history` (Rust
+ * `audio::recording_saver::TranscriptSegment`), used to rebuild the live view
+ * after a reload without losing playback timing.
+ */
+export interface TranscriptHistorySegment {
+  id: string;
+  text: string;
+  audio_start_time: number;
+  audio_end_time: number;
+  duration: number;
+  display_time: string;
+  confidence: number;
+  sequence_id: number;
+}
+
 export type SummaryProcessStatus =
   | 'pending'
   | 'processing'

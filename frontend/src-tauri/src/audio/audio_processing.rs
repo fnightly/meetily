@@ -901,6 +901,33 @@ mod tests {
     }
 
     #[test]
+    fn streaming_resampler_44k1_to_16k_has_the_expected_length_and_tone() {
+        // 44.1 kHz is the other common capture rate (Bluetooth/USB devices). The
+        // 44.1 -> 16 ratio is not an integer, so this covers the non-2:1 path that
+        // the 48 kHz tests above cannot.
+        let mut resampler = StreamingResampler::new(44_100, 16_000).expect("resampler");
+        let input = sine(1_000.0, 44_100, 1.0, 0.5);
+
+        let mut output = resampler.push(&input);
+        output.extend(resampler.finish());
+
+        assert!(
+            (output.len() as i64 - 16_000).abs() <= 1,
+            "expected ~16000 output samples, got {}",
+            output.len()
+        );
+
+        let input_rms = rms(&input);
+        let output_rms = rms(&output);
+        assert!(
+            (output_rms / input_rms - 1.0).abs() < 0.05,
+            "1 kHz tone level changed too much: {} -> {}",
+            input_rms,
+            output_rms
+        );
+    }
+
+    #[test]
     fn streaming_resampler_preserves_a_passband_tone_without_seams() {
         let mut resampler = StreamingResampler::new(48_000, 16_000).expect("resampler");
         let input = sine(1_000.0, 48_000, 1.0, 0.5);

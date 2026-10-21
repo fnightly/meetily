@@ -686,14 +686,14 @@ impl AudioCapture {
                     0
                 };
 
-                info!(
+                debug!(
                     "🔄 [{:?}] Persistent buffered resampler: {}Hz → {}Hz (ratio: {:.2}x)",
                     self.device_type,
                     self.sample_rate,
                     TARGET_SAMPLE_RATE,
                     ratio
                 );
-                info!(
+                debug!(
                     "   Chunk {}: {} → {} samples, RMS preservation: {:.1}%, buffer: {}",
                     chunk_id,
                     before_len,
@@ -1246,7 +1246,7 @@ impl AudioPipeline {
                     // PERFORMANCE: Check for flush signal (special chunk with ID >= u64::MAX - 10)
                     // Multiple flush signals may be sent to ensure processing
                     if chunk.chunk_id >= u64::MAX - 10 {
-                        info!("📥 Received FLUSH signal #{} - flushing VAD processor", u64::MAX - chunk.chunk_id);
+                        perf_debug!("📥 Received FLUSH signal #{} - flushing VAD processor", u64::MAX - chunk.chunk_id);
                         self.flush_remaining_audio()?;
                         // Continue processing to handle any remaining chunks
                         continue;
@@ -1358,7 +1358,7 @@ impl AudioPipeline {
 
                     // Send segments >= 50ms (800 samples at 16kHz) - matches main pipeline filter
                     if segment.samples.len() >= 800 {
-                        info!("📤 Sending final VAD segment to Whisper: {:.1}ms duration, {} samples",
+                        debug!("📤 Sending final VAD segment to Whisper: {:.1}ms duration, {} samples",
                               duration_ms, segment.samples.len());
 
                         let transcription_chunk = AudioChunk {
@@ -1375,7 +1375,7 @@ impl AudioPipeline {
                             self.chunk_id_counter += 1;
                         }
                     } else {
-                        info!("⏭️ Skipping short final segment: {:.1}ms ({} samples < 800)",
+                        debug!("⏭️ Skipping short final segment: {:.1}ms ({} samples < 800)",
                               duration_ms, segment.samples.len());
                     }
                 }

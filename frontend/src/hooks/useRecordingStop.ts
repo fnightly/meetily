@@ -142,7 +142,6 @@ export function useRecordingStop(
           'get_recording_preferences',
         );
         if (!prefs?.cleanup_after_recording) {
-          console.log('Transcript cleanup is disabled; keeping the raw transcript');
           return segments;
         }
       } catch (error) {
@@ -159,7 +158,6 @@ export function useRecordingStop(
         }>('cleanup_transcript', { text: joined });
 
         if (!outcome.applied || !outcome.cleaned) {
-          if (outcome.skipped) console.log(`Transcript cleanup skipped: ${outcome.skipped}`);
           return segments;
         }
 
@@ -201,7 +199,6 @@ export function useRecordingStop(
         const kept = cleanedSegments.filter((segment) => segment.text.length > 0);
         if (kept.length === 0) return segments;
 
-        console.log(`Transcript cleanup applied: ${segments.length} -> ${kept.length} segments`);
         return kept;
       } catch (error) {
         console.error('Transcript cleanup failed; keeping the raw transcript:', error);
@@ -258,10 +255,6 @@ export function useRecordingStop(
         return;
       }
 
-      console.log('Recording stopped; finishing in the background', {
-        session_id: sessionId,
-        on_screen_transcripts: onScreenTranscripts.length,
-      });
 
       const toastId = `finalize-${sessionId ?? Date.now()}`;
       toast.loading(tr('toast.finishingRecording', { name: titleAtStop }), {
@@ -343,12 +336,6 @@ export function useRecordingStop(
       // the user never sees the raw version replaced afterwards.
       freshTranscripts = await applyTranscriptCleanup(freshTranscripts);
 
-      console.log('💾 Saving COMPLETE transcripts to database...', {
-        session_id: sessionId,
-        transcript_count: freshTranscripts.length,
-        meeting_name: meetingName,
-        folder_path: folderPath,
-      });
 
       // In deferred mode the meeting is saved even though it has no transcript rows:
       // without a meeting record the audio on disk is unreachable from the UI, so it
@@ -384,7 +371,6 @@ export function useRecordingStop(
         }
       }
 
-      console.log('✅ Successfully saved COMPLETE meeting with ID:', meetingId);
 
       // Mark this recording's recovery entry as saved (not whichever is current now)
       await markMeetingAsSaved(recoveryMeetingId);
