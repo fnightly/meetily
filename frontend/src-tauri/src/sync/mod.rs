@@ -10,5 +10,6 @@
 
 pub mod commands;
 pub mod notion;
+pub mod notion_audio;
 pub mod obsidian;
 pub mod settings;

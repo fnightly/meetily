@@ -576,7 +576,11 @@ fn plain_text(items: &[RichTextItem]) -> Option<String> {
     }
 }
 
-fn request(
+/// Request builder with Notion's auth and version headers, but no content type.
+///
+/// File-upload calls set their own Content-Type (JSON or multipart), so the JSON
+/// default from request() must not be applied to them.
+pub(crate) fn authorized_request(
     client: &reqwest::Client,
     method: reqwest::Method,
     url: &str,
@@ -586,7 +590,15 @@ fn request(
         .request(method, url)
         .header("Authorization", format!("Bearer {token}"))
         .header("Notion-Version", NOTION_VERSION)
-        .header("Content-Type", "application/json")
+}
+
+fn request(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: &str,
+    token: &str,
+) -> reqwest::RequestBuilder {
+    authorized_request(client, method, url, token).header("Content-Type", "application/json")
 }
 
 /// Map a failed response onto a message that says what to change.
@@ -648,7 +660,7 @@ fn notion_error_message(
 /// Notion allows roughly three requests per second. A long transcript produces
 /// several append calls, so a 429 is expected rather than exceptional; retrying
 /// twice with `Retry-After` respects what Notion asked for.
-async fn execute<F>(build: F, database_id: Option<&str>) -> Result<Value, String>
+pub(crate) async fn execute<F>(build: F, database_id: Option<&str>) -> Result<Value, String>
 where
     F: Fn() -> reqwest::RequestBuilder,
 {

@@ -28,6 +28,11 @@ pub struct SyncNoteRequest {
     pub date: String,
     /// Complete Markdown from `buildMeetingMarkdown`.
     pub markdown: String,
+    /// When true, the meeting recording is uploaded and attached to the page.
+    ///
+    /// Defaulted so an older payload (and the Obsidian path) keeps working.
+    #[serde(default)]
+    pub include_audio: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -37,6 +42,11 @@ pub struct NotionSyncResult {
     pub blocks_written: usize,
     pub database_title: Option<String>,
     pub data_source_name: Option<String>,
+    /// True only when the audio was uploaded and attached to the page.
+    pub audio_uploaded: bool,
+    /// Why the audio was not uploaded, when the note itself still succeeded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_skipped_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -267,6 +277,25 @@ pub async fn notion_sync_meeting<R: Runtime>(
     let client = notion_client();
     let target = notion::discover_target(&client, &token, &database_id).await?;
 
+    // Prepare the audio before creating the page: an oversize or compression
+    // failure must not leave a page behind without the recording. A meeting with
+    // no audio yields a Skip, which is not an error and still syncs the note.
+    let prepared_audio = if request.include_audio {
+        let pool = database_pool(&app)?;
+        Some(
+            super::notion_audio::prepare_audio(
+                &pool,
+                &client,
+                &token,
+                &request.meeting_id,
+                title,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
     let first = chunks.next().unwrap_or_default();
     let page =
         notion::create_page(&client, &token, &target, title, first).await?;
@@ -285,11 +314,40 @@ pub async fn notion_sync_meeting<R: Runtime>(
             })?;
     }
 
+    let mut audio_uploaded = false;
+    let mut audio_skipped_reason = None;
+
+    if let Some(prepared) = prepared_audio {
+        match prepared {
+            super::notion_audio::PreparedAudio::Skip(reason) => {
+                log::info!("Notion audio not uploaded: {}", reason);
+                audio_skipped_reason = Some(reason);
+            }
+            upload @ super::notion_audio::PreparedAudio::Upload { .. } => {
+                let attachment = super::notion_audio::attach_prepared_audio(
+                    &client, &token, &page.id, upload,
+                )
+                .await;
+                audio_uploaded = attachment.uploaded;
+
+                if let Some(reason) = attachment.skipped_reason {
+                    // The page already exists: say so, or the user may sync again
+                    // and create a duplicate page.
+                    audio_skipped_reason = Some(format!(
+                        "The Notion page was created (id {}), but the audio could not be added: {}",
+                        page.id, reason
+                    ));
+                }
+            }
+        }
+    }
+
     log::info!(
-        "Notion sync created page {} with {} block(s) across {} request(s)",
+        "Notion sync created page {} with {} block(s) across {} request(s), audio uploaded: {}",
         page.id,
         total,
-        chunks_count(total)
+        chunks_count(total),
+        audio_uploaded
     );
 
     Ok(NotionSyncResult {
@@ -298,6 +356,8 @@ pub async fn notion_sync_meeting<R: Runtime>(
         blocks_written: total,
         database_title: target.database_title,
         data_source_name: target.data_source_name,
+        audio_uploaded,
+        audio_skipped_reason,
     })
 }
 

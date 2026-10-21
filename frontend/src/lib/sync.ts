@@ -41,6 +41,7 @@ export interface SyncNotePayload {
   title: string;
   date: string;
   markdown: string;
+  include_audio?: boolean;
 }
 
 export type ObsidianWriteStatus = 'created' | 'unchanged' | 'alternative';
@@ -59,6 +60,8 @@ export interface NotionSyncResult {
   blocks_written: number;
   database_title: string | null;
   data_source_name: string | null;
+  audio_uploaded?: boolean;
+  audio_skipped_reason?: string | null;
 }
 
 /** Mirrors `sync::commands::NotionTestResult`. */

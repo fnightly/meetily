@@ -77,6 +77,7 @@ export function SyncDialog({
   const [error, setError] = useState<SyncError | string | null>(null);
   const [result, setResult] = useState<SyncResult | null>(null);
   const [revealed, setRevealed] = useState(false);
+  const [includeNotionAudio, setIncludeNotionAudio] = useState(true);
 
   useEffect(() => {
     if (!open) return;
@@ -125,7 +126,10 @@ export function SyncDialog({
         const outcome = await syncMeetingToObsidian(note.payload);
         setResult({ target: 'obsidian', obsidian: outcome });
       } else {
-        const outcome = await syncMeetingToNotion(note.payload);
+        const outcome = await syncMeetingToNotion({
+          ...note.payload,
+          include_audio: includeNotionAudio,
+        });
         setResult({ target: 'notion', notion: outcome });
       }
     } catch (cause) {
@@ -235,6 +239,23 @@ export function SyncDialog({
                       })
                     : t('sync.notionNotConfigured')}
                 </p>
+                {notionConfigured && (
+                  <label className="mt-2 flex items-start gap-2 rounded-md border border-slate-200 bg-white/70 px-2.5 py-2 text-xs text-slate-600">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 h-4 w-4 accent-blue-600"
+                      checked={includeNotionAudio}
+                      disabled={busy}
+                      onChange={(event) => setIncludeNotionAudio(event.target.checked)}
+                    />
+                    <span>
+                      <span className="font-medium text-slate-700">{t('sync.includeAudio')}</span>
+                      <span className="mt-0.5 block text-[11px] text-slate-500">
+                        {t('sync.includeAudioHint')}
+                      </span>
+                    </span>
+                  </label>
+                )}
                 {notionConfigured ? (
                   <Button
                     size="sm"
@@ -312,6 +333,18 @@ export function SyncDialog({
                               blocks: result.notion.blocks_written,
                             })}
                     </p>
+                    {result.target === 'notion' && result.notion.audio_uploaded && (
+                      <p className="mt-1 text-xs font-medium text-green-800">
+                        {t('sync.audioUploaded')}
+                      </p>
+                    )}
+                    {result.target === 'notion'
+                      && result.notion.audio_uploaded === false
+                      && result.notion.audio_skipped_reason && (
+                        <p className="mt-1 text-xs text-amber-800">
+                          {t('sync.audioSkipped', { reason: result.notion.audio_skipped_reason })}
+                        </p>
+                      )}
                   </div>
                 </div>
 

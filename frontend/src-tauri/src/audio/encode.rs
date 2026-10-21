@@ -211,3 +211,83 @@ pub fn transcode_audio(
     Ok(())
 }
 
+/// Re-encode any audio file as mono AAC in an .m4a container at the given bitrate.
+///
+/// Used for size-limited uploads (Notion sync), where the recording's original
+/// format and bitrate can be far larger than the destination accepts. Mono keeps
+/// speech intelligible at the low bitrates such limits require.
+pub fn transcode_audio_to_mono_aac(
+    input: &std::path::Path,
+    output: &std::path::Path,
+    bitrate_kbps: u32,
+) -> anyhow::Result<()> {
+    if !input.exists() {
+        return Err(anyhow::anyhow!(
+            "Cannot compress audio: input file does not exist: {}",
+            input.display()
+        ));
+    }
+
+    let ffmpeg_path = find_ffmpeg_path().ok_or_else(|| {
+        anyhow::anyhow!("FFmpeg not found. Please install FFmpeg to sync recordings.")
+    })?;
+
+    let bitrate_arg = format!("{}k", bitrate_kbps);
+    debug!(
+        "Compressing {} -> {} (mono AAC, {} kbps)",
+        input.display(),
+        output.display(),
+        bitrate_kbps
+    );
+
+    let mut command = Command::new(&ffmpeg_path);
+    command
+        .arg("-hide_banner")
+        .arg("-y")
+        .arg("-i")
+        .arg(input)
+        .args(["-vn", "-ac", "1", "-c:a", "aac", "-b:a"])
+        .arg(&bitrate_arg)
+        .args([
+            "-profile:a",
+            "aac_low",
+            "-movflags",
+            "+faststart",
+            "-f",
+            "mp4",
+        ])
+        .arg(output)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let result = command
+        .output()
+        .map_err(|e| anyhow::anyhow!("Failed to run FFmpeg to compress the audio: {}", e))?;
+
+    if !result.status.success() {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        error!("FFmpeg audio compression failed: {}", stderr);
+        return Err(anyhow::anyhow!(
+            "Failed to compress the recording: {}",
+            stderr.trim()
+        ));
+    }
+
+    if !output.exists() {
+        return Err(anyhow::anyhow!(
+            "FFmpeg reported success but the compressed file was not created: {}",
+            output.display()
+        ));
+    }
+
+    Ok(())
+}
+
